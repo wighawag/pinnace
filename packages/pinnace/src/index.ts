@@ -15,3 +15,18 @@ export const PINNACE = 'pinnace';
 export function name(): string {
 	return PINNACE;
 }
+
+export {
+	KuboRpcClient,
+	KuboRpcError,
+	type KuboRpcClientOptions,
+	type FetchLike,
+	type FilesMkdirOptions,
+	type FilesRmOptions,
+	type NamePublishOptions,
+} from './rpc/kubo-rpc-client.js';
+export {
+	MockKuboApi,
+	type RecordedRequest,
+	type MockResponseSpec,
+} from './rpc/mock-kubo.js';
