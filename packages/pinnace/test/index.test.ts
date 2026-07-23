@@ -14,4 +14,15 @@ describe('pinnace cli seam', () => {
 		const code = await run(['version']);
 		expect(code).toEqual(0);
 	});
+
+	it('routes the on-box `node <verb>` namespace and accepts the four verbs', async () => {
+		for (const verb of ['republish', 'mirror', 'warm', 'status']) {
+			expect(await run(['node', verb])).toEqual(0);
+		}
+	});
+
+	it('rejects `node` with a missing or unknown verb (non-zero exit)', async () => {
+		expect(await run(['node'])).toEqual(1);
+		expect(await run(['node', 'frobnicate'])).toEqual(1);
+	});
 });

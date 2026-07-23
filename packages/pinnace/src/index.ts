@@ -52,3 +52,17 @@ export {
 	type ResolveConfigInput,
 	type ResolveMasterInput,
 } from './config/config-resolution.js';
+export {
+	runNodeCommand,
+	discoverSites,
+	NODE_VERBS,
+	type NodeVerb,
+	type NodeCommandContext,
+	type NodeCommandOps,
+	type NodeCommandResult,
+	type NodeOpResult,
+	type DiscoveredSite,
+	type SiteOutcome,
+	type PublisherFetch,
+	type GatewayFetch,
+} from './node/node-commands.js';
