@@ -31,6 +31,14 @@ export {
 	type MockResponseSpec,
 } from './rpc/mock-kubo.js';
 export {
+	deriveIpnsKey,
+	deriveIpnsId,
+	IPNS_INFO_PREFIX,
+	type Master,
+	type DeriveIpnsInput,
+	type DerivedIpnsKey,
+} from './derive/ipns-key-derivation.js';
+export {
 	resolveConfig,
 	resolveMasterSecret,
 	type PinnaceConfigFile,
