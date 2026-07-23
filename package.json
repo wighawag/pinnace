@@ -1,0 +1,26 @@
+{
+	"name": "pinnace-monorepo",
+	"private": true,
+	"type": "module",
+	"devDependencies": {
+		"@changesets/cli": "^2.29.8",
+		"ldenv": "^0.3.16",
+		"prettier": "^3.8.4"
+	},
+	"scripts": {
+		"preinstall": "npx only-allow pnpm",
+		"cleandep": "rm -rf node_modules && pnpm -r exec rm -rf node_modules",
+		"---------------------- VERIFY --------------------": "",
+		"changeset:check": "changeset status --since=main",
+		"---------------------- PUBLISH --------------------": "",
+		"prepublishOnly": "pnpm format:check && pnpm build",
+		"release": "pnpm prepublishOnly && git push --all && pnpm changeset publish && git push --tags",
+		"---------------------- FORMAT ----------------------": "",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"---------------------- DEV ----------------------": "",
+		"dev": "pnpm --filter './packages/*' dev",
+		"build": "pnpm --filter './packages/*' build",
+		"test": "pnpm --filter './packages/*' test"
+	}
+}
