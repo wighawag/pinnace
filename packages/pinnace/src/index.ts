@@ -30,3 +30,17 @@ export {
 	type RecordedRequest,
 	type MockResponseSpec,
 } from './rpc/mock-kubo.js';
+export {
+	resolveConfig,
+	resolveMasterSecret,
+	type PinnaceConfigFile,
+	type ResolvedConfig,
+	type HostConfig,
+	type SiteConfig,
+	type HostRole,
+	type SiteMode,
+	type EnvRecord,
+	type CliOverrides,
+	type ResolveConfigInput,
+	type ResolveMasterInput,
+} from './config/config-resolution.js';
