@@ -101,6 +101,14 @@ export {
 	type AddSiteResult,
 } from './site/site-management.js';
 export {
+	deploy,
+	type DeployInput,
+	type DeployTarget,
+	type DeployResult,
+	type DeployNodeOk,
+	type DeployNodeFailure,
+} from './deploy/deploy.js';
+export {
 	statusReport,
 	makeStatusOp,
 	defaultProvidersLookup,
