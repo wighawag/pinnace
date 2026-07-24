@@ -1,52 +1,516 @@
 /**
  * The CLI dispatch surface, separated from the executable shebang entry
- * (bin.ts) so it is unit-testable without spawning a process. It is a thin
- * wrapper: it reads args and calls the core, formatting the result.
+ * (bin.ts) so it is unit-testable without spawning a process. It is a THIN
+ * wrapper: it parses/validates args, resolves config (arg > env > file), calls
+ * the core, and formats the result. ALL behaviour lives in the core (CONTEXT.md
+ * `core vs cli`); nothing here re-implements domain logic.
+ *
+ * The client-facing verbs (provision, deploy, install-ci, status, derive) and
+ * the config/env layer dispatch through an injectable {@link RunContext} seam:
+ *  - {@link RunContext.deps} are the core functions each verb calls (defaults to
+ *    the real core; tests inject stubs to assert dispatch + resolved args),
+ *  - {@link RunContext.env} + {@link RunContext.loadConfigFile} are the env and
+ *    `pinnace.json` layers (defaults read the real `process.env` + file; tests
+ *    inject in-memory values so the operator's real environment/config is never
+ *    read or mutated — mirroring the `NodeCommandOps` injectable-ops pattern in
+ *    node-commands and the explicit-`env` resolver in config-resolution).
+ *
+ * The on-box `pinnace node <verb>` and the `pinnace site <verb>` namespaces are
+ * validated here for surface coherence (one CLI), but their full dispatch is
+ * wired by their own tasks (node-agent-commands, site-management).
  */
+import {readFileSync} from 'node:fs';
 import {name} from '../index.js';
 import {NODE_VERBS, type NodeVerb} from '../node/node-commands.js';
 import {SITE_VERBS, type SiteVerb} from '../site/site-management.js';
+import {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
+import {
+	provision as coreProvision,
+	type ProvisionInput,
+	type ProvisionResult,
+	type HostName,
+} from '../provision/cloud-init.js';
+import {
+	deploy as coreDeploy,
+	type DeployInput,
+	type DeployResult,
+	type DeployTarget,
+} from '../deploy/deploy.js';
+import {
+	emitCi as coreEmitCi,
+	type EmitCiInput,
+	type EmittedCi,
+	type CiSystem,
+} from '../ci/ci-emit.js';
+import {
+	statusReport as coreStatusReport,
+	type StatusReportInput,
+	type StatusReport,
+} from '../status/status-report.js';
+import {
+	deriveIpnsId as coreDeriveIpnsId,
+	type DeriveIpnsInput,
+} from '../derive/ipns-key-derivation.js';
+import {
+	resolveConfig,
+	resolveMasterSecret,
+	type PinnaceConfigFile,
+	type EnvRecord,
+	type CliOverrides,
+	type SiteMode,
+	type HostRole,
+} from '../config/config-resolution.js';
+
+/**
+ * The core functions the client verbs dispatch to. This seam is what makes the
+ * CLI a THIN wrapper AND independently testable: production wires the real core
+ * ({@link DEFAULT_DEPS}); tests inject recording stubs and assert each verb
+ * calls the RIGHT function with the correctly-resolved arguments (rather than
+ * re-testing the core through the CLI).
+ */
+export interface ClientDeps {
+	/** `provision` -> the cloud-init generator. */
+	provision(input: ProvisionInput): ProvisionResult;
+	/** `deploy` -> the multi-target CAR deploy. */
+	deploy(input: DeployInput): Promise<DeployResult>;
+	/** `install-ci` -> the CI workflow emitter. */
+	emitCi(input: EmitCiInput): EmittedCi;
+	/** `status` -> the per-site status report. */
+	statusReport(input: StatusReportInput): Promise<StatusReport>;
+	/** `derive` -> the master+keyId -> IPNS id derivation (no deploy). */
+	deriveIpnsId(input: DeriveIpnsInput): string;
+}
+
+/** The real core, used when a caller does not inject stubs. */
+const DEFAULT_DEPS: ClientDeps = {
+	provision: coreProvision,
+	deploy: coreDeploy,
+	emitCi: coreEmitCi,
+	statusReport: coreStatusReport,
+	deriveIpnsId: coreDeriveIpnsId,
+};
+
+/**
+ * The CLI run context: the injectable env/config/output/core seams. Everything
+ * is optional; omitted fields default to the real process environment, a real
+ * `pinnace.json` read, `console` sinks, and the real core. Tests pass explicit
+ * in-memory values to stay hermetic.
+ */
+export interface RunContext {
+	/** The env layer (defaults to `process.env`). Tests pass an in-memory record. */
+	env?: EnvRecord;
+	/**
+	 * Load the parsed `pinnace.json` (defaults to reading `./pinnace.json`, or an
+	 * empty config if absent). Tests pass an in-memory object.
+	 */
+	loadConfigFile?: () => PinnaceConfigFile;
+	/** The core functions to dispatch to (defaults to the real core). */
+	deps?: ClientDeps;
+	/** stdout sink (defaults to `console.log`). */
+	out?: (line: string) => void;
+	/** stderr sink (defaults to `console.error`). */
+	err?: (line: string) => void;
+}
+
+/** A resolved run context: every seam filled in with its default if omitted. */
+interface ResolvedRunContext {
+	env: EnvRecord;
+	file: PinnaceConfigFile;
+	deps: ClientDeps;
+	out: (line: string) => void;
+	err: (line: string) => void;
+}
+
+/** Read `./pinnace.json` if present; an absent/unreadable file is an empty config. */
+function defaultLoadConfigFile(): PinnaceConfigFile {
+	try {
+		return JSON.parse(
+			readFileSync('pinnace.json', 'utf8'),
+		) as PinnaceConfigFile;
+	} catch {
+		return {};
+	}
+}
+
+/** Fill in the run context defaults (real env/file/core/console) once. */
+function resolveContext(context: RunContext): ResolvedRunContext {
+	return {
+		env: context.env ?? (process.env as EnvRecord),
+		file: (context.loadConfigFile ?? defaultLoadConfigFile)(),
+		deps: context.deps ?? DEFAULT_DEPS,
+		out: context.out ?? ((line) => console.log(line)),
+		err: context.err ?? ((line) => console.error(line)),
+	};
+}
 
 /**
  * Dispatch a pinnace CLI invocation. Returns the process exit code.
  *
- * `version` is the scaffold stub; the `node` namespace routes the on-box verbs
- * (`pinnace node <verb>`). The real client verbs
- * (provision/deploy/install-ci/status/derive) wire over this same seam in
- * later tasks.
+ * Routes the client verbs (provision/deploy/install-ci/status/derive), the
+ * on-box `node` namespace, and the `site` namespace. A missing command is a
+ * benign no-op (exit 0); an UNKNOWN command is loud (exit 1) so the surface is
+ * an explicit allow-list, not a silent catch-all.
  */
-export async function run(argv: readonly string[]): Promise<number> {
+export async function run(
+	argv: readonly string[],
+	context: RunContext = {},
+): Promise<number> {
+	const rc = resolveContext(context);
 	const [command, ...rest] = argv;
+
+	if (command === undefined) {
+		rc.out(`${name()}: no command given`);
+		return 0;
+	}
 	if (command === 'version' || command === '--version' || command === '-v') {
-		console.log(name());
+		rc.out(name());
 		return 0;
 	}
 	if (command === 'node') {
-		return runNodeCli(rest);
+		return runNodeCli(rest, rc);
 	}
 	if (command === 'site') {
-		return runSiteCli(rest);
+		return runSiteCli(rest, rc);
 	}
-	console.log(`${name()}: no command given`);
+	if (command === 'provision') {
+		return runProvision(rest, rc);
+	}
+	if (command === 'deploy') {
+		return runDeploy(rest, rc);
+	}
+	if (command === 'install-ci') {
+		return runInstallCi(rest, rc);
+	}
+	if (command === 'status') {
+		return runStatus(rest, rc);
+	}
+	if (command === 'derive' || command === 'ipns-id') {
+		return runDerive(rest, rc);
+	}
+
+	rc.err(`${name()}: unknown command '${command}'`);
+	return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal arg parsing (flags + positionals). Kept tiny + local: the CLI is a
+// parse/format layer, so a full arg-parsing dependency would be over-weight.
+// ---------------------------------------------------------------------------
+
+/** A parsed argv split into `--flag value` map + bare positionals. */
+interface ParsedArgs {
+	flags: Record<string, string>;
+	positionals: string[];
+}
+
+/**
+ * Parse `--flag value` pairs and positionals. Flags are long-form only
+ * (`--host hetzner`); a `--flag` at the end with no value is treated as `''`.
+ * Positionals are everything that is not a flag or a flag value.
+ */
+function parseArgs(argv: readonly string[]): ParsedArgs {
+	const flags: Record<string, string> = {};
+	const positionals: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const token = argv[i];
+		if (token.startsWith('--')) {
+			const key = token.slice(2);
+			const next = argv[i + 1];
+			if (next !== undefined && !next.startsWith('--')) {
+				flags[key] = next;
+				i++;
+			} else {
+				flags[key] = '';
+			}
+		} else {
+			positionals.push(token);
+		}
+	}
+	return {flags, positionals};
+}
+
+// ---------------------------------------------------------------------------
+// Client verbs — each: parse/validate -> resolve config -> call core -> format.
+// ---------------------------------------------------------------------------
+
+/**
+ * `provision --host <h> --api-domain <d> --acme-email <e> --bearer-token <t>
+ * --role <r> [...]` -> core {@link ClientDeps.provision}. Purely arg-driven
+ * (provisioning inputs are per-box and not stored in `pinnace.json`); prints the
+ * generated cloud-init to stdout.
+ */
+function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
+	const {flags} = parseArgs(argv);
+	const host = flags['host'];
+	const apiDomain = flags['api-domain'];
+	const acmeEmail = flags['acme-email'];
+	const bearerToken = flags['bearer-token'];
+	const role = flags['role'];
+	const missing = missingFlags({
+		host,
+		'api-domain': apiDomain,
+		'acme-email': acmeEmail,
+		'bearer-token': bearerToken,
+		role,
+	});
+	if (missing.length > 0) {
+		rc.err(
+			`pinnace provision: missing required flag(s): ${missing.join(', ')}`,
+		);
+		return 1;
+	}
+	if (role !== 'publisher' && role !== 'replica') {
+		rc.err(`pinnace provision: --role must be 'publisher' or 'replica'`);
+		return 1;
+	}
+
+	const input: ProvisionInput = {
+		host: host as HostName,
+		apiDomain,
+		acmeEmail,
+		bearerToken,
+		role: role as HostRole,
+	};
+	if (flags['dashboard-domain'])
+		input.dashboardDomain = flags['dashboard-domain'];
+	if (flags['publisher-endpoint'])
+		input.publisherEndpoint = flags['publisher-endpoint'];
+
+	const result = rc.deps.provision(input);
+	rc.out(result.cloudInit.contents);
 	return 0;
+}
+
+/**
+ * `deploy [--mode <m>] <dir> <site>` -> core {@link ClientDeps.deploy}. Resolves
+ * every configured host into a {@link DeployTarget} (with its OWN token, via the
+ * config-resolution precedence arg > env > file), and the site's `mode` from the
+ * matching `pinnace.json` site entry (overridable with `--mode`). Prints the
+ * resulting CID / per-node breakdown.
+ */
+async function runDeploy(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
+	const {flags, positionals} = parseArgs(argv);
+	const [dir, siteName] = positionals;
+	if (!dir || !siteName) {
+		rc.err(
+			'pinnace deploy: usage: pinnace deploy [--mode ipfs|ipns] <dir> <site>',
+		);
+		return 1;
+	}
+
+	const cfg = resolveConfig({
+		file: rc.file,
+		env: rc.env,
+		cli: cliOverridesFromFlags(flags),
+	});
+
+	// The site's mode: --mode arg > matching site entry (config precedence).
+	const siteEntry = cfg.sites.find((s) => s.name === siteName);
+	const mode = (flags['mode'] as SiteMode | undefined) ?? siteEntry?.mode;
+	if (mode !== 'ipfs' && mode !== 'ipns') {
+		rc.err(
+			`pinnace deploy: mode for '${siteName}' is unset or invalid; pass --mode ipfs|ipns or add the site to pinnace.json`,
+		);
+		return 1;
+	}
+	if (cfg.hosts.length === 0) {
+		rc.err('pinnace deploy: no hosts configured (add hosts to pinnace.json)');
+		return 1;
+	}
+
+	const targets: DeployTarget[] = cfg.hosts.map((h) => ({
+		baseUrl: h.endpoint,
+		token: h.token,
+		role: h.role,
+	}));
+	const input: DeployInput = {sourceDir: dir, name: siteName, mode, targets};
+
+	const result = await rc.deps.deploy(input);
+	rc.out(`cid: ${result.cid}`);
+	for (const ok of result.ok) {
+		rc.out(
+			`  ok  ${ok.baseUrl}${ok.published && ok.ipns ? ` (ipns ${ok.ipns})` : ''}`,
+		);
+	}
+	for (const failure of result.failed) {
+		rc.err(`  FAIL ${failure.baseUrl}: ${failure.error.message}`);
+	}
+	return result.success ? 0 : 1;
+}
+
+/**
+ * `install-ci --system <s> --build-command <c> --output-dir <d> [--branch <b>]
+ * [--node-version <v>]` -> core {@link ClientDeps.emitCi}. Prints the workflow
+ * path/contents and reports the secrets/vars the operator must set.
+ */
+function runInstallCi(argv: readonly string[], rc: ResolvedRunContext): number {
+	const {flags} = parseArgs(argv);
+	const system = flags['system'];
+	const buildCommand = flags['build-command'];
+	const outputDir = flags['output-dir'];
+	const missing = missingFlags({
+		system,
+		'build-command': buildCommand,
+		'output-dir': outputDir,
+	});
+	if (missing.length > 0) {
+		rc.err(
+			`pinnace install-ci: missing required flag(s): ${missing.join(', ')}`,
+		);
+		return 1;
+	}
+
+	const input: EmitCiInput = {
+		system: system as CiSystem,
+		buildCommand,
+		outputDir,
+	};
+	if (flags['branch']) input.branch = flags['branch'];
+	if (flags['node-version']) input.nodeVersion = flags['node-version'];
+
+	const emitted = rc.deps.emitCi(input);
+	rc.out(`workflow: ${emitted.workflow.path}`);
+	rc.out(emitted.workflow.contents);
+	if (emitted.secrets.length > 0) {
+		rc.out('Required secrets (Settings -> Secrets):');
+		for (const s of emitted.secrets) rc.out(`  ${s.name} — ${s.description}`);
+	}
+	if (emitted.vars.length > 0) {
+		rc.out('Required variables (Settings -> Variables):');
+		for (const v of emitted.vars) rc.out(`  ${v.name} — ${v.description}`);
+	}
+	return 0;
+}
+
+/**
+ * `status` -> core {@link ClientDeps.statusReport}, once per configured host
+ * (each node reports its OWN sites). Builds each node's Kubo client from the
+ * resolved endpoint + token and prints the per-site report.
+ */
+async function runStatus(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
+	const {flags} = parseArgs(argv);
+	const cfg = resolveConfig({
+		file: rc.file,
+		env: rc.env,
+		cli: cliOverridesFromFlags(flags),
+	});
+	if (cfg.hosts.length === 0) {
+		rc.err('pinnace status: no hosts configured (add hosts to pinnace.json)');
+		return 1;
+	}
+
+	for (const host of cfg.hosts) {
+		const client = new KuboRpcClient({
+			baseUrl: host.endpoint,
+			token: host.token,
+		});
+		const report = await rc.deps.statusReport({client});
+		rc.out(`${host.name} (${host.endpoint}) peer ${report.peerId}`);
+		for (const site of report.sites) {
+			rc.out(
+				`  ${site.name}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''} announced=${site.announced} gatewayServes=${site.gatewayServes}`,
+			);
+		}
+	}
+	return 0;
+}
+
+/**
+ * `derive <site>` (a.k.a. `ipns-id`) -> core {@link ClientDeps.deriveIpnsId}.
+ * Prints the site's `k51...` IPNS id from the master + the site's `keyId`, with
+ * NO deploy (user story 22). The master is env-ONLY (via
+ * {@link resolveMasterSecret}); the `keyId` comes from the site's `pinnace.json`
+ * entry (or `--key-id`), never the ENS name. Fails loudly if the master is unset.
+ */
+function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
+	const {flags, positionals} = parseArgs(argv);
+	const [siteName] = positionals;
+	if (!siteName) {
+		rc.err('pinnace derive: usage: pinnace derive <site>');
+		return 1;
+	}
+
+	const master = resolveMasterSecret({env: rc.env});
+	if (!master) {
+		rc.err(
+			'pinnace derive: master secret not set — export PINNACE_MASTER (env-only; never read from pinnace.json)',
+		);
+		return 1;
+	}
+
+	// keyId: --key-id arg > the matching site entry's keyId (NOT the ENS name).
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli: {}});
+	const keyId =
+		flags['key-id'] ?? cfg.sites.find((s) => s.name === siteName)?.keyId;
+	if (!keyId) {
+		rc.err(
+			`pinnace derive: no keyId for '${siteName}'; add the site to pinnace.json or pass --key-id`,
+		);
+		return 1;
+	}
+
+	const id = rc.deps.deriveIpnsId({master, keyId});
+	rc.out(id);
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers.
+// ---------------------------------------------------------------------------
+
+/** Return the keys whose value is falsy (missing required flags), in order. */
+function missingFlags(required: Record<string, string | undefined>): string[] {
+	return Object.entries(required)
+		.filter(([, value]) => !value)
+		.map(([key]) => `--${key}`);
+}
+
+/**
+ * Build the {@link CliOverrides} the config resolver understands from parsed
+ * flags. `--gateways a,b` overrides the gateway list; per-host token/endpoint
+ * overrides use the `--host-token.<name>` / `--host-endpoint.<name>` form.
+ */
+function cliOverridesFromFlags(flags: Record<string, string>): CliOverrides {
+	const cli: CliOverrides = {};
+	const hostToken: Record<string, string> = {};
+	const hostEndpoint: Record<string, string> = {};
+	for (const [key, value] of Object.entries(flags)) {
+		if (key.startsWith('host-token.'))
+			hostToken[key.slice('host-token.'.length)] = value;
+		else if (key.startsWith('host-endpoint.'))
+			hostEndpoint[key.slice('host-endpoint.'.length)] = value;
+	}
+	if (Object.keys(hostToken).length > 0) cli.hostToken = hostToken;
+	if (Object.keys(hostEndpoint).length > 0) cli.hostEndpoint = hostEndpoint;
+	if (flags['gateways'])
+		cli.gateways = flags['gateways']
+			.split(',')
+			.map((s) => s.trim())
+			.filter(Boolean);
+	return cli;
 }
 
 /**
  * Parse `pinnace site <verb>` and validate the verb. The full context (Kubo
  * client from config-resolution, the site name / CID args) is assembled by the
- * CLI wiring in a later task; this thin router validates the verb belongs to
- * the `site` namespace, keeping the CLI a parse/format layer over the core
- * (CONTEXT.md `core vs cli`). The three verbs (list/remove/add) are implemented
- * in `../site/site-management.ts`.
+ * CLI wiring in the site-management task; this thin router validates the verb
+ * belongs to the `site` namespace. The three verbs (list/remove/add) are
+ * implemented in `../site/site-management.ts`.
  */
-function runSiteCli(argv: readonly string[]): number {
+function runSiteCli(argv: readonly string[], rc: ResolvedRunContext): number {
 	const [verb] = argv;
 	if (!verb) {
-		console.error(`pinnace site: expected a verb (${SITE_VERBS.join(', ')})`);
+		rc.err(`pinnace site: expected a verb (${SITE_VERBS.join(', ')})`);
 		return 1;
 	}
 	if (!SITE_VERBS.includes(verb as SiteVerb)) {
-		console.error(
+		rc.err(
 			`pinnace site: unknown verb '${verb}'; expected one of ${SITE_VERBS.join(', ')}`,
 		);
 		return 1;
@@ -57,18 +521,17 @@ function runSiteCli(argv: readonly string[]): number {
 /**
  * Parse `pinnace node <verb>` and validate the verb. The full on-box context
  * (local Kubo client, role, on-box paths) is assembled by the cloud-init /
- * config-resolution wiring in a later task; this thin router only validates the
- * verb belongs to the `node` namespace and reports the surface, keeping the
- * CLI a parse/format layer over the core (CONTEXT.md `core vs cli`).
+ * config-resolution wiring in the node-agent-commands task; this thin router
+ * only validates the verb belongs to the `node` namespace.
  */
-function runNodeCli(argv: readonly string[]): number {
+function runNodeCli(argv: readonly string[], rc: ResolvedRunContext): number {
 	const [verb] = argv;
 	if (!verb) {
-		console.error(`pinnace node: expected a verb (${NODE_VERBS.join(', ')})`);
+		rc.err(`pinnace node: expected a verb (${NODE_VERBS.join(', ')})`);
 		return 1;
 	}
 	if (!NODE_VERBS.includes(verb as NodeVerb)) {
-		console.error(
+		rc.err(
 			`pinnace node: unknown verb '${verb}'; expected one of ${NODE_VERBS.join(', ')}`,
 		);
 		return 1;
