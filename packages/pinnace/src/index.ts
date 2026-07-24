@@ -65,6 +65,15 @@ export {
 	type RequiredCiSetting,
 } from './ci/ci-emit.js';
 export {
+	provision,
+	hetznerHostProvider,
+	HOST_PROVIDERS,
+	type HostName,
+	type HostProvider,
+	type ProvisionInput,
+	type ProvisionResult,
+} from './provision/cloud-init.js';
+export {
 	serializeIpnsKeyForImport,
 	importIpnsKeyIntoPublisher,
 	KeyImportRoleError,
