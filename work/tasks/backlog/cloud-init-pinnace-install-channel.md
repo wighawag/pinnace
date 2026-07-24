@@ -24,6 +24,10 @@ Whatever is chosen, the emitted cloud-init must reference a resolvable install s
 - [ ] The choice (publish vs alternate channel, and the pinning scheme) is recorded (a `## Decisions` note or an ADR if it meets the bar) and linked from the done record.
 - [ ] Tests write only to their own temp fixtures.
 
+## Related first-boot bug (must be fixed together or coordinated)
+
+A real Debian 13 provision (2026-07-24) showed this install block is not merely a no-op: because `pinnace-setup.sh` is `set -euo pipefail` and `npm install -g pinnace` fails hard (unpublished package), it ABORTS the boot sequence, and on a cold boot the box was left half-provisioned (the `ipfs` user missing for a later `install -o ipfs` step) while `cloud-init status` still reported `done`. See `work/notes/observations/cloud-init-first-boot-ipfs-user-race-and-set-e-abort.md`. So this task MUST ensure the pinnace-agent install cannot abort the boot (guard it / `|| true` until the channel is resolved), and Kubo + firewall + Caddy come up regardless. The `ipfs`-user-ordering half (create the user via cloud-init `users:` before `runcmd`) is captured in the same observation; fix it here or coordinate with a sibling `cloud-init-generation` fix.
+
 ## Blocked by
 
 - None — `cloud-init-generation` is in `tasks/done/`; this fixes its install channel.
