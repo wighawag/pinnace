@@ -87,12 +87,18 @@ describe('importIpnsKeyIntoPublisher — lands the serialized key via key/import
 		expect(imports).toHaveLength(1);
 		const req = imports[0]!;
 		expect(req.query.get('arg')).toBe('mysite');
-		// The body is the exact serialized libp2p-protobuf key material. The mock
-		// records the (binary) body as a UTF-8 string, so compare against the same
-		// lossy round-trip of the expected bytes: equality here means the client
-		// POSTed precisely what serializeIpnsKeyForImport produced.
+		// Kubo's key/import requires multipart/form-data with the key material as a
+		// `file` part (NOT a raw body); the client must not hand-set content-type
+		// (fetch owns the boundary). Assert the multipart contract + that the file
+		// part carries EXACTLY what serializeIpnsKeyForImport produced.
+		expect(req.contentType).toBe('multipart/form-data');
+		expect(req.headers['content-type']).toBeUndefined();
+		const filePart = req.fileParts?.find((p) => p.field === 'file');
+		expect(filePart).toBeDefined();
 		const expected = serializeIpnsKeyForImport(goldenKey());
-		expect(req.bodyText).toBe(Buffer.from(expected).toString('utf8'));
+		expect(Buffer.from(filePart!.bytes).equals(Buffer.from(expected))).toBe(
+			true,
+		);
 		// It carried the bearer token like every other RPC call.
 		expect(req.headers['authorization']).toBe('Bearer publisher-token');
 	});

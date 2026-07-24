@@ -9,6 +9,16 @@
  * it rather than re-inventing a Kubo fake.
  */
 
+/** One multipart file part the mock extracted from a `FormData` body. */
+export interface RecordedFilePart {
+	/** The multipart field name (Kubo's file-upload endpoints expect `file`). */
+	field: string;
+	/** The optional filename the part was appended with. */
+	filename?: string;
+	/** The part's bytes. */
+	bytes: Uint8Array;
+}
+
 /** One recorded RPC request as the mock observed it. */
 export interface RecordedRequest {
 	/** The HTTP method (Kubo RPC is always POST). */
@@ -21,6 +31,21 @@ export interface RecordedRequest {
 	headers: Record<string, string>;
 	/** The raw request body as text (empty string if none). */
 	bodyText: string;
+	/**
+	 * The effective request `content-type`. For a `FormData` body this is
+	 * `multipart/form-data` (real `fetch` sets it, WITH a boundary, when it
+	 * serialises FormData) even though the caller must NOT hand-set it — the
+	 * mock derives it here so tests can assert the multipart contract Kubo
+	 * requires for its file-upload endpoints.
+	 */
+	contentType?: string;
+	/**
+	 * When the body was a `FormData` (a `multipart/form-data` upload), the file
+	 * parts it carried. Empty/undefined for non-multipart bodies. Kubo's
+	 * `add`, `dag/import` and `key/import` require at least one file part under
+	 * the field name `file`.
+	 */
+	fileParts?: RecordedFilePart[];
 	/** The full URL that was fetched. */
 	url: string;
 }
@@ -79,13 +104,18 @@ export class MockKuboApi {
 		for (const [k, v] of Object.entries(init?.headers ?? {})) {
 			headers[k.toLowerCase()] = v;
 		}
-		const bodyText = await bodyToText(init?.body);
+		const {bodyText, contentType, fileParts} = await inspectBody(
+			init?.body,
+			headers,
+		);
 		this.requests.push({
 			method: init?.method ?? 'GET',
 			path,
 			query: new URLSearchParams(url.search),
 			headers,
 			bodyText,
+			contentType,
+			fileParts,
 			url: url.toString(),
 		});
 
@@ -102,7 +132,52 @@ export class MockKuboApi {
 	};
 }
 
-/** Best-effort stringify of a fetch body for recording/assertions. */
+/**
+ * Inspect a fetch body the way a real `fetch` would surface it to Kubo:
+ * derive the effective `content-type` and, for a `multipart/form-data`
+ * (`FormData`) body, extract the file parts. This is what lets the mock
+ * ENFORCE Kubo's real upload contract (multipart + a `file` part) instead of
+ * merely recording raw bytes — the fidelity gap that let raw octet-stream
+ * uploads ship and then fail against a live daemon.
+ */
+async function inspectBody(
+	body: unknown,
+	headers: Record<string, string>,
+): Promise<{
+	bodyText: string;
+	contentType?: string;
+	fileParts?: RecordedFilePart[];
+}> {
+	if (body instanceof FormData) {
+		// Real `fetch` serialises a FormData as `multipart/form-data; boundary=…`
+		// and IGNORES any hand-set content-type. Model that here.
+		const fileParts: RecordedFilePart[] = [];
+		const textLines: string[] = [];
+		for (const [field, value] of body.entries()) {
+			if (value instanceof Blob) {
+				const bytes = new Uint8Array(await value.arrayBuffer());
+				const filename =
+					typeof (value as File).name === 'string'
+						? (value as File).name
+						: undefined;
+				fileParts.push({field, filename, bytes});
+			} else {
+				textLines.push(`${field}=${String(value)}`);
+			}
+		}
+		return {
+			bodyText: textLines.join('&'),
+			contentType: 'multipart/form-data',
+			fileParts,
+		};
+	}
+	return {
+		bodyText: await bodyToText(body),
+		contentType: headers['content-type'],
+	};
+}
+
+/** Best-effort stringify of a non-multipart fetch body for recording. */
 async function bodyToText(body: unknown): Promise<string> {
 	if (body === undefined || body === null) return '';
 	if (typeof body === 'string') return body;

@@ -129,19 +129,20 @@ export class KuboRpcClient {
 		return this.requestJson<T>('id');
 	}
 
-	/** `add` — add raw bytes (returned shape is Kubo-defined). */
+	/**
+	 * `add` — add raw bytes (returned shape is Kubo-defined). Kubo requires the
+	 * payload as a `multipart/form-data` `file` part, NOT a raw body, so we send
+	 * a {@link FormData} and let `fetch` set the multipart boundary itself (see
+	 * {@link fileUpload}).
+	 */
 	add<T = unknown>(data: Uint8Array): Promise<T> {
-		return this.requestJson<T>('add', undefined, new Blob([data as BlobPart]), {
-			'content-type': 'application/octet-stream',
-		});
+		return this.fileUpload<T>('add', undefined, data);
 	}
 
 	/** `dag/import?pin-roots=true` — import a CAR and pin its roots. */
 	dagImport<T = unknown>(car: Uint8Array): Promise<T> {
 		const q = new URLSearchParams({'pin-roots': 'true'});
-		return this.requestJson<T>('dag/import', q, new Blob([car as BlobPart]), {
-			'content-type': 'application/octet-stream',
-		});
+		return this.fileUpload<T>('dag/import', q, car);
 	}
 
 	/**
@@ -209,14 +210,29 @@ export class KuboRpcClient {
 	 */
 	keyImport<T = unknown>(name: string, keyBytes: Uint8Array): Promise<T> {
 		const q = new URLSearchParams({arg: name});
-		return this.requestJson<T>(
-			'key/import',
-			q,
-			new Blob([keyBytes as BlobPart]),
-			{
-				'content-type': 'application/octet-stream',
-			},
-		);
+		return this.fileUpload<T>('key/import', q, keyBytes);
+	}
+
+	/**
+	 * Kubo's file-upload endpoints (`add`, `dag/import`, `key/import`) require the
+	 * payload as a `multipart/form-data` body with the bytes as a file part under
+	 * the field name `file` (confirmed by the Kubo RPC docs' `-F file=@…` cURL
+	 * examples and a live daemon). A raw `application/octet-stream` body is
+	 * rejected with `400 file argument 'path' is required`.
+	 *
+	 * We build a {@link FormData} and pass it as the body WITHOUT a hand-set
+	 * `content-type`: `fetch` serialises the FormData and sets
+	 * `content-type: multipart/form-data; boundary=…` itself. Setting it manually
+	 * would omit/override the boundary and break the request.
+	 */
+	private fileUpload<T = unknown>(
+		endpoint: string,
+		query: URLSearchParams | undefined,
+		bytes: Uint8Array,
+	): Promise<T> {
+		const form = new FormData();
+		form.append('file', new Blob([bytes as BlobPart]), 'file');
+		return this.requestJson<T>(endpoint, query, form);
 	}
 
 	/** `name/publish?arg=<cidPath>&key=<key>&lifetime=..&ttl=..` — sign+publish IPNS. */

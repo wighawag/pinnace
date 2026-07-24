@@ -36,6 +36,7 @@ describe('KuboRpcClient — auth + per-endpoint request shape', () => {
 		const req = mock.lastRequest!;
 		expect(req.path).toBe('dag/import');
 		expect(req.query.get('pin-roots')).toBe('true');
+		expect(req.headers['authorization']).toBe('Bearer secret-token');
 	});
 
 	it('files/* verbs carry the right arg query params', async () => {
@@ -88,6 +89,62 @@ describe('KuboRpcClient — auth + per-endpoint request shape', () => {
 		await client.keyImport('mysite', new Uint8Array([9, 9, 9]));
 		expect(mock.lastRequest!.path).toBe('key/import');
 		expect(mock.lastRequest!.query.get('arg')).toBe('mysite');
+	});
+});
+
+/**
+ * The file-upload contract Kubo actually enforces: `add`, `dag/import` and
+ * `key/import` MUST be `multipart/form-data` with the payload as a `file` part.
+ * Real Kubo v0.38+ rejects a raw `application/octet-stream` body with
+ * `400 file argument 'path' is required`. These assertions guard that seam
+ * without a live daemon (they failed before the multipart fix; see
+ * work/notes/findings/kubo-file-upload-multipart-contract.md).
+ */
+describe('KuboRpcClient — file-upload endpoints send multipart/form-data', () => {
+	it('dagImport sends multipart/form-data with a `file` part (no hand-set content-type)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		const car = new Uint8Array([1, 2, 3, 4]);
+		await client.dagImport(car);
+		const req = mock.lastRequest!;
+		expect(req.contentType).toBe('multipart/form-data');
+		// The caller must NOT hand-set content-type: fetch owns the boundary.
+		expect(req.headers['content-type']).toBeUndefined();
+		const filePart = req.fileParts?.find((p) => p.field === 'file');
+		expect(filePart).toBeDefined();
+		expect(Array.from(filePart!.bytes)).toEqual([1, 2, 3, 4]);
+		// Query params + auth are untouched by the encoding change.
+		expect(req.query.get('pin-roots')).toBe('true');
+		expect(req.headers['authorization']).toBe('Bearer secret-token');
+	});
+
+	it('add sends multipart/form-data with a `file` part (no hand-set content-type)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.add(new Uint8Array([5, 6, 7]));
+		const req = mock.lastRequest!;
+		expect(req.path).toBe('add');
+		expect(req.contentType).toBe('multipart/form-data');
+		expect(req.headers['content-type']).toBeUndefined();
+		const filePart = req.fileParts?.find((p) => p.field === 'file');
+		expect(filePart).toBeDefined();
+		expect(Array.from(filePart!.bytes)).toEqual([5, 6, 7]);
+		expect(req.headers['authorization']).toBe('Bearer secret-token');
+	});
+
+	it('keyImport sends multipart/form-data with a `file` part, keeping arg=<name>', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.keyImport('mysite', new Uint8Array([9, 9, 9]));
+		const req = mock.lastRequest!;
+		expect(req.path).toBe('key/import');
+		expect(req.query.get('arg')).toBe('mysite');
+		expect(req.contentType).toBe('multipart/form-data');
+		expect(req.headers['content-type']).toBeUndefined();
+		const filePart = req.fileParts?.find((p) => p.field === 'file');
+		expect(filePart).toBeDefined();
+		expect(Array.from(filePart!.bytes)).toEqual([9, 9, 9]);
+		expect(req.headers['authorization']).toBe('Bearer secret-token');
 	});
 
 	it('name/publish carries arg + key + lifetime + ttl', async () => {
