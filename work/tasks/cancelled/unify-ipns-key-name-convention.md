@@ -4,6 +4,7 @@ slug: unify-ipns-key-name-convention
 spec: pinnace
 blockedBy: []
 covers: [9, 11]
+reason: superseded by config-token-env-only-and-single-site-id — with a single site `id` used as BOTH the MFS entry and the KDF input, deploy's publish lookup (`k.Name === id`) and key-import's import name (`keyName = id`) agree BY CONSTRUCTION; there is no longer a name-vs-keyId split for them to disagree on, so the reconciliation this task proposed is resolved structurally.
 ---
 
 ## What to build
