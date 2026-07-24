@@ -102,10 +102,16 @@ export interface RunContext {
 	/** The env layer (defaults to `process.env`). Tests pass an in-memory record. */
 	env?: EnvRecord;
 	/**
-	 * Load the parsed `pinnace.json` (defaults to reading `./pinnace.json`, or an
+	 * Load the parsed config file (defaults to reading `./pinnace.json`, or an
 	 * empty config if absent). Tests pass an in-memory object.
+	 *
+	 * `path` is the operator's explicit `--config <path>` when given, else
+	 * `undefined` (the `./pinnace.json` default). The default loader treats an
+	 * ABSENT default file as a benign empty config, but an explicitly-named path
+	 * that is missing / unreadable / invalid JSON must THROW so `run()` can fail
+	 * loud naming that path (an operator-named file is a claim it exists).
 	 */
-	loadConfigFile?: () => PinnaceConfigFile;
+	loadConfigFile?: (path?: string) => PinnaceConfigFile;
 	/** The core functions to dispatch to (defaults to the real core). */
 	deps?: ClientDeps;
 	/** stdout sink (defaults to `console.log`). */
@@ -123,22 +129,70 @@ interface ResolvedRunContext {
 	err: (line: string) => void;
 }
 
-/** Read `./pinnace.json` if present; an absent/unreadable file is an empty config. */
-function defaultLoadConfigFile(): PinnaceConfigFile {
+/**
+ * Load a config file.
+ *
+ * With NO explicit path (`--config` absent), read `./pinnace.json` if present;
+ * its ABSENCE (or an unreadable/invalid default file) stays a benign empty
+ * config, because a config file is optional.
+ *
+ * With an EXPLICIT `path` (the operator typed `--config <path>`), the file MUST
+ * exist and parse: a missing / unreadable / invalid-JSON named path THROWS
+ * (naming the path) so the caller fails loud rather than silently emptying the
+ * config — an operator who named a file has claimed it exists.
+ */
+function defaultLoadConfigFile(path?: string): PinnaceConfigFile {
+	if (path === undefined) {
+		try {
+			return JSON.parse(
+				readFileSync('pinnace.json', 'utf8'),
+			) as PinnaceConfigFile;
+		} catch {
+			return {};
+		}
+	}
+	let raw: string;
 	try {
-		return JSON.parse(
-			readFileSync('pinnace.json', 'utf8'),
-		) as PinnaceConfigFile;
-	} catch {
-		return {};
+		raw = readFileSync(path, 'utf8');
+	} catch (cause) {
+		throw new ConfigLoadError(path, 'read', cause);
+	}
+	try {
+		return JSON.parse(raw) as PinnaceConfigFile;
+	} catch (cause) {
+		throw new ConfigLoadError(path, 'parse', cause);
 	}
 }
 
-/** Fill in the run context defaults (real env/file/core/console) once. */
-function resolveContext(context: RunContext): ResolvedRunContext {
+/**
+ * An explicitly-named `--config <path>` could not be read or parsed. Names the
+ * path so `run()` can emit a loud, operator-actionable error (exit 1) instead
+ * of silently resolving to an empty config.
+ */
+export class ConfigLoadError extends Error {
+	constructor(
+		readonly path: string,
+		readonly kind: 'read' | 'parse',
+		cause?: unknown,
+	) {
+		const detail = kind === 'read' ? 'read' : 'parse';
+		super(`failed to ${detail} config file '${path}'`, {cause});
+		this.name = 'ConfigLoadError';
+	}
+}
+
+/**
+ * Fill in the run context defaults (real env/file/core/console) once, loading
+ * the config from `configPath` (the operator's explicit `--config`, or
+ * `undefined` for the `./pinnace.json` default) through the loader seam.
+ */
+function resolveContext(
+	context: RunContext,
+	configPath?: string,
+): ResolvedRunContext {
 	return {
 		env: context.env ?? (process.env as EnvRecord),
-		file: (context.loadConfigFile ?? defaultLoadConfigFile)(),
+		file: (context.loadConfigFile ?? defaultLoadConfigFile)(configPath),
 		deps: context.deps ?? DEFAULT_DEPS,
 		out: context.out ?? ((line) => console.log(line)),
 		err: context.err ?? ((line) => console.error(line)),
@@ -152,13 +206,33 @@ function resolveContext(context: RunContext): ResolvedRunContext {
  * on-box `node` namespace, and the `site` namespace. A missing command is a
  * benign no-op (exit 0); an UNKNOWN command is loud (exit 1) so the surface is
  * an explicit allow-list, not a silent catch-all.
+ *
+ * A GLOBAL `--config <path>` flag may appear BEFORE the command; it is consumed
+ * here (stripped from the per-verb argv) and threaded into config loading via
+ * the {@link RunContext.loadConfigFile} seam. With no `--config`, the default
+ * `./pinnace.json` is read and its absence is benign; an explicitly-named path
+ * that is missing/unreadable/invalid JSON fails loud (names the path, exit 1).
  */
 export async function run(
 	argv: readonly string[],
 	context: RunContext = {},
 ): Promise<number> {
-	const rc = resolveContext(context);
-	const [command, ...rest] = argv;
+	const {configPath, rest: postGlobal} = takeConfigFlag(argv);
+
+	const err = context.err ?? ((line) => console.error(line));
+	let rc: ResolvedRunContext;
+	try {
+		rc = resolveContext(context, configPath);
+	} catch (cause) {
+		// A loud, path-named failure only ever comes from an EXPLICIT --config;
+		// the default loader swallows an absent ./pinnace.json into an empty config.
+		if (cause instanceof ConfigLoadError) {
+			err(`${name()}: ${cause.message}`);
+			return 1;
+		}
+		throw cause;
+	}
+	const [command, ...rest] = postGlobal;
 
 	if (command === undefined) {
 		rc.out(`${name()}: no command given`);
@@ -198,6 +272,35 @@ export async function run(
 // Minimal arg parsing (flags + positionals). Kept tiny + local: the CLI is a
 // parse/format layer, so a full arg-parsing dependency would be over-weight.
 // ---------------------------------------------------------------------------
+
+/**
+ * Split the GLOBAL `--config <path>` flag off the front of the argv.
+ *
+ * `--config` is a global (not a per-verb) flag: it may precede the command and
+ * MUST be stripped before the argv reaches a verb parser, or a per-verb parser
+ * would mis-read `--config`/its path as one of its own flags/positionals. This
+ * scans the WHOLE argv (so `--config` before the command is found) and removes
+ * the flag and its value, returning the chosen path (`undefined` if absent).
+ * Only the last `--config` wins if repeated. A trailing `--config` with no
+ * value yields an empty path, which the loader then fails loud on.
+ */
+function takeConfigFlag(argv: readonly string[]): {
+	configPath?: string;
+	rest: string[];
+} {
+	const rest: string[] = [];
+	let configPath: string | undefined;
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] === '--config') {
+			const next = argv[i + 1];
+			configPath = next !== undefined && !next.startsWith('--') ? next : '';
+			if (next !== undefined && !next.startsWith('--')) i++;
+			continue;
+		}
+		rest.push(argv[i]);
+	}
+	return {configPath, rest};
+}
 
 /** A parsed argv split into `--flag value` map + bare positionals. */
 interface ParsedArgs {
