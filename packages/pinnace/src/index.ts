@@ -86,3 +86,15 @@ export {
 	type PublisherFetch,
 	type GatewayFetch,
 } from './node/node-commands.js';
+export {
+	statusReport,
+	makeStatusOp,
+	defaultProvidersLookup,
+	defaultGatewayProbe,
+	type StatusReport,
+	type SiteStatus,
+	type StatusReportInput,
+	type ProvidersLookup,
+	type ProvidersResponse,
+	type GatewayProbe,
+} from './status/status-report.js';

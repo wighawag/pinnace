@@ -66,6 +66,16 @@ export interface SiteOutcome {
 	ipns?: string;
 	/** A short machine-readable status token (e.g. `re-announced`, `no-record`). */
 	status?: string;
+	/**
+	 * `status`-verb only: whether the network announces this node for the CID
+	 * (the delegated-routing providers list contains our PeerID). Owned + filled
+	 * by the `status-report` core op; absent for other verbs.
+	 */
+	announced?: boolean;
+	/** `status`-verb only: whether a cold public gateway served the CID (2xx/206). */
+	gatewayServes?: boolean;
+	/** `status`-verb only: the raw HTTP status the cold-gateway probe returned. */
+	gatewayHttp?: number;
 }
 
 /** The uniform result an op returns: the per-site outcomes it produced. */
