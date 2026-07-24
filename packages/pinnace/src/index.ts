@@ -73,6 +73,17 @@ export {
 	type KeyImportResult,
 } from './publisher/key-import.js';
 export {
+	republishAndExport,
+	mirrorAndReannounce,
+	makeRepublishOp,
+	makeMirrorOp,
+	promoteReplicaToPublisher,
+	RECORD_LIFETIME,
+	RECORD_TTL,
+	type PromoteReplicaInput,
+	type PromoteReplicaResult,
+} from './publisher/record-sequence.js';
+export {
 	runNodeCommand,
 	discoverSites,
 	NODE_VERBS,

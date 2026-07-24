@@ -24,15 +24,20 @@
  * routing/put -> fallback) is OWNED and tested by the `publisher-replica-model`
  * task, and `status`'s per-site checks by the `status-report` task. Both land
  * in parallel with this task. So the four core operations are injectable via
- * {@link NodeCommandOps}: this module supplies thin default implementations
- * (the direct Kubo wiring the reference scripts describe) which those tasks
- * replace/deepen behind the SAME seam. This task owns the command surface +
- * role-gating + `warm` + the boundary ADR.
+ * {@link NodeCommandOps}: this module's default `republish`/`mirror` DELEGATE to
+ * the owned record-sequence core (`../publisher/record-sequence.ts`) so there is
+ * a SINGLE implementation (no bash/TS drift, per ADR-0002), and `status`
+ * delegates to the `status-report` core injected via `ctx.ops`. This task owns
+ * the command surface + role-gating + `warm` + the boundary ADR.
  */
-import {mkdir, readFile, writeFile} from 'node:fs/promises';
+import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import type {HostRole} from '../config/config-resolution.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
+import {
+	republishAndExport,
+	mirrorAndReannounce,
+} from '../publisher/record-sequence.js';
 
 /** The four on-box verbs, under the `node` namespace. */
 export type NodeVerb = 'republish' | 'mirror' | 'warm' | 'status';
@@ -244,118 +249,38 @@ export async function runNodeCommand(
 // ---------------------------------------------------------------------------
 // Default (thin) core-op implementations.
 //
-// These are the direct Kubo wiring the reference cloud-init scripts describe,
-// so the four verbs are useful the moment this task lands. The
-// `publisher-replica-model` and `status-report` tasks OWN the record sequence
-// and the per-site status checks respectively; they replace/deepen the
-// corresponding op behind this same seam without touching the command surface.
+// The `warm` and `status` defaults are the direct Kubo wiring the reference
+// cloud-init scripts describe. The `republish`/`mirror` defaults DELEGATE to the
+// owned record-sequence core (`../publisher/record-sequence.ts`) so the record
+// SEQUENCE (export -> fetch -> routing/put -> fallback) has a SINGLE
+// implementation shared by client and box (ADR-0002); `status` reuses the
+// `status-report` core injected via `ctx.ops`.
 // ---------------------------------------------------------------------------
 
-/** Records are ~72h valid, refreshed with a 1h ttl (reference values). */
-const RECORD_LIFETIME = '72h';
-const RECORD_TTL = '1h';
-
 /**
- * Default `republish` (publisher). For each site the node holds a key for:
- * `name/publish` to refresh the signed record, then `routing/get` to EXPORT the
- * raw signed record to {@link NodeCommandContext.recordsDir} where replicas
- * fetch it. Sites without a key are ipfs-mode only and are left alone.
+ * Default `republish` (publisher): DELEGATE to the owned record-sequence core
+ * ({@link republishAndExport}). It refreshes the signed record (`name/publish`,
+ * ~72h/1h) and EXPORTS it (`routing/get`) to {@link NodeCommandContext.recordsDir}
+ * where replicas fetch it. One implementation, no bash/TS drift (ADR-0002).
  */
 async function defaultRepublish(
 	ctx: NodeCommandContext,
 	sites: DiscoveredSite[],
 ): Promise<NodeOpResult> {
-	const keys = await listKeys(ctx.client);
-	const outcomes: SiteOutcome[] = [];
-	for (const site of sites) {
-		const ipns = keys.get(site.name);
-		if (!ipns) {
-			outcomes.push({name: site.name, cid: site.cid, status: 'no-key'});
-			continue;
-		}
-		await ctx.client.namePublish({
-			cidPath: `/ipfs/${site.cid}`,
-			key: site.name,
-			lifetime: RECORD_LIFETIME,
-			ttl: RECORD_TTL,
-			allowOffline: true,
-		});
-		const record = await ctx.client.routingGet(`/ipns/${ipns}`);
-		if (ctx.recordsDir) {
-			await mkdir(ctx.recordsDir, {recursive: true});
-			await writeFile(join(ctx.recordsDir, `${site.name}.ipns-name`), ipns);
-			await writeFile(
-				join(ctx.recordsDir, `${site.name}.ipns-record`),
-				Buffer.from(record),
-			);
-		}
-		outcomes.push({name: site.name, cid: site.cid, ipns, status: 'exported'});
-	}
-	return {sites: outcomes};
+	return republishAndExport(ctx, sites);
 }
 
 /**
- * Default `mirror` (replica). For each site: fetch the publisher's exported
- * record (and its ipns id), re-announce it with `routing/put`, FALLING BACK to
- * the last cached record when the publisher endpoint is unreachable. The
- * replica NEVER signs (no `name/publish`) — it only re-announces.
+ * Default `mirror` (replica): DELEGATE to the owned record-sequence core
+ * ({@link mirrorAndReannounce}). It fetches the publisher's exported record,
+ * re-announces it (`routing/put`), and FALLS BACK to the last cached record
+ * when the publisher endpoint is unreachable — NEVER signing.
  */
 async function defaultMirror(
 	ctx: NodeCommandContext,
 	sites: DiscoveredSite[],
 ): Promise<NodeOpResult> {
-	const base = (ctx.publisherEndpoint ?? '').replace(/\/+$/, '');
-	const fetchRecord = ctx.publisherFetch ?? httpFetchText;
-	const outcomes: SiteOutcome[] = [];
-
-	for (const site of sites) {
-		let record: string | undefined;
-		let ipnsId: string | undefined;
-		let fromCache = false;
-
-		// Try the publisher first; on any failure fall back to the cache.
-		if (base) {
-			try {
-				record = await fetchRecord(`${base}/records/${site.name}.ipns-record`);
-				ipnsId = await fetchRecord(`${base}/records/${site.name}.ipns-name`);
-			} catch {
-				record = undefined;
-				ipnsId = undefined;
-			}
-		}
-		if (record === undefined && ctx.cacheDir) {
-			const cached = await readCached(ctx.cacheDir, site.name);
-			if (cached) {
-				record = cached.record;
-				ipnsId = cached.ipnsId;
-				fromCache = true;
-			}
-		}
-
-		if (record === undefined || !ipnsId) {
-			outcomes.push({name: site.name, status: 'no-record'});
-			continue;
-		}
-
-		// Persist a freshly-fetched record so a later publisher outage can fall
-		// back to it. (Cache-sourced records are already on disk.)
-		if (!fromCache && ctx.cacheDir) {
-			await mkdir(ctx.cacheDir, {recursive: true});
-			await writeFile(join(ctx.cacheDir, `${site.name}.ipns-record`), record);
-			await writeFile(join(ctx.cacheDir, `${site.name}.ipns-name`), ipnsId);
-		}
-
-		await ctx.client.routingPut(
-			`/ipns/${ipnsId}`,
-			new Uint8Array(Buffer.from(record)),
-		);
-		outcomes.push({
-			name: site.name,
-			ipns: ipnsId,
-			status: fromCache ? 're-announced-cached' : 're-announced',
-		});
-	}
-	return {sites: outcomes};
+	return mirrorAndReannounce(ctx, sites);
 }
 
 /**
@@ -447,26 +372,6 @@ async function listKeys(client: KuboRpcClient): Promise<Map<string, string>> {
 	return map;
 }
 
-/** Read a cached record + its ipns id for a site, or undefined if absent. */
-async function readCached(
-	cacheDir: string,
-	name: string,
-): Promise<{record: string; ipnsId: string} | undefined> {
-	try {
-		const record = await readFile(
-			join(cacheDir, `${name}.ipns-record`),
-			'utf8',
-		);
-		const ipnsId = (
-			await readFile(join(cacheDir, `${name}.ipns-name`), 'utf8')
-		).trim();
-		if (!ipnsId) return undefined;
-		return {record, ipnsId};
-	} catch {
-		return undefined;
-	}
-}
-
 /** Warm one URL, swallowing any error (a cold gateway must not fail the run). */
 async function safeWarm(warm: GatewayFetch, url: string): Promise<void> {
 	try {
@@ -474,13 +379,6 @@ async function safeWarm(warm: GatewayFetch, url: string): Promise<void> {
 	} catch {
 		// Intentionally ignored: warming is best-effort.
 	}
-}
-
-/** Production publisher-record fetch: GET the URL and return its body text. */
-async function httpFetchText(url: string): Promise<string> {
-	const res = await fetch(url);
-	if (!res.ok) throw new Error(`fetch ${url} -> ${res.status}`);
-	return await res.text();
 }
 
 /** Production gateway warm: range-request the URL and return the HTTP status. */
