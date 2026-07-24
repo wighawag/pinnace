@@ -65,6 +65,14 @@ export {
 	type RequiredCiSetting,
 } from './ci/ci-emit.js';
 export {
+	serializeIpnsKeyForImport,
+	importIpnsKeyIntoPublisher,
+	KeyImportRoleError,
+	LIBP2P_ED25519_PRIVATE_KEY_PREFIX,
+	type ImportIpnsKeyInput,
+	type KeyImportResult,
+} from './publisher/key-import.js';
+export {
 	runNodeCommand,
 	discoverSites,
 	NODE_VERBS,
