@@ -68,7 +68,7 @@ function withDistinctCids(mock: MockKuboApi): MockKuboApi {
 }
 
 describe('status core — per-site four-field report shape', () => {
-	it('reports name, cid, ipns, announced, gatewayServes per discovered site', async () => {
+	it('reports id, cid, ipns, announced, gatewayServes per discovered site', async () => {
 		const mock = withDistinctCids(mockForStatus());
 		const client = clientWith(mock);
 
@@ -91,14 +91,14 @@ describe('status core — per-site four-field report shape', () => {
 		expect(report.peerId).toBe('peer-self');
 		expect(report.sites).toHaveLength(2);
 
-		const alice = report.sites.find((s) => s.name === 'alice.eth')!;
+		const alice = report.sites.find((s) => s.id === 'alice.eth')!;
 		expect(alice.cid).toBe('bafyalice');
 		expect(alice.ipns).toBe('k51alice');
 		expect(alice.announced).toBe(true);
 		expect(alice.gatewayHttp).toBe(206);
 		expect(alice.gatewayServes).toBe(true);
 
-		const bob = report.sites.find((s) => s.name === 'bob')!;
+		const bob = report.sites.find((s) => s.id === 'bob')!;
 		expect(bob.cid).toBe('bafybob');
 		// bob has NO same-named key -> no IPNS id.
 		expect(bob.ipns).toBeUndefined();
@@ -213,7 +213,7 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		);
 
 		expect(result.sites).toHaveLength(2);
-		const alice = result.sites.find((s) => s.name === 'alice.eth')!;
+		const alice = result.sites.find((s) => s.id === 'alice.eth')!;
 		expect(alice.cid).toBe('bafyalice');
 		expect(alice.ipns).toBe('k51alice');
 		// The announce + gateway outcomes are carried on the outcome too.

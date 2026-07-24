@@ -14,7 +14,7 @@ import {
  * daemon, no shared location) and asserts the EXACT calls each verb issues:
  *  - list   reads MFS (files/ls + files/stat) and joins key/list for IPNS ids,
  *  - remove issues files/rm AND unpins (pin/rm) the content,
- *  - add    places /ipfs/<cid> into MFS /sites/<name>.
+ *  - add    places /ipfs/<cid> into MFS /sites/<id>.
  */
 
 function clientWith(mock: MockKuboApi, token = 'site-token') {
@@ -40,7 +40,7 @@ describe('site list — enumerate /sites/* with CID and IPNS id', () => {
 		const mock = mockWithTwoSites();
 		mock.on('key/list', {json: {Keys: []}});
 		const sites = await listSites({client: clientWith(mock)});
-		expect(sites.map((s) => s.name)).toEqual(['alice.eth', 'bob']);
+		expect(sites.map((s) => s.id)).toEqual(['alice.eth', 'bob']);
 		expect(sites.every((s) => s.cid === 'bafysite')).toBe(true);
 		// It read MFS: files/ls on /sites, then files/stat per entry.
 		const ls = mock.requestsFor('files/ls');
@@ -56,8 +56,8 @@ describe('site list — enumerate /sites/* with CID and IPNS id', () => {
 			json: {Keys: [{Name: 'alice.eth', Id: 'k51alice'}]},
 		});
 		const sites = await listSites({client: clientWith(mock)});
-		const alice = sites.find((s) => s.name === 'alice.eth') as SiteListing;
-		const bob = sites.find((s) => s.name === 'bob') as SiteListing;
+		const alice = sites.find((s) => s.id === 'alice.eth') as SiteListing;
+		const bob = sites.find((s) => s.id === 'bob') as SiteListing;
 		expect(alice.ipns).toBe('k51alice');
 		expect(bob.ipns).toBeUndefined();
 		// It consulted the keystore once to resolve IPNS ids.
@@ -76,8 +76,8 @@ describe('site list — enumerate /sites/* with CID and IPNS id', () => {
 describe('site remove — files/rm the MFS entry AND unpin the content', () => {
 	it('stats the CID, removes the MFS entry, then unpins so storage is reclaimed', async () => {
 		const mock = mockWithTwoSites();
-		const res = await removeSite({client: clientWith(mock), name: 'bob'});
-		expect(res.name).toBe('bob');
+		const res = await removeSite({client: clientWith(mock), id: 'bob'});
+		expect(res.id).toBe('bob');
 		expect(res.cid).toBe('bafysite');
 		expect(res.unpinned).toBe(true);
 
@@ -100,7 +100,7 @@ describe('site remove — files/rm the MFS entry AND unpin the content', () => {
 
 	it('removes the MFS entry BEFORE unpinning (entry gone => stops being served/announced)', async () => {
 		const mock = mockWithTwoSites();
-		await removeSite({client: clientWith(mock), name: 'bob'});
+		await removeSite({client: clientWith(mock), id: 'bob'});
 		const order = mock.requests.map((r) => r.path);
 		expect(order.indexOf('files/rm')).toBeLessThan(order.indexOf('pin/rm'));
 	});
@@ -108,7 +108,7 @@ describe('site remove — files/rm the MFS entry AND unpin the content', () => {
 	it('still removes the MFS entry when the content was not pinned (unpin failure is tolerated)', async () => {
 		const mock = mockWithTwoSites();
 		mock.on('pin/rm', {status: 500, text: 'not pinned'});
-		const res = await removeSite({client: clientWith(mock), name: 'bob'});
+		const res = await removeSite({client: clientWith(mock), id: 'bob'});
 		// The MFS entry was removed regardless.
 		expect(mock.requestsFor('files/rm').length).toBe(1);
 		// The unpin was attempted but reported as not-reclaimed, not thrown.
@@ -121,10 +121,10 @@ describe('site add — place an existing /ipfs/<cid> into MFS /sites/<name>', ()
 		const mock = new MockKuboApi();
 		const res = await addSite({
 			client: clientWith(mock),
-			name: 'carol.eth',
+			id: 'carol.eth',
 			cid: 'bafynew',
 		});
-		expect(res.name).toBe('carol.eth');
+		expect(res.id).toBe('carol.eth');
 		expect(res.cid).toBe('bafynew');
 
 		// mkdir /sites (parents) so a fresh box is fine.
@@ -153,7 +153,7 @@ describe('site add — place an existing /ipfs/<cid> into MFS /sites/<name>', ()
 		const mock = new MockKuboApi();
 		await addSite({
 			client: clientWith(mock),
-			name: 'carol.eth',
+			id: 'carol.eth',
 			cid: 'bafynew',
 		});
 		expect(mock.requestsFor('dag/import').length).toBe(0);

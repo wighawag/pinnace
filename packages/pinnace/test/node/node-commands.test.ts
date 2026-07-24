@@ -194,7 +194,7 @@ describe('site auto-discovery from MFS /sites/*', () => {
 		const mock = mockWithTwoSites();
 		const client = clientWith(mock);
 		const sites = await discoverSites(client, '/sites');
-		expect(sites.map((s) => s.name)).toEqual(['alice.eth', 'bob']);
+		expect(sites.map((s) => s.id)).toEqual(['alice.eth', 'bob']);
 		expect(sites.every((s) => s.cid === 'bafysite')).toBe(true);
 		// It hit files/ls once on /sites, then files/stat per entry.
 		const ls = mock.requestsFor('files/ls');
@@ -319,7 +319,7 @@ describe('node mirror (replica) — default op wiring: fetch + routing/put + fal
 			// Never signs, even on the fallback path.
 			expect(mock.requestsFor('name/publish').length).toBe(0);
 			// A site with neither a live publisher NOR a cache is reported, not thrown.
-			expect(res.sites.find((s) => s.name === 'bob')?.status).toMatch(
+			expect(res.sites.find((s) => s.id === 'bob')?.status).toMatch(
 				/no-record|unreachable|skipped/i,
 			);
 		} finally {
@@ -361,8 +361,8 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 		const mock = mockWithTwoSites();
 		const statusOp: NodeCommandOps['status'] = async () => ({
 			sites: [
-				{name: 'alice.eth', cid: 'bafysite', ipns: 'k51alice'},
-				{name: 'bob', cid: 'bafysite', ipns: ''},
+				{id: 'alice.eth', cid: 'bafysite', ipns: 'k51alice'},
+				{id: 'bob', cid: 'bafysite', ipns: ''},
 			],
 		});
 		const {ctx, dir} = await baseContext(mock, {
@@ -378,7 +378,7 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 				await readFile(join(ctx.dashboardDir!, 'status.json'), 'utf8'),
 			);
 			expect(body.sites.length).toBe(2);
-			expect(body.sites[0].name).toBe('alice.eth');
+			expect(body.sites[0].id).toBe('alice.eth');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}

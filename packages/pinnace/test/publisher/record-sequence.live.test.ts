@@ -72,7 +72,7 @@ describe.skipIf(!haveLiveEnv)(
 					cid,
 					'publisher must serve the target site under /sites',
 				).toBeTruthy();
-				const sites = [{name: site, cid: cid!}];
+				const sites = [{id: site, cid: cid!}];
 
 				// 1) Publisher signs + exports the raw record to an isolated records dir.
 				const pubCtx: NodeCommandContext = {
@@ -81,7 +81,7 @@ describe.skipIf(!haveLiveEnv)(
 					recordsDir: join(dir, 'records'),
 				};
 				const pubRes = await republishAndExport(pubCtx, sites);
-				expect(pubRes.sites.find((s) => s.name === site)?.status).toBe(
+				expect(pubRes.sites.find((s) => s.id === site)?.status).toBe(
 					'exported',
 				);
 
@@ -93,7 +93,7 @@ describe.skipIf(!haveLiveEnv)(
 					cacheDir: join(dir, 'cache'),
 				};
 				const mirrorRes = await mirrorAndReannounce(repCtx, sites);
-				expect(mirrorRes.sites.find((s) => s.name === site)?.status).toBe(
+				expect(mirrorRes.sites.find((s) => s.id === site)?.status).toBe(
 					're-announced',
 				);
 
@@ -106,7 +106,7 @@ describe.skipIf(!haveLiveEnv)(
 					},
 				};
 				const fallbackRes = await mirrorAndReannounce(downCtx, sites);
-				expect(fallbackRes.sites.find((s) => s.name === site)?.status).toBe(
+				expect(fallbackRes.sites.find((s) => s.id === site)?.status).toBe(
 					're-announced-cached',
 				);
 			} finally {

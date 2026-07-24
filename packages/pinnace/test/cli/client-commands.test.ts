@@ -71,28 +71,35 @@ const fileConfig: PinnaceConfigFile = {
 		{
 			name: 'a',
 			endpoint: 'https://a.example',
-			token: 'file-token-a',
 			role: 'publisher',
 		},
 		{
 			name: 'b',
 			endpoint: 'https://b.example',
-			token: 'file-token-b',
 			role: 'replica',
 			publisherEndpoint: 'https://a.example/records',
 		},
 	],
 	sites: [
 		{
-			name: 'mysite.eth',
+			id: 'mysite',
 			mode: 'ipns',
-			keyId: 'kid-1',
 			ensName: 'mysite.eth',
 			sourceDir: './dist',
 		},
 	],
 	gateways: ['https://dweb.link'],
 };
+
+/**
+ * The token is env-only (never in pinnace.json). Deploy/status resolve each
+ * host's token from `PINNACE_HOST_<NAME>_TOKEN`, so the resolution tests supply
+ * these env vars explicitly (and the missing-token path drops them on purpose).
+ */
+const hostTokenEnv = {
+	PINNACE_HOST_A_TOKEN: 'env-token-a',
+	PINNACE_HOST_B_TOKEN: 'env-token-b',
+} as const;
 
 /** Build a RunContext with in-memory env + config (real env/file untouched). */
 function ctx(overrides: Partial<RunContext> = {}): {
@@ -157,53 +164,67 @@ describe('provision — dispatches to core provision with resolved args', () => 
 	});
 });
 
-describe('deploy <dir> <site> — dispatches to core deploy with resolved targets', () => {
+describe('deploy <dir> <id> — dispatches to core deploy with resolved targets', () => {
 	it('resolves nodes/mode from config and calls core deploy with them', async () => {
 		const {deps, calls} = recordingDeps();
-		const {context} = ctx({deps});
-		const code = await run(['deploy', './dist', 'mysite.eth'], context);
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(['deploy', './dist', 'mysite'], context);
 		expect(code).toBe(0);
 		expect(calls.deploy.length).toBe(1);
 		const input = calls.deploy[0] as {
 			sourceDir?: string;
-			name: string;
+			id: string;
 			mode: string;
 			targets: Array<{baseUrl: string; token: string; role: string}>;
 		};
 		expect(input.sourceDir).toBe('./dist');
-		expect(input.name).toBe('mysite.eth');
+		// The single `id` positional flows straight through to the core.
+		expect(input.id).toBe('mysite');
 		// mode comes from the matching site entry in pinnace.json.
 		expect(input.mode).toBe('ipns');
-		// One target per configured host, each with its OWN token, publisher first.
+		// One target per configured host, each with its OWN env-only token, publisher first.
 		expect(input.targets.map((t) => t.baseUrl)).toEqual([
 			'https://a.example',
 			'https://b.example',
 		]);
 		expect(input.targets.map((t) => t.token)).toEqual([
-			'file-token-a',
-			'file-token-b',
+			'env-token-a',
+			'env-token-b',
 		]);
 		expect(input.targets.map((t) => t.role)).toEqual(['publisher', 'replica']);
 	});
 
 	it('a --mode arg OVERRIDES the site mode (arg > file)', async () => {
 		const {deps, calls} = recordingDeps();
-		const {context} = ctx({deps});
-		await run(['deploy', '--mode', 'ipfs', './dist', 'mysite.eth'], context);
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		await run(['deploy', '--mode', 'ipfs', './dist', 'mysite'], context);
 		expect((calls.deploy[0] as {mode: string}).mode).toBe('ipfs');
 	});
 
-	it('an env host token OVERRIDES the file token (env > file)', async () => {
+	it('a CLI host-token OVERRIDES the env token (CLI > env)', async () => {
 		const {deps, calls} = recordingDeps();
-		const {context} = ctx({
-			deps,
-			env: {PINNACE_HOST_A_TOKEN: 'env-token-a'},
-		});
-		await run(['deploy', './dist', 'mysite.eth'], context);
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		await run(
+			['deploy', '--host-token.a', 'cli-token-a', './dist', 'mysite'],
+			context,
+		);
 		const input = calls.deploy[0] as {
 			targets: Array<{baseUrl: string; token: string}>;
 		};
-		expect(input.targets[0].token).toBe('env-token-a');
+		expect(input.targets[0].token).toBe('cli-token-a');
+	});
+
+	it('FAILS LOUD naming the missing env var when a host has no token (env-only, no silent "")', async () => {
+		const {deps, calls} = recordingDeps();
+		// Only host a has a token; host b has none -> loud, named failure.
+		const {context, err} = ctx({
+			deps,
+			env: {PINNACE_HOST_A_TOKEN: 'env-token-a'},
+		});
+		const code = await run(['deploy', './dist', 'mysite'], context);
+		expect(code).not.toBe(0);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toContain('PINNACE_HOST_B_TOKEN');
 	});
 });
 
@@ -236,7 +257,7 @@ describe('install-ci — dispatches to core emitCi with resolved args', () => {
 describe('status — dispatches to core statusReport per site', () => {
 	it('builds a Kubo client from the resolved host and calls core statusReport', async () => {
 		const {deps, calls} = recordingDeps();
-		const {context} = ctx({deps});
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
 		const code = await run(['status'], context);
 		expect(code).toBe(0);
 		// One report per configured host (each node reports its own sites).
@@ -247,24 +268,31 @@ describe('status — dispatches to core statusReport per site', () => {
 	});
 });
 
-describe('derive — prints a site IPNS id from master + keyId, NO deploy', () => {
-	it('reads the master ENV-ONLY, resolves keyId, and prints the id (no core deploy)', async () => {
+describe('derive — prints a site IPNS id from master + single `id`, NO deploy', () => {
+	it('reads the master ENV-ONLY, feeds the site `id` as the KDF input, prints the id', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context, out} = ctx({
 			deps,
 			env: {PINNACE_MASTER: 'the-master-secret'},
 		});
-		const code = await run(['derive', 'mysite.eth'], context);
+		const code = await run(['derive', 'mysite'], context);
 		expect(code).toBe(0);
 		expect(calls.deriveIpnsId.length).toBe(1);
 		expect(calls.deriveIpnsId[0]).toMatchObject({
 			master: 'the-master-secret',
-			// keyId comes from the site entry, NOT the ENS name.
-			keyId: 'kid-1',
+			// The single site `id` IS the KDF input (no separate keyId).
+			keyId: 'mysite',
 		});
 		// It prints the id and never triggers a deploy.
 		expect(out.join('\n')).toContain('k51stubid');
 		expect(calls.deploy.length).toBe(0);
+	});
+
+	it('derives from the positional `id` even when it is not a configured site', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {PINNACE_MASTER: 'm'}});
+		await run(['derive', 'ad-hoc-id'], context);
+		expect(calls.deriveIpnsId[0]).toMatchObject({keyId: 'ad-hoc-id'});
 	});
 
 	it('FAILS loudly when the master is absent (env-only; never from the file)', async () => {
@@ -279,7 +307,7 @@ describe('derive — prints a site IPNS id from master + keyId, NO deploy', () =
 			env: {},
 			loadConfigFile: () => decoyFile,
 		});
-		const code = await run(['derive', 'mysite.eth'], context);
+		const code = await run(['derive', 'mysite'], context);
 		expect(code).not.toBe(0);
 		expect(calls.deriveIpnsId.length).toBe(0);
 		expect(err.join('\n')).toMatch(/master/i);
@@ -299,13 +327,21 @@ describe('env/config isolation — the operator real environment is untouched', 
 		const previous = process.env[sentinelKey];
 		process.env[sentinelKey] = 'REAL-ENV-SHOULD-NOT-LEAK';
 		try {
-			const {context} = ctx({deps, env: {}});
-			await run(['deploy', './dist', 'mysite.eth'], context);
+			// The injected in-memory env supplies its OWN token for host a; the CLI
+			// must use it, NOT the sentinel on the real process.env.
+			const {context} = ctx({
+				deps,
+				env: {
+					PINNACE_HOST_A_TOKEN: 'in-memory-token-a',
+					PINNACE_HOST_B_TOKEN: 'x',
+				},
+			});
+			await run(['deploy', './dist', 'mysite'], context);
 			const input = calls.deploy[0] as {
 				targets: Array<{token: string}>;
 			};
-			// The token came from the in-memory FILE, NOT the real process.env.
-			expect(input.targets[0].token).toBe('file-token-a');
+			// The token came from the injected in-memory env, NOT the real process.env.
+			expect(input.targets[0].token).toBe('in-memory-token-a');
 			expect(input.targets[0].token).not.toBe('REAL-ENV-SHOULD-NOT-LEAK');
 		} finally {
 			if (hadSentinel) process.env[sentinelKey] = previous;

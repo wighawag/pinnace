@@ -90,17 +90,17 @@ export async function republishAndExport(
 	const outcomes: SiteOutcome[] = [];
 
 	for (const site of sites) {
-		const ipns = keys.get(site.name);
+		const ipns = keys.get(site.id);
 		if (!ipns) {
 			// ipfs-mode site (no key): nothing to sign or export.
-			outcomes.push({name: site.name, cid: site.cid, status: 'no-key'});
+			outcomes.push({id: site.id, cid: site.cid, status: 'no-key'});
 			continue;
 		}
 
 		// The NODE signs here (refreshing validity). Not the client, not a replica.
 		await ctx.client.namePublish({
 			cidPath: `/ipfs/${site.cid}`,
-			key: site.name,
+			key: site.id,
 			lifetime: RECORD_LIFETIME,
 			ttl: RECORD_TTL,
 			allowOffline: true,
@@ -110,14 +110,14 @@ export async function republishAndExport(
 		const record = await ctx.client.routingGet(`/ipns/${ipns}`);
 		if (ctx.recordsDir) {
 			await mkdir(ctx.recordsDir, {recursive: true});
-			await writeFile(join(ctx.recordsDir, site.name + NAME_SUFFIX), ipns);
+			await writeFile(join(ctx.recordsDir, site.id + NAME_SUFFIX), ipns);
 			await writeFile(
-				join(ctx.recordsDir, site.name + RECORD_SUFFIX),
+				join(ctx.recordsDir, site.id + RECORD_SUFFIX),
 				Buffer.from(record),
 			);
 		}
 
-		outcomes.push({name: site.name, cid: site.cid, ipns, status: 'exported'});
+		outcomes.push({id: site.id, cid: site.cid, ipns, status: 'exported'});
 	}
 
 	return {sites: outcomes};
@@ -157,10 +157,10 @@ export async function mirrorAndReannounce(
 		if (base) {
 			try {
 				record = await fetchRecord(
-					`${base}/records/${site.name}${RECORD_SUFFIX}`,
+					`${base}/records/${site.id}${RECORD_SUFFIX}`,
 				);
 				ipnsId = (
-					await fetchRecord(`${base}/records/${site.name}${NAME_SUFFIX}`)
+					await fetchRecord(`${base}/records/${site.id}${NAME_SUFFIX}`)
 				).trim();
 			} catch {
 				record = undefined;
@@ -168,7 +168,7 @@ export async function mirrorAndReannounce(
 			}
 		}
 		if (record === undefined && ctx.cacheDir) {
-			const cached = await readCached(ctx.cacheDir, site.name);
+			const cached = await readCached(ctx.cacheDir, site.id);
 			if (cached) {
 				record = cached.record;
 				ipnsId = cached.ipnsId;
@@ -178,7 +178,7 @@ export async function mirrorAndReannounce(
 
 		if (record === undefined || !ipnsId) {
 			// Neither a live publisher nor a cache: report, don't throw.
-			outcomes.push({name: site.name, status: 'no-record'});
+			outcomes.push({id: site.id, status: 'no-record'});
 			continue;
 		}
 
@@ -186,8 +186,8 @@ export async function mirrorAndReannounce(
 		// (Cache-sourced records are already on disk.)
 		if (!fromCache && ctx.cacheDir) {
 			await mkdir(ctx.cacheDir, {recursive: true});
-			await writeFile(join(ctx.cacheDir, site.name + RECORD_SUFFIX), record);
-			await writeFile(join(ctx.cacheDir, site.name + NAME_SUFFIX), ipnsId);
+			await writeFile(join(ctx.cacheDir, site.id + RECORD_SUFFIX), record);
+			await writeFile(join(ctx.cacheDir, site.id + NAME_SUFFIX), ipnsId);
 		}
 
 		// Re-announce ONLY. No signing — this is a replica.
@@ -196,7 +196,7 @@ export async function mirrorAndReannounce(
 			new Uint8Array(Buffer.from(record)),
 		);
 		outcomes.push({
-			name: site.name,
+			id: site.id,
 			ipns: ipnsId,
 			status: fromCache ? 're-announced-cached' : 're-announced',
 		});

@@ -45,8 +45,8 @@ function clientWith(mock: MockKuboApi, token = 'on-box-token') {
 }
 
 const SITES: DiscoveredSite[] = [
-	{name: 'alice.eth', cid: 'bafyalice'},
-	{name: 'bob', cid: 'bafybob'},
+	{id: 'alice.eth', cid: 'bafyalice'},
+	{id: 'bob', cid: 'bafybob'},
 ];
 
 /** A publisher mock that resolves keys, publish, and a routing/get export. */
@@ -108,7 +108,7 @@ describe('republishAndExport (publisher) — exactly one signer, exports the raw
 					await readFile(join(ctx.recordsDir!, 'alice.eth.ipns-name'), 'utf8')
 				).trim(),
 			).toBe('k51alice');
-			expect(res.sites.find((s) => s.name === 'alice.eth')?.status).toBe(
+			expect(res.sites.find((s) => s.id === 'alice.eth')?.status).toBe(
 				'exported',
 			);
 		} finally {
@@ -128,7 +128,7 @@ describe('republishAndExport (publisher) — exactly one signer, exports the raw
 			expect(mock.requestsFor('name/publish')[0].query.get('key')).toBe(
 				'alice.eth',
 			);
-			expect(res.sites.find((s) => s.name === 'bob')?.status).toBe('no-key');
+			expect(res.sites.find((s) => s.id === 'bob')?.status).toBe('no-key');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}
@@ -193,11 +193,11 @@ describe('mirrorAndReannounce (replica) — fetch + routing/put, NEVER signs', (
 			);
 			// Never signs, even on the fallback path.
 			expect(mock.requestsFor('name/publish').length).toBe(0);
-			expect(res.sites.find((s) => s.name === 'alice.eth')?.status).toBe(
+			expect(res.sites.find((s) => s.id === 'alice.eth')?.status).toBe(
 				're-announced-cached',
 			);
 			// bob has neither a live publisher NOR a cache: reported, not thrown.
-			expect(res.sites.find((s) => s.name === 'bob')?.status).toBe('no-record');
+			expect(res.sites.find((s) => s.id === 'bob')?.status).toBe('no-record');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}
@@ -212,7 +212,7 @@ describe('node-command adapters (makeRepublishOp / makeMirrorOp) — same core b
 			const op = makeRepublishOp();
 			const res = await op(ctx, SITES);
 			expect(mock.requestsFor('routing/get').length).toBe(2);
-			expect(res.sites.find((s) => s.name === 'alice.eth')?.status).toBe(
+			expect(res.sites.find((s) => s.id === 'alice.eth')?.status).toBe(
 				'exported',
 			);
 		} finally {
@@ -282,7 +282,7 @@ describe('full sequence: publisher EXPORT -> replica FETCH -> routing/put -> fal
 			const before = repMock.requestsFor('routing/put').length;
 			const res = await mirrorAndReannounce(downCtx, SITES);
 			expect(repMock.requestsFor('routing/put').length).toBeGreaterThan(before);
-			expect(res.sites.find((s) => s.name === 'alice.eth')?.status).toBe(
+			expect(res.sites.find((s) => s.id === 'alice.eth')?.status).toBe(
 				're-announced-cached',
 			);
 			expect(repMock.requestsFor('name/publish').length).toBe(0);

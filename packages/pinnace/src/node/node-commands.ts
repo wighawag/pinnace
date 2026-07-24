@@ -56,17 +56,18 @@ const VERB_ROLE_GATE: Partial<Record<NodeVerb, HostRole>> = {
 	mirror: 'replica',
 };
 
-/** One site as auto-discovered from MFS `/sites/*`: its name and current CID. */
+/** One site as auto-discovered from MFS `/sites/*`: its `id` and current CID. */
 export interface DiscoveredSite {
-	/** The MFS entry name under `/sites/` (often the ENS name). */
-	name: string;
+	/** The MFS entry `id` under `/sites/` (the site's single identifier). */
+	id: string;
 	/** The current content root CID (`files/stat --hash`). */
 	cid: string;
 }
 
 /** Per-site outcome line a verb reports (shape is verb-specific but uniform). */
 export interface SiteOutcome {
-	name: string;
+	/** The site's single `id` (its MFS entry / KDF input). */
+	id: string;
 	cid?: string;
 	ipns?: string;
 	/** A short machine-readable status token (e.g. `re-announced`, `no-record`). */
@@ -191,13 +192,11 @@ export async function discoverSites(
 	const entries = listing.Entries ?? [];
 	const sites: DiscoveredSite[] = [];
 	for (const entry of entries) {
-		const name = entry?.Name;
-		if (!name) continue;
+		const id = entry?.Name;
+		if (!id) continue;
 		try {
-			const stat = await client.filesStat<{Hash?: string}>(
-				`${sitesDir}/${name}`,
-			);
-			if (stat?.Hash) sites.push({name, cid: stat.Hash});
+			const stat = await client.filesStat<{Hash?: string}>(`${sitesDir}/${id}`);
+			if (stat?.Hash) sites.push({id, cid: stat.Hash});
 		} catch {
 			// A site whose stat fails is skipped, not fatal for the others.
 		}
@@ -301,10 +300,14 @@ async function defaultWarm(
 			const url = template.replaceAll('{cid}', site.cid);
 			await safeWarm(warm, url);
 		}
-		if (site.name.endsWith('.eth')) {
-			await safeWarm(warm, `https://${site.name}.limo/`);
+		// eth.limo warming heuristic: an `id` ending `.eth` is ALSO warmed via
+		// eth.limo (keyed off the MFS entry `id`, the value that flows through
+		// here). Making this an explicit `ensName` hint is the sibling ENS-demotion
+		// idea's job, out of scope for this config-model change.
+		if (site.id.endsWith('.eth')) {
+			await safeWarm(warm, `https://${site.id}.limo/`);
 		}
-		outcomes.push({name: site.name, cid: site.cid, status: 'warmed'});
+		outcomes.push({id: site.id, cid: site.cid, status: 'warmed'});
 	}
 	return {sites: outcomes};
 }
@@ -327,9 +330,9 @@ async function defaultStatus(
 	// here, so an injected op gets persisted the same way.
 	const keys = await listKeys(ctx.client);
 	const outcomes: SiteOutcome[] = sites.map((s) => ({
-		name: s.name,
+		id: s.id,
 		cid: s.cid,
-		ipns: keys.get(s.name) ?? '',
+		ipns: keys.get(s.id) ?? '',
 	}));
 	return {sites: outcomes};
 }

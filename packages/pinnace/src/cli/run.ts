@@ -54,6 +54,8 @@ import {
 import {
 	resolveConfig,
 	resolveMasterSecret,
+	resolveHostToken,
+	MissingHostTokenError,
 	type PinnaceConfigFile,
 	type EnvRecord,
 	type CliOverrides,
@@ -77,7 +79,7 @@ export interface ClientDeps {
 	emitCi(input: EmitCiInput): EmittedCi;
 	/** `status` -> the per-site status report. */
 	statusReport(input: StatusReportInput): Promise<StatusReport>;
-	/** `derive` -> the master+keyId -> IPNS id derivation (no deploy). */
+	/** `derive` -> the master + site `id` -> IPNS id derivation (no deploy). */
 	deriveIpnsId(input: DeriveIpnsInput): string;
 }
 
@@ -282,37 +284,35 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 }
 
 /**
- * `deploy [--mode <m>] <dir> <site>` -> core {@link ClientDeps.deploy}. Resolves
- * every configured host into a {@link DeployTarget} (with its OWN token, via the
- * config-resolution precedence arg > env > file), and the site's `mode` from the
- * matching `pinnace.json` site entry (overridable with `--mode`). Prints the
- * resulting CID / per-node breakdown.
+ * `deploy [--mode <m>] <dir> <id>` -> core {@link ClientDeps.deploy}. Resolves
+ * every configured host into a {@link DeployTarget} (each host's OWN token
+ * resolved env-only, LAZILY, via {@link resolveHostToken} — CLI > env, no file),
+ * and the site's `mode` from the matching `pinnace.json` site entry (overridable
+ * with `--mode`). A host with no resolvable token FAILS LOUD naming its exact
+ * env var. Prints the resulting CID / per-node breakdown.
  */
 async function runDeploy(
 	argv: readonly string[],
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv);
-	const [dir, siteName] = positionals;
-	if (!dir || !siteName) {
+	const [dir, siteId] = positionals;
+	if (!dir || !siteId) {
 		rc.err(
-			'pinnace deploy: usage: pinnace deploy [--mode ipfs|ipns] <dir> <site>',
+			'pinnace deploy: usage: pinnace deploy [--mode ipfs|ipns] <dir> <id>',
 		);
 		return 1;
 	}
 
-	const cfg = resolveConfig({
-		file: rc.file,
-		env: rc.env,
-		cli: cliOverridesFromFlags(flags),
-	});
+	const cli = cliOverridesFromFlags(flags);
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 
 	// The site's mode: --mode arg > matching site entry (config precedence).
-	const siteEntry = cfg.sites.find((s) => s.name === siteName);
+	const siteEntry = cfg.sites.find((s) => s.id === siteId);
 	const mode = (flags['mode'] as SiteMode | undefined) ?? siteEntry?.mode;
 	if (mode !== 'ipfs' && mode !== 'ipns') {
 		rc.err(
-			`pinnace deploy: mode for '${siteName}' is unset or invalid; pass --mode ipfs|ipns or add the site to pinnace.json`,
+			`pinnace deploy: mode for '${siteId}' is unset or invalid; pass --mode ipfs|ipns or add the site to pinnace.json`,
 		);
 		return 1;
 	}
@@ -321,12 +321,23 @@ async function runDeploy(
 		return 1;
 	}
 
-	const targets: DeployTarget[] = cfg.hosts.map((h) => ({
-		baseUrl: h.endpoint,
-		token: h.token,
-		role: h.role,
-	}));
-	const input: DeployInput = {sourceDir: dir, name: siteName, mode, targets};
+	// Resolve each host's token env-only (LAZY: only the hosts this deploy uses).
+	// A missing token is a loud named error, never a silent "" / downstream 401.
+	let targets: DeployTarget[];
+	try {
+		targets = cfg.hosts.map((h) => ({
+			baseUrl: h.endpoint,
+			token: resolveHostToken({hostName: h.name, env: rc.env, cli}),
+			role: h.role,
+		}));
+	} catch (error) {
+		if (error instanceof MissingHostTokenError) {
+			rc.err(`pinnace deploy: ${error.message}`);
+			return 1;
+		}
+		throw error;
+	}
+	const input: DeployInput = {sourceDir: dir, id: siteId, mode, targets};
 
 	const result = await rc.deps.deploy(input);
 	rc.out(`cid: ${result.cid}`);
@@ -395,26 +406,31 @@ async function runStatus(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags} = parseArgs(argv);
-	const cfg = resolveConfig({
-		file: rc.file,
-		env: rc.env,
-		cli: cliOverridesFromFlags(flags),
-	});
+	const cli = cliOverridesFromFlags(flags);
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err('pinnace status: no hosts configured (add hosts to pinnace.json)');
 		return 1;
 	}
 
 	for (const host of cfg.hosts) {
-		const client = new KuboRpcClient({
-			baseUrl: host.endpoint,
-			token: host.token,
-		});
+		let token: string;
+		try {
+			// Env-only token, resolved LAZILY per host actually used (see deploy).
+			token = resolveHostToken({hostName: host.name, env: rc.env, cli});
+		} catch (error) {
+			if (error instanceof MissingHostTokenError) {
+				rc.err(`pinnace status: ${error.message}`);
+				return 1;
+			}
+			throw error;
+		}
+		const client = new KuboRpcClient({baseUrl: host.endpoint, token});
 		const report = await rc.deps.statusReport({client});
 		rc.out(`${host.name} (${host.endpoint}) peer ${report.peerId}`);
 		for (const site of report.sites) {
 			rc.out(
-				`  ${site.name}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''} announced=${site.announced} gatewayServes=${site.gatewayServes}`,
+				`  ${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''} announced=${site.announced} gatewayServes=${site.gatewayServes}`,
 			);
 		}
 	}
@@ -422,17 +438,18 @@ async function runStatus(
 }
 
 /**
- * `derive <site>` (a.k.a. `ipns-id`) -> core {@link ClientDeps.deriveIpnsId}.
- * Prints the site's `k51...` IPNS id from the master + the site's `keyId`, with
- * NO deploy (user story 22). The master is env-ONLY (via
- * {@link resolveMasterSecret}); the `keyId` comes from the site's `pinnace.json`
- * entry (or `--key-id`), never the ENS name. Fails loudly if the master is unset.
+ * `derive <id>` (a.k.a. `ipns-id`) -> core {@link ClientDeps.deriveIpnsId}.
+ * Prints the site's `k51...` IPNS id from the master + the site's single `id`
+ * (the KDF input), with NO deploy (user story 22). The master is env-ONLY (via
+ * {@link resolveMasterSecret}); the `id` is either the positional argument
+ * verbatim or, if it names a `pinnace.json` site entry, that entry's `id` (they
+ * are the same value — one identifier). Fails loudly if the master is unset.
  */
 function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
-	const {flags, positionals} = parseArgs(argv);
-	const [siteName] = positionals;
-	if (!siteName) {
-		rc.err('pinnace derive: usage: pinnace derive <site>');
+	const {positionals} = parseArgs(argv);
+	const [siteId] = positionals;
+	if (!siteId) {
+		rc.err('pinnace derive: usage: pinnace derive <id>');
 		return 1;
 	}
 
@@ -444,19 +461,13 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 		return 1;
 	}
 
-	// keyId: --key-id arg > the matching site entry's keyId (NOT the ENS name).
+	// The single `id` IS the KDF input. The positional is the id directly; a
+	// matching site entry carries the same value (no separate keyId to look up).
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli: {}});
-	const keyId =
-		flags['key-id'] ?? cfg.sites.find((s) => s.name === siteName)?.keyId;
-	if (!keyId) {
-		rc.err(
-			`pinnace derive: no keyId for '${siteName}'; add the site to pinnace.json or pass --key-id`,
-		);
-		return 1;
-	}
+	const id = cfg.sites.find((s) => s.id === siteId)?.id ?? siteId;
 
-	const id = rc.deps.deriveIpnsId({master, keyId});
-	rc.out(id);
+	const printed = rc.deps.deriveIpnsId({master, keyId: id});
+	rc.out(printed);
 	return 0;
 }
 

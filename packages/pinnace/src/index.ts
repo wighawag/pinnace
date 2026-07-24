@@ -42,6 +42,9 @@ export {
 export {
 	resolveConfig,
 	resolveMasterSecret,
+	resolveHostToken,
+	hostTokenEnvVar,
+	MissingHostTokenError,
 	type PinnaceConfigFile,
 	type ResolvedConfig,
 	type HostConfig,
@@ -52,6 +55,7 @@ export {
 	type CliOverrides,
 	type ResolveConfigInput,
 	type ResolveMasterInput,
+	type ResolveHostTokenInput,
 } from './config/config-resolution.js';
 export {
 	emitCi,

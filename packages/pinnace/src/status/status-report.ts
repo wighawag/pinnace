@@ -75,10 +75,10 @@ export type ProvidersLookup = (cid: string) => Promise<ProvidersResponse>;
  */
 export type GatewayProbe = (cid: string) => Promise<number>;
 
-/** The status of one site: the four report fields plus its name. */
+/** The status of one site: the four report fields plus its `id`. */
 export interface SiteStatus {
-	/** The MFS entry name under `/sites/` (often the ENS name). */
-	name: string;
+	/** The site's single `id` (its MFS entry under `/sites/`). */
+	id: string;
 	/** The current content root CID (`files/stat --hash`). */
 	cid: string;
 	/** The IPNS id, if a same-named keystore key exists (else undefined). */
@@ -145,9 +145,9 @@ export async function statusReport(
 		const announced = await checkAnnounced(providersLookup, site.cid, peerId);
 		const gatewayHttp = await probeGateway(gatewayProbe, site.cid);
 		statuses.push({
-			name: site.name,
+			id: site.id,
 			cid: site.cid,
-			ipns: keys.get(site.name),
+			ipns: keys.get(site.id),
 			announced,
 			gatewayHttp,
 			gatewayServes: gatewayHttp !== undefined && servesStatus(gatewayHttp),
@@ -177,7 +177,7 @@ export function makeStatusOp(
 		});
 		return {
 			sites: report.sites.map((s) => ({
-				name: s.name,
+				id: s.id,
 				cid: s.cid,
 				ipns: s.ipns ?? '',
 				announced: s.announced,

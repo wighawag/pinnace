@@ -7,13 +7,13 @@
  * lifecycle instead of leaving it an implicit side-effect of `deploy`:
  *
  *   - **list**   — enumerate `/sites/*` with each site's current CID and, when a
- *                  same-named keystore key exists, its IPNS id.
- *   - **remove** — `files/rm /sites/<name>` (the entry drops out of
+ *                  same-`id` keystore key exists, its IPNS id.
+ *   - **remove** — `files/rm /sites/<id>` (the entry drops out of
  *                  warm/republish/status auto-discovery) AND `pin/rm <cid>` so
  *                  the content stops being served/announced and its storage is
  *                  reclaimed.
  *   - **add**    — place an already-imported `/ipfs/<cid>` into MFS
- *                  `/sites/<name>` (mkdir parents / rm old / cp). See the
+ *                  `/sites/<id>` (mkdir parents / rm old / cp). See the
  *                  DESIGN NOTE below on its relationship to `deploy`.
  *
  * Every verb speaks ONLY the Kubo RPC seam (MFS + pin endpoints), so the same
@@ -46,13 +46,13 @@ export const SITE_VERBS: readonly SiteVerb[] = ['list', 'remove', 'add'];
 /** The MFS directory sites live under. */
 const DEFAULT_SITES_DIR = '/sites';
 
-/** One site as listed: its MFS name, current CID, and IPNS id if a key exists. */
+/** One site as listed: its MFS `id`, current CID, and IPNS id if a key exists. */
 export interface SiteListing {
-	/** The MFS entry name under `/sites/` (often the ENS name). */
-	name: string;
+	/** The site's single `id` (its MFS entry under `/sites/`). */
+	id: string;
 	/** The current content root CID (`files/stat --hash`). */
 	cid: string;
-	/** The IPNS id, if a same-named keystore key exists (ipfs-mode sites lack one). */
+	/** The IPNS id, if a same-`id` keystore key exists (ipfs-mode sites lack one). */
 	ipns?: string;
 }
 
@@ -69,14 +69,14 @@ export type ListSitesInput = SiteBaseInput;
 
 /** Inputs to {@link removeSite}. */
 export interface RemoveSiteInput extends SiteBaseInput {
-	/** The site name (its MFS entry `/sites/<name>`) to remove. */
-	name: string;
+	/** The site `id` (its MFS entry `/sites/<id>`) to remove. */
+	id: string;
 }
 
 /** The outcome of {@link removeSite}. */
 export interface RemoveSiteResult {
-	/** The site name that was removed. */
-	name: string;
+	/** The site `id` that was removed. */
+	id: string;
 	/** The CID that backed it (undefined if it had no resolvable content). */
 	cid?: string;
 	/** True when the content was unpinned (storage reclaimed); false if unpin failed. */
@@ -85,16 +85,16 @@ export interface RemoveSiteResult {
 
 /** Inputs to {@link addSite}. */
 export interface AddSiteInput extends SiteBaseInput {
-	/** The site name to expose it under (its MFS entry `/sites/<name>`). */
-	name: string;
+	/** The site `id` to expose it under (its MFS entry `/sites/<id>`). */
+	id: string;
 	/** The already-imported content root CID to place into MFS. */
 	cid: string;
 }
 
 /** The outcome of {@link addSite}. */
 export interface AddSiteResult {
-	/** The site name that was placed. */
-	name: string;
+	/** The site `id` that was placed. */
+	id: string;
 	/** The CID that now backs it in MFS. */
 	cid: string;
 }
@@ -112,10 +112,10 @@ export async function listSites(input: ListSitesInput): Promise<SiteListing[]> {
 
 	const keys = await listKeys(input.client);
 	const sites: SiteListing[] = [];
-	for (const name of entries) {
-		const cid = await statCid(input.client, `${sitesDir}/${name}`);
+	for (const id of entries) {
+		const cid = await statCid(input.client, `${sitesDir}/${id}`);
 		if (!cid) continue; // an entry with no resolvable CID is skipped, not fatal.
-		sites.push({name, cid, ipns: keys.get(name)});
+		sites.push({id, cid, ipns: keys.get(id)});
 	}
 	return sites;
 }
@@ -136,7 +136,7 @@ export async function removeSite(
 	input: RemoveSiteInput,
 ): Promise<RemoveSiteResult> {
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
-	const path = `${sitesDir}/${input.name}`;
+	const path = `${sitesDir}/${input.id}`;
 
 	// Resolve the CID before we remove the entry (afterwards it is gone).
 	const cid = await statCid(input.client, path);
@@ -156,7 +156,7 @@ export async function removeSite(
 		}
 	}
 
-	return {name: input.name, cid, unpinned};
+	return {id: input.id, cid, unpinned};
 }
 
 /**
@@ -168,26 +168,26 @@ export async function removeSite(
  */
 export async function addSite(input: AddSiteInput): Promise<AddSiteResult> {
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
-	await placeInMfs(input.client, sitesDir, input.name, input.cid);
-	return {name: input.name, cid: input.cid};
+	await placeInMfs(input.client, sitesDir, input.id, input.cid);
+	return {id: input.id, cid: input.cid};
 }
 
 /**
  * The MFS-placement step: `files/mkdir /sites --parents`, `files/rm
- * /sites/<name> --recursive --force` (clear any prior content), then `files/cp
- * /ipfs/<cid> /sites/<name>`. Ported from the reference prototype's deploy MFS
+ * /sites/<id> --recursive --force` (clear any prior content), then `files/cp
+ * /ipfs/<cid> /sites/<id>`. Ported from the reference prototype's deploy MFS
  * placement (`~/searches/ipfs-hetzner/deploy-car.mjs`). Exported so `deploy`
  * can REUSE this exact sequence rather than forking it.
  */
 export async function placeInMfs(
 	client: KuboRpcClient,
 	sitesDir: string,
-	name: string,
+	id: string,
 	cid: string,
 ): Promise<void> {
 	await client.filesMkdir(sitesDir, {parents: true});
-	await client.filesRm(`${sitesDir}/${name}`, {recursive: true, force: true});
-	await client.filesCp(`/ipfs/${cid}`, `${sitesDir}/${name}`);
+	await client.filesRm(`${sitesDir}/${id}`, {recursive: true, force: true});
+	await client.filesCp(`/ipfs/${cid}`, `${sitesDir}/${id}`);
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import {deploy, type DeployTarget} from '../../src/deploy/deploy.js';
  * {@link MockKuboApi} (spec Testing Decisions: no live daemon). We assert:
  *  - the SAME CAR is imported (dag/import?pin-roots=true) into EVERY node, each
  *    with its OWN bearer token, all yielding the identical CID (AC 1),
- *  - each node gets the site placed in MFS /sites/<name> (mkdir/rm/cp) (AC 2),
+ *  - each node gets the site placed in MFS /sites/<id> (mkdir/rm/cp) (AC 2),
  *  - the EXACT per-mode call SEQUENCE: `ipfs` = import + MFS ONLY; `ipns` = ADDS
  *    key/list + name/publish (AC 3),
  *  - a replica / publish-disabled target does import + MFS but NEVER name/publish
@@ -75,7 +75,7 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 		const b = mockNode('https://node-b.test');
 		const result = await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipfs',
 			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
 		});
@@ -113,7 +113,7 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 		const b = mockNode('https://node-b.test');
 		const result = await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipfs',
 			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
 		});
@@ -124,12 +124,12 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 		expect(result.cid.length).toBeGreaterThan(0);
 	});
 
-	it('places the site in MFS /sites/<name> on every node (mkdir / rm / cp)', async () => {
+	it('places the site in MFS /sites/<id> on every node (mkdir / rm / cp)', async () => {
 		const a = mockNode('https://node-a.test');
 		const b = mockNode('https://node-b.test');
 		const result = await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipfs',
 			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
 		});
@@ -161,7 +161,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		const a = mockNode('https://node-a.test');
 		await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipfs',
 			targets: [targetWith(a, 'token-a')],
 		});
@@ -181,7 +181,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		const a = mockNode('https://node-a.test', 'k51mysite');
 		await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipns',
 			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
 		});
@@ -208,7 +208,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		const b = mockNode('https://node-b.test', 'k51b');
 		const result = await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipns',
 			targets: [
 				targetWith(a, 'token-a', {role: 'publisher'}),
@@ -227,7 +227,7 @@ describe('deploy — a replica / publish-disabled target NEVER publishes', () =>
 		const rep = mockNode('https://replica.test');
 		await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipns',
 			targets: [
 				targetWith(pub, 'token-pub', {role: 'publisher'}),
@@ -249,7 +249,7 @@ describe('deploy — a replica / publish-disabled target NEVER publishes', () =>
 		const a = mockNode('https://node-a.test', 'k51a');
 		await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipns',
 			targets: [targetWith(a, 'token-a', {role: 'publisher', publish: false})],
 		});
@@ -268,7 +268,7 @@ describe('deploy — multi-target fan-out (partial failure is still success)', (
 
 		const result = await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipfs',
 			targets: [targetWith(good, 'token-good'), targetWith(bad, 'token-bad')],
 		});
@@ -291,7 +291,7 @@ describe('deploy — multi-target fan-out (partial failure is still success)', (
 		b.on('dag/import', {status: 500, text: 'boom'});
 		const result = await deploy({
 			sourceDir: siteDir,
-			name: 'mysite.eth',
+			id: 'mysite.eth',
 			mode: 'ipfs',
 			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
 		});

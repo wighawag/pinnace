@@ -5,7 +5,7 @@
  * **CAR** ONCE (via the `car-build` seam), then fan out across every configured
  * **node** (each with its OWN bearer token) so all nodes serve the IDENTICAL
  * **CID** with no single point of failure. Per node the flow is: import + pin
- * the CAR (`dag/import?pin-roots=true`), then place it in MFS at `/sites/<name>`
+ * the CAR (`dag/import?pin-roots=true`), then place it in MFS at `/sites/<id>`
  * (mkdir parents / rm old / cp `/ipfs/<cid>`) so `gateway warming`, IPNS
  * republish, and `status` auto-discover it. Deploy speaks ONLY the Kubo RPC seam
  * ({@link KuboRpcClient}); it is not host-specific.
@@ -75,8 +75,8 @@ export interface DeployInput {
 	sourceDir?: string;
 	/** A prebuilt CAR to deploy as-is (mutually exclusive with `sourceDir`). */
 	car?: BuiltCar;
-	/** The site name (its MFS entry `/sites/<name>` and, in ipns mode, its key name). */
-	name: string;
+	/** The site's single `id`: its MFS entry `/sites/<id>` and, in ipns mode, its key name. */
+	id: string;
 	/** ipfs (land+pin+MFS) or ipns (also key/list + name/publish on publishers). */
 	mode: SiteMode;
 	/** The nodes to deploy to (each with its own token); the CAR lands on all. */
@@ -132,7 +132,7 @@ export interface DeployResult {
  * @throws if neither `sourceDir` nor `car` is supplied, or both are.
  */
 export async function deploy(input: DeployInput): Promise<DeployResult> {
-	const {sourceDir, car, name, mode, targets} = input;
+	const {sourceDir, car, id, mode, targets} = input;
 	if ((sourceDir === undefined) === (car === undefined)) {
 		throw new Error('deploy requires exactly one of `sourceDir` or `car`');
 	}
@@ -144,7 +144,7 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 
 	// Fan out. allSettled so one node's failure never sinks the others.
 	const settled = await Promise.allSettled(
-		targets.map((target) => deployToNode(target, built, name, mode, sitesDir)),
+		targets.map((target) => deployToNode(target, built, id, mode, sitesDir)),
 	);
 
 	const ok: DeployNodeOk[] = [];
@@ -175,7 +175,7 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 async function deployToNode(
 	target: DeployTarget,
 	built: BuiltCar,
-	name: string,
+	id: string,
 	mode: SiteMode,
 	sitesDir: string,
 ): Promise<DeployNodeOk> {
@@ -188,13 +188,13 @@ async function deployToNode(
 	// 1. Import + pin the CAR (same CID as every other node).
 	await client.dagImport(built.carBytes);
 
-	// 2. Place it in MFS /sites/<name> (mkdir parents / rm old / cp /ipfs/<cid>).
+	// 2. Place it in MFS /sites/<id> (mkdir parents / rm old / cp /ipfs/<cid>).
 	//    Reuses the single implementation of that sequence (site-management).
-	await placeInMfs(client, sitesDir, name, built.rootCid);
+	await placeInMfs(client, sitesDir, id, built.rootCid);
 
 	// 3. Mode branch: ipns mode ADDS publish, and ONLY on a publishing publisher.
 	if (mode === 'ipns' && shouldPublish(target)) {
-		const ipns = await publish(client, name, built.rootCid);
+		const ipns = await publish(client, id, built.rootCid);
 		return {baseUrl: target.baseUrl, cid: built.rootCid, ipns, published: true};
 	}
 
@@ -213,20 +213,22 @@ function shouldPublish(target: DeployTarget): boolean {
 /**
  * The publish path (ipns mode, publisher only): `key/list` to resolve the site
  * key's IPNS id, then `name/publish` to sign+refresh the record for
- * `/ipfs/<cid>`. Does NOT `key/gen`/`key/import` — the key is provisioned by
- * the sibling `key-import-publisher` task; here we assume it exists. If it does
- * not yet, we skip the publish (returning undefined) rather than silently
+ * `/ipfs/<cid>`. The keystore key name is the site's single `id` (the same
+ * value key-import imports under — one identifier, so the lookup cannot miss by
+ * a name/keyId split). Does NOT `key/gen`/`key/import`: the key is provisioned
+ * by the sibling `key-import-publisher` task; here we assume it exists. If it
+ * does not yet, we skip the publish (returning undefined) rather than silently
  * generating a key deploy has no business owning.
  */
 async function publish(
 	client: KuboRpcClient,
-	name: string,
+	id: string,
 	cid: string,
 ): Promise<string | undefined> {
 	const keys = await client.keyList<{
 		Keys?: Array<{Name?: string; Id?: string}> | null;
 	}>();
-	const ipns = (keys.Keys ?? []).find((k) => k?.Name === name)?.Id;
+	const ipns = (keys.Keys ?? []).find((k) => k?.Name === id)?.Id;
 	if (!ipns) {
 		// The publisher has no key for this site yet (key-import-publisher owns
 		// provisioning it). Land the content but do not sign.
@@ -234,7 +236,7 @@ async function publish(
 	}
 	await client.namePublish({
 		cidPath: `/ipfs/${cid}`,
-		key: name,
+		key: id,
 		lifetime: RECORD_LIFETIME,
 		ttl: RECORD_TTL,
 		allowOffline: true,
