@@ -4,6 +4,7 @@ slug: kubo-multipart-file-uploads
 spec: pinnace
 blockedBy: []
 covers: [3, 4]
+needsAnswers: true
 ---
 
 ## What to build
