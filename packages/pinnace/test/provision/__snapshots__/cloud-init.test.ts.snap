@@ -103,9 +103,10 @@ write_files:
       # --- Discoverability: keep provider records fresh so gateways find us ---
       cfg --json Routing.AcceleratedDHTClient true
       cfg Routing.Type "auto"
-      # Reprovide everything we serve; interval well under the record expiry.
-      cfg Reprovider.Interval "12h"
-      cfg Reprovider.Strategy "all"
+      # Re-announce everything we serve; interval well under the record expiry.
+      # (Kubo 0.38 uses Provide.*; the pre-0.38 keys FATAL the daemon at boot.)
+      cfg Provide.Interval "12h"
+      cfg Provide.Strategy "all"
 
       # --- Resource hygiene for a small box ---
       cfg Datastore.StorageMax "40GB"

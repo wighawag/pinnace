@@ -28,7 +28,7 @@
  * operator's client and as the box's periodic agent, so the record/warm/mirror/
  * status logic has a single implementation (no bash/TS drift). Kubo still owns
  * pinning (`dag/import --pin-roots`) + provider-record freshness
- * (`Reprovider.Interval`); the pinnace timers own ONLY IPNS republish/export,
+ * (`Provide.Interval`); the pinnace timers own ONLY IPNS republish/export,
  * replica mirror/fallback, gateway warm, and status. The reference bash is used
  * here as the BEHAVIOURAL SPEC of what each timer must do, not as code to emit.
  *
@@ -349,9 +349,10 @@ write_files:
       # --- Discoverability: keep provider records fresh so gateways find us ---
       cfg --json Routing.AcceleratedDHTClient true
       cfg Routing.Type "auto"
-      # Reprovide everything we serve; interval well under the record expiry.
-      cfg Reprovider.Interval "12h"
-      cfg Reprovider.Strategy "all"
+      # Re-announce everything we serve; interval well under the record expiry.
+      # (Kubo 0.38 uses Provide.*; the pre-0.38 keys FATAL the daemon at boot.)
+      cfg Provide.Interval "12h"
+      cfg Provide.Strategy "all"
 
       # --- Resource hygiene for a small box ---
       cfg Datastore.StorageMax "40GB"

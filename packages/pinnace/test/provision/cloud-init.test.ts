@@ -90,13 +90,25 @@ describe('provision: security invariants', () => {
 		expect(contents).toContain('API.Authorizations');
 	});
 
-	it('sets the discoverability flags: AcceleratedDHTClient + reprovide + Routing.Type auto', () => {
+	it('sets the discoverability flags: AcceleratedDHTClient + Provide + Routing.Type auto', () => {
 		const {contents} = provision(baseInput()).cloudInit;
 		expect(contents).toContain('Routing.AcceleratedDHTClient');
 		expect(contents).toContain('Routing.Type');
 		expect(contents).toMatch(/Routing\.Type[^\n]*auto/);
-		expect(contents).toContain('Reprovider.Interval');
-		expect(contents).toContain('Reprovider.Strategy');
+		expect(contents).toContain('Provide.Interval');
+		expect(contents).toContain('Provide.Strategy');
+	});
+
+	// Kubo 0.38 (the pinned DEFAULT_KUBO_VERSION) renamed `Reprovider.*` ->
+	// `Provide.*` and FATALs at startup if any deprecated `Reprovider` key is
+	// present. The emitted config MUST use the new keys and MUST NOT contain any
+	// `Reprovider` key at all, otherwise the provisioned daemon crash-loops. See
+	// work/notes/observations/cloud-init-deprecated-reprovider-fatal-on-kubo-0-38.md.
+	it('emits Provide.* (Kubo 0.38 keys) and NEVER any deprecated Reprovider key', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		expect(contents).toContain('Provide.Interval');
+		expect(contents).toContain('Provide.Strategy');
+		expect(contents).not.toMatch(/Reprovider/);
 	});
 
 	it('runs Kubo as a hardened systemd unit (dedicated user + sandboxing)', () => {

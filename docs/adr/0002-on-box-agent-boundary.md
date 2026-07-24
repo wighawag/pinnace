@@ -6,7 +6,7 @@ A future reader will look at `pinnace node <verb>` and reasonably ask: *why is t
 
 ## The boundary (what owns what)
 
-- **Kubo owns content availability.** Pinning is a ONE-TIME `dag/import --pin-roots` at deploy; after that Kubo keeps the CID pinned and re-announces its provider records on its own schedule (`Reprovider.Interval`, plus AcceleratedDHTClient + delegated routing). pinnace does **nothing recurring** for pinning or provider-record freshness. There is no pinnace timer that re-pins or re-provides.
+- **Kubo owns content availability.** Pinning is a ONE-TIME `dag/import --pin-roots` at deploy; after that Kubo keeps the CID pinned and re-announces its provider records on its own schedule (`Provide.Interval`, plus AcceleratedDHTClient + delegated routing). pinnace does **nothing recurring** for pinning or provider-record freshness. There is no pinnace timer that re-pins or re-provides.
 - **pinnace's recurring on-box loop owns ONLY what Kubo does NOT do for us:**
   - **IPNS republish + export** (`pinnace node republish`, publisher role) — Kubo does not refresh an IPNS record's *validity* on its own; refreshing requires re-signing (`name/publish`) with the key, and the raw signed record must be **exported** (`routing/get`) for keyless replicas to mirror.
   - **replica mirror + fallback** (`pinnace node mirror`, replica role) — a keyless box fetches the publisher's exported record and re-announces it (`routing/put`), falling back to its last cached record if the publisher is unreachable. Kubo has no notion of "mirror another node's IPNS record."
