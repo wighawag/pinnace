@@ -54,6 +54,17 @@ export {
 	type ResolveMasterInput,
 } from './config/config-resolution.js';
 export {
+	emitCi,
+	githubCiProvider,
+	CI_SYSTEMS,
+	type CiSystem,
+	type CIProvider,
+	type EmitCiInput,
+	type EmittedCi,
+	type EmittedFile,
+	type RequiredCiSetting,
+} from './ci/ci-emit.js';
+export {
 	runNodeCommand,
 	discoverSites,
 	NODE_VERBS,
