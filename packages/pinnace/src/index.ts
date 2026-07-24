@@ -30,6 +30,7 @@ export {
 	type RecordedRequest,
 	type MockResponseSpec,
 } from './rpc/mock-kubo.js';
+export {buildCar, writeCar, type BuiltCar} from './car/car-build.js';
 export {
 	deriveIpnsKey,
 	deriveIpnsId,
