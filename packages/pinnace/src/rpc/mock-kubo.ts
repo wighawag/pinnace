@@ -153,7 +153,13 @@ async function inspectBody(
 		// and IGNORES any hand-set content-type. Model that here.
 		const fileParts: RecordedFilePart[] = [];
 		const textLines: string[] = [];
-		for (const [field, value] of body.entries()) {
+		// This TS `lib` (dom) types FormData without `entries()`/an iterator, so
+		// collect the parts via `forEach` (which IS typed) then process them.
+		const entries: Array<[string, FormDataEntryValue]> = [];
+		body.forEach((value, field) => {
+			entries.push([field, value]);
+		});
+		for (const [field, value] of entries) {
 			if (value instanceof Blob) {
 				const bytes = new Uint8Array(await value.arrayBuffer());
 				const filename =
