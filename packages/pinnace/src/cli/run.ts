@@ -5,6 +5,7 @@
  */
 import {name} from '../index.js';
 import {NODE_VERBS, type NodeVerb} from '../node/node-commands.js';
+import {SITE_VERBS, type SiteVerb} from '../site/site-management.js';
 
 /**
  * Dispatch a pinnace CLI invocation. Returns the process exit code.
@@ -23,7 +24,33 @@ export async function run(argv: readonly string[]): Promise<number> {
 	if (command === 'node') {
 		return runNodeCli(rest);
 	}
+	if (command === 'site') {
+		return runSiteCli(rest);
+	}
 	console.log(`${name()}: no command given`);
+	return 0;
+}
+
+/**
+ * Parse `pinnace site <verb>` and validate the verb. The full context (Kubo
+ * client from config-resolution, the site name / CID args) is assembled by the
+ * CLI wiring in a later task; this thin router validates the verb belongs to
+ * the `site` namespace, keeping the CLI a parse/format layer over the core
+ * (CONTEXT.md `core vs cli`). The three verbs (list/remove/add) are implemented
+ * in `../site/site-management.ts`.
+ */
+function runSiteCli(argv: readonly string[]): number {
+	const [verb] = argv;
+	if (!verb) {
+		console.error(`pinnace site: expected a verb (${SITE_VERBS.join(', ')})`);
+		return 1;
+	}
+	if (!SITE_VERBS.includes(verb as SiteVerb)) {
+		console.error(
+			`pinnace site: unknown verb '${verb}'; expected one of ${SITE_VERBS.join(', ')}`,
+		);
+		return 1;
+	}
 	return 0;
 }
 

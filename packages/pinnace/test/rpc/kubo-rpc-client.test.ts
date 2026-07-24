@@ -125,6 +125,14 @@ describe('KuboRpcClient — auth + per-endpoint request shape', () => {
 		await client.add(new Uint8Array([1]));
 		expect(mock.lastRequest!.path).toBe('add');
 	});
+
+	it('pinRm hits pin/rm?arg=<cid> to unpin content', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.pinRm('bafysite');
+		expect(mock.lastRequest!.path).toBe('pin/rm');
+		expect(mock.lastRequest!.query.get('arg')).toBe('bafysite');
+	});
 });
 
 describe('KuboRpcClient — error path', () => {

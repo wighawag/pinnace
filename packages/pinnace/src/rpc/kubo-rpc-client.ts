@@ -144,6 +144,16 @@ export class KuboRpcClient {
 		});
 	}
 
+	/**
+	 * `pin/rm?arg=<cid>` — UNPIN content so Kubo can garbage-collect it and
+	 * reclaim storage. The counterpart to `dag/import?pin-roots=true`: removing a
+	 * site unpins its CID here so it stops being served/announced. `arg` takes a
+	 * bare CID (or an `/ipfs/<cid>` path); callers pass the CID from `files/stat`.
+	 */
+	pinRm<T = unknown>(cid: string): Promise<T> {
+		return this.requestJson<T>('pin/rm', new URLSearchParams({arg: cid}));
+	}
+
 	/** `files/mkdir?arg=<path>[&parents=true]`. */
 	async filesMkdir(
 		path: string,

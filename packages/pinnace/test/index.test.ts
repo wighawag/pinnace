@@ -25,4 +25,15 @@ describe('pinnace cli seam', () => {
 		expect(await run(['node'])).toEqual(1);
 		expect(await run(['node', 'frobnicate'])).toEqual(1);
 	});
+
+	it('routes the `site <verb>` namespace and accepts list/remove/add', async () => {
+		for (const verb of ['list', 'remove', 'add']) {
+			expect(await run(['site', verb])).toEqual(0);
+		}
+	});
+
+	it('rejects `site` with a missing or unknown verb (non-zero exit)', async () => {
+		expect(await run(['site'])).toEqual(1);
+		expect(await run(['site', 'frobnicate'])).toEqual(1);
+	});
 });

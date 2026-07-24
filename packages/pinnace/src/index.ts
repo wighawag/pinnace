@@ -87,6 +87,20 @@ export {
 	type GatewayFetch,
 } from './node/node-commands.js';
 export {
+	listSites,
+	removeSite,
+	addSite,
+	placeInMfs,
+	SITE_VERBS,
+	type SiteVerb,
+	type SiteListing,
+	type ListSitesInput,
+	type RemoveSiteInput,
+	type RemoveSiteResult,
+	type AddSiteInput,
+	type AddSiteResult,
+} from './site/site-management.js';
+export {
 	statusReport,
 	makeStatusOp,
 	defaultProvidersLookup,
