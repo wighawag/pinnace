@@ -41,6 +41,18 @@
  *    (interval well under the record-expiry window, strategy `all`).
  *  - Caddy HTTPS reverse proxy for the RPC API (auto TLS), which forwards the
  *    operator's bearer header straight through to the token-guarded Kubo API.
+ *
+ * INSTALL CHANNEL + BOOT-SAFETY (task `cloud-init-pinnace-install-channel`):
+ *  - The box installs a PINNED `pinnace` ({@link DEFAULT_PINNACE_VERSION}) on a
+ *    named current Node LTS ({@link DEFAULT_NODE_MAJOR}), both overridable per
+ *    box. Pinned (never floating `latest`) so a boot is reproducible.
+ *  - The install is BOOT-SAFE: `pinnace-setup.sh` is invoked with `|| true`, so
+ *    a transient npm/registry failure can NOT abort the boot. Kubo, the
+ *    firewall and Caddy come up regardless of the agent install.
+ *  - The dedicated `ipfs` service user is created by cloud-init's `users:`
+ *    module, which runs BEFORE `runcmd`, so no boot step can hit "invalid user
+ *    'ipfs'" (closes the first-boot race in
+ *    work/notes/observations/cloud-init-first-boot-ipfs-user-race-and-set-e-abort.md).
  */
 import type {HostRole} from '../config/config-resolution.js';
 
@@ -95,6 +107,19 @@ export interface ProvisionInput {
 	gateways?: string[];
 	/** The Kubo version to install. Defaults to a pinned known-good release. */
 	kuboVersion?: string;
+	/**
+	 * The `pinnace` version to install on the box (`npm install -g
+	 * pinnace@<this>`). Defaults to {@link DEFAULT_PINNACE_VERSION} (the current
+	 * published release). PINNED, never floating `latest`, so a box boot is
+	 * reproducible. Overridable per-box (e.g. to roll a box onto a newer agent).
+	 */
+	pinnaceVersion?: string;
+	/**
+	 * The Node.js major version to install via NodeSource (`setup_<this>.x`).
+	 * Defaults to {@link DEFAULT_NODE_MAJOR} (a current active LTS). A named knob
+	 * so the LTS bump is one obvious edit, not a literal buried in a shell line.
+	 */
+	nodeMajor?: string;
 	/** The MFS directory sites live under. Defaults to `/sites`. */
 	sitesDir?: string;
 }
@@ -131,6 +156,23 @@ export interface HostProvider {
 
 /** Defaults kept in one place so the template + docs never drift. */
 const DEFAULT_KUBO_VERSION = 'v0.38.1';
+/**
+ * The pinned `pinnace` version the box installs (`npm install -g
+ * pinnace@<this>`). Mirrors {@link DEFAULT_KUBO_VERSION}: a NAMED knob, not a
+ * literal, so a release bump is one obvious edit here. PINNED (never floating
+ * `latest`) so a box boot is reproducible: the same cloud-init always installs
+ * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
+ * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
+ */
+const DEFAULT_PINNACE_VERSION = '0.1.0';
+/**
+ * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
+ * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
+ * (EOL ~2026-04) and incoherent with the repo's own Node 24 toolchain. A NAMED
+ * knob (mirrors {@link DEFAULT_KUBO_VERSION}) so the LTS bump is one edit.
+ * Overridable per-box via {@link ProvisionInput.nodeMajor}.
+ */
+const DEFAULT_NODE_MAJOR = '22';
 const DEFAULT_SITES_DIR = '/sites';
 const DEFAULT_GATEWAYS: readonly string[] = [
 	'https://{cid}.ipfs.dweb.link/',
@@ -239,6 +281,8 @@ function renderHetznerCloudInit(input: ProvisionInput): string {
 		input.role === 'replica' ? (input.publisherEndpoint ?? '') : '';
 	const gateways = input.gateways ?? DEFAULT_GATEWAYS;
 	const kuboVersion = input.kuboVersion ?? DEFAULT_KUBO_VERSION;
+	const pinnaceVersion = input.pinnaceVersion ?? DEFAULT_PINNACE_VERSION;
+	const nodeMajor = input.nodeMajor ?? DEFAULT_NODE_MAJOR;
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
 	const warmGateways = gateways.join(' ');
 
@@ -279,6 +323,22 @@ packages:
   - apt-transport-https
 
 # ---------------------------------------------------------------------------
+# Service users. cloud-init's \`users:\` module runs BEFORE \`runcmd\`, so the
+# dedicated \`ipfs\` user is GUARANTEED to exist before any boot step uses it
+# (e.g. \`install -o ipfs ...\`). Creating it here (not mid-\`ipfs-setup.sh\`,
+# which is a \`set -e\` block that could abort before its \`useradd\`) closes the
+# first-boot race where a later step hit "invalid user 'ipfs'".
+# \`default\` keeps cloud-init's normal login user; we only ADD \`ipfs\`.
+# ---------------------------------------------------------------------------
+users:
+  - default
+  - name: ipfs
+    system: true
+    home: /var/lib/ipfs
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+
+# ---------------------------------------------------------------------------
 # On-box environment consumed by the pinnace node timers + the setup scripts.
 # ---------------------------------------------------------------------------
 write_files:
@@ -309,6 +369,12 @@ write_files:
       PUBLISHER_ENDPOINT="${publisherEndpoint}"
 
       KUBO_VERSION="${kuboVersion}"
+
+      # Node.js major installed via NodeSource (setup_<major>.x) and the PINNED
+      # pinnace version installed on the box. Both are reproducible: the same
+      # cloud-init always installs the same agent on the same runtime.
+      NODE_MAJOR="${nodeMajor}"
+      PINNACE_VERSION="${pinnaceVersion}"
 
   # -- Kubo installer / initializer -----------------------------------------
   - path: /usr/local/sbin/ipfs-setup.sh
@@ -408,13 +474,19 @@ write_files:
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
-      # Install Node.js (for npm) then the pinnace binary globally. The on-box
-      # timers invoke \`pinnace node <verb>\`: one codebase, client + on-box.
+      source /etc/pinnace-node.env
+      # Install Node.js (for npm) then the PINNED pinnace binary globally. The
+      # on-box timers invoke \`pinnace node <verb>\`: one codebase, client +
+      # on-box. NODE_MAJOR / PINNACE_VERSION come from /etc/pinnace-node.env so
+      # the runtime + agent version are reproducible and one-edit overridable.
+      # This script is invoked NON-FATALLY at boot (\`|| true\`): a transient
+      # npm/registry hiccup must NOT abort provisioning (Kubo, the firewall and
+      # Caddy are already up by the time this runs). Re-run it manually to retry.
       if ! command -v npm >/dev/null 2>&1; then
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        curl -fsSL "https://deb.nodesource.com/setup_\${NODE_MAJOR}.x" | bash -
         apt-get install -y nodejs
       fi
-      npm install -g pinnace
+      npm install -g "pinnace@\${PINNACE_VERSION}"
       pinnace version
 
   # -- Caddy reverse proxy for the HTTPS API (auto TLS) ---------------------
@@ -490,12 +562,20 @@ runcmd:
   # Configure the HTTPS API proxy (no-op if API_DOMAIN unset)
   - /usr/local/sbin/write-caddyfile.sh
 
-  # Install the pinnace binary (the box runs the same CLI as the client).
-  - /usr/local/sbin/pinnace-setup.sh
+  # Dashboard dir, owned by the ipfs service user (guaranteed to exist: created
+  # by the \`users:\` module above, BEFORE runcmd). Done BEFORE the pinnace
+  # install so a transient install failure can never skip it.
+  - install -d -o ipfs -g ipfs /var/www/ipfs-dash
+
+  # Install the pinned pinnace binary (the box runs the same CLI as the client).
+  # BOOT-SAFE: \`|| true\` so a transient npm/registry failure does NOT abort the
+  # boot (Kubo, the firewall and Caddy are already up). Re-run
+  # /usr/local/sbin/pinnace-setup.sh manually to retry; the timers below pick it
+  # up on their next tick once the binary is present.
+  - /usr/local/sbin/pinnace-setup.sh || true
 
   # Enable the pinnace node timers. republish self-gates to publisher, mirror to
   # replica, so enabling all of them on every box is safe (ADR-0002).
-  - install -d -o ipfs -g ipfs /var/www/ipfs-dash
 ${enableTimers}
 
 # =============================================================================

@@ -340,9 +340,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
 
 /**
  * `provision --host <h> --api-domain <d> --acme-email <e> --bearer-token <t>
- * --role <r> [...]` -> core {@link ClientDeps.provision}. Purely arg-driven
- * (provisioning inputs are per-box and not stored in `pinnace.json`); prints the
- * generated cloud-init to stdout.
+ * --role <r> [--pinnace-version <v>] [--node-major <n>] [--kubo-version <v>]
+ * [...]` -> core {@link ClientDeps.provision}. Purely arg-driven (provisioning
+ * inputs are per-box and not stored in `pinnace.json`); prints the generated
+ * cloud-init to stdout. The pinned pinnace/Node/Kubo versions default to the
+ * generator's named knobs and are overridable per-box via these flags.
  */
 function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags} = parseArgs(argv);
@@ -380,6 +382,9 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 		input.dashboardDomain = flags['dashboard-domain'];
 	if (flags['publisher-endpoint'])
 		input.publisherEndpoint = flags['publisher-endpoint'];
+	if (flags['kubo-version']) input.kuboVersion = flags['kubo-version'];
+	if (flags['pinnace-version']) input.pinnaceVersion = flags['pinnace-version'];
+	if (flags['node-major']) input.nodeMajor = flags['node-major'];
 
 	const result = rc.deps.provision(input);
 	rc.out(result.cloudInit.contents);

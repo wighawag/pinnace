@@ -128,8 +128,40 @@ describe('provision: security invariants', () => {
 describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 	it('INSTALLS the pinnace binary on the box', () => {
 		const {contents} = provision(baseInput()).cloudInit;
-		// pinnace is installed (npm global); the box runs the same binary.
-		expect(contents).toMatch(/npm install -g pinnace|npm i -g pinnace/);
+		// pinnace is installed (npm global, PINNED); the box runs the same binary.
+		expect(contents).toMatch(/npm install -g "pinnace@\$\{PINNACE_VERSION\}"/);
+	});
+
+	it('installs a PINNED pinnace version (never floating latest) via a named env knob', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		// The pinned version is exposed as a named env value, not a literal in the
+		// install line, so a release bump is one obvious edit.
+		expect(contents).toMatch(/PINNACE_VERSION="\d+\.\d+\.\d+"/);
+		// The install line references the pin, NOT a bare floating `pinnace`.
+		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
+		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
+		// Default pin is the current published release.
+		expect(contents).toContain('PINNACE_VERSION="0.1.0"');
+	});
+
+	it('lets a box pin a different pinnace version (overridable provision input)', () => {
+		const {contents} = provision(
+			baseInput({pinnaceVersion: '9.9.9'}),
+		).cloudInit;
+		expect(contents).toContain('PINNACE_VERSION="9.9.9"');
+	});
+
+	it('installs Node via a current LTS major as a named knob (not the stale setup_20.x literal)', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		expect(contents).toContain('NODE_MAJOR="22"');
+		// NodeSource line uses the knob, and is NOT the stale Node 20 literal.
+		expect(contents).toContain('setup_${NODE_MAJOR}.x');
+		expect(contents).not.toContain('setup_20.x');
+	});
+
+	it('lets a box choose a different Node major (overridable provision input)', () => {
+		const {contents} = provision(baseInput({nodeMajor: '24'})).cloudInit;
+		expect(contents).toContain('NODE_MAJOR="24"');
 	});
 
 	it('does NOT embed the reference bash loop scripts', () => {
@@ -151,6 +183,38 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('pinnace-mirror.timer');
 		expect(contents).toContain('pinnace-warm.timer');
 		expect(contents).toContain('pinnace-status.timer');
+	});
+
+	it('is BOOT-SAFE: the pinnace install cannot abort the boot (|| true guard)', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		// The runcmd invocation is guarded so a transient install failure does not
+		// abort provisioning; Kubo/firewall/Caddy must come up regardless.
+		expect(contents).toContain('/usr/local/sbin/pinnace-setup.sh || true');
+	});
+
+	it('creates the ipfs service user via cloud-init `users:` (BEFORE runcmd)', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		// The dedicated user is created by the users: module, which runs before
+		// runcmd, so no boot step can hit "invalid user 'ipfs'".
+		expect(contents).toMatch(/^users:/m);
+		expect(contents).toContain('name: ipfs');
+		// users: must appear BEFORE runcmd: in the emitted document.
+		expect(contents.indexOf('\nusers:')).toBeLessThan(
+			contents.indexOf('\nruncmd:'),
+		);
+	});
+
+	it('creates the dashboard dir BEFORE the (non-fatal) pinnace install so it is never skipped', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		const dashDir = contents.indexOf(
+			'install -d -o ipfs -g ipfs /var/www/ipfs-dash',
+		);
+		const pinnaceInstall = contents.indexOf(
+			'/usr/local/sbin/pinnace-setup.sh || true',
+		);
+		expect(dashDir).toBeGreaterThan(-1);
+		expect(pinnaceInstall).toBeGreaterThan(-1);
+		expect(dashDir).toBeLessThan(pinnaceInstall);
 	});
 
 	it('sets NODE_ROLE from config so the pinnace timers self-gate', () => {

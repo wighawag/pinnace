@@ -33,6 +33,22 @@ packages:
   - apt-transport-https
 
 # ---------------------------------------------------------------------------
+# Service users. cloud-init's \`users:\` module runs BEFORE \`runcmd\`, so the
+# dedicated \`ipfs\` user is GUARANTEED to exist before any boot step uses it
+# (e.g. \`install -o ipfs ...\`). Creating it here (not mid-\`ipfs-setup.sh\`,
+# which is a \`set -e\` block that could abort before its \`useradd\`) closes the
+# first-boot race where a later step hit "invalid user 'ipfs'".
+# \`default\` keeps cloud-init's normal login user; we only ADD \`ipfs\`.
+# ---------------------------------------------------------------------------
+users:
+  - default
+  - name: ipfs
+    system: true
+    home: /var/lib/ipfs
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+
+# ---------------------------------------------------------------------------
 # On-box environment consumed by the pinnace node timers + the setup scripts.
 # ---------------------------------------------------------------------------
 write_files:
@@ -63,6 +79,12 @@ write_files:
       PUBLISHER_ENDPOINT=""
 
       KUBO_VERSION="v0.38.1"
+
+      # Node.js major installed via NodeSource (setup_<major>.x) and the PINNED
+      # pinnace version installed on the box. Both are reproducible: the same
+      # cloud-init always installs the same agent on the same runtime.
+      NODE_MAJOR="22"
+      PINNACE_VERSION="0.1.0"
 
   # -- Kubo installer / initializer -----------------------------------------
   - path: /usr/local/sbin/ipfs-setup.sh
@@ -162,13 +184,19 @@ write_files:
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
-      # Install Node.js (for npm) then the pinnace binary globally. The on-box
-      # timers invoke \`pinnace node <verb>\`: one codebase, client + on-box.
+      source /etc/pinnace-node.env
+      # Install Node.js (for npm) then the PINNED pinnace binary globally. The
+      # on-box timers invoke \`pinnace node <verb>\`: one codebase, client +
+      # on-box. NODE_MAJOR / PINNACE_VERSION come from /etc/pinnace-node.env so
+      # the runtime + agent version are reproducible and one-edit overridable.
+      # This script is invoked NON-FATALLY at boot (\`|| true\`): a transient
+      # npm/registry hiccup must NOT abort provisioning (Kubo, the firewall and
+      # Caddy are already up by the time this runs). Re-run it manually to retry.
       if ! command -v npm >/dev/null 2>&1; then
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        curl -fsSL "https://deb.nodesource.com/setup_\${NODE_MAJOR}.x" | bash -
         apt-get install -y nodejs
       fi
-      npm install -g pinnace
+      npm install -g "pinnace@\${PINNACE_VERSION}"
       pinnace version
 
   # -- Caddy reverse proxy for the HTTPS API (auto TLS) ---------------------
@@ -367,12 +395,20 @@ runcmd:
   # Configure the HTTPS API proxy (no-op if API_DOMAIN unset)
   - /usr/local/sbin/write-caddyfile.sh
 
-  # Install the pinnace binary (the box runs the same CLI as the client).
-  - /usr/local/sbin/pinnace-setup.sh
+  # Dashboard dir, owned by the ipfs service user (guaranteed to exist: created
+  # by the \`users:\` module above, BEFORE runcmd). Done BEFORE the pinnace
+  # install so a transient install failure can never skip it.
+  - install -d -o ipfs -g ipfs /var/www/ipfs-dash
+
+  # Install the pinned pinnace binary (the box runs the same CLI as the client).
+  # BOOT-SAFE: \`|| true\` so a transient npm/registry failure does NOT abort the
+  # boot (Kubo, the firewall and Caddy are already up). Re-run
+  # /usr/local/sbin/pinnace-setup.sh manually to retry; the timers below pick it
+  # up on their next tick once the binary is present.
+  - /usr/local/sbin/pinnace-setup.sh || true
 
   # Enable the pinnace node timers. republish self-gates to publisher, mirror to
   # replica, so enabling all of them on every box is safe (ADR-0002).
-  - install -d -o ipfs -g ipfs /var/www/ipfs-dash
   - systemctl enable --now pinnace-republish.timer
   - systemctl enable --now pinnace-mirror.timer
   - systemctl enable --now pinnace-warm.timer
