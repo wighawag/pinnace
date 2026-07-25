@@ -218,6 +218,52 @@ export class KuboRpcClient {
 		return this.requestJson<T>('files/stat', new URLSearchParams({arg: path}));
 	}
 
+	/**
+	 * `files/write?arg=<path>&create=true&parents=true&truncate=true` — CREATE OR
+	 * FULLY REPLACE an MFS file with `bytes`. This is the channel a site's
+	 * `metadata.json` travels on (`/sites/<id>/metadata.json`).
+	 *
+	 * The three flags are sent UNCONDITIONALLY (no options bag) because they are
+	 * what makes the call mean "this path now holds exactly these bytes":
+	 * `create` writes a file that does not exist yet, `parents` makes its wrapper
+	 * directory, and `truncate` zeroes the file first, so a re-write REPLACES the
+	 * old content instead of appending into it (Kubo's `files/write` is an
+	 * APPEND/offset-write by default — without `truncate`, re-writing shorter
+	 * metadata would leave a tail of the previous JSON behind and produce corrupt
+	 * bytes). Offset/partial writes are deliberately not exposed: nothing in
+	 * pinnace writes part of an MFS file.
+	 *
+	 * Like Kubo's other file-upload endpoints, the payload MUST be a
+	 * `multipart/form-data` `file` part, not a raw body (see {@link fileUpload}).
+	 * The response body is empty, so it is not parsed as JSON.
+	 */
+	async filesWrite(path: string, bytes: Uint8Array): Promise<void> {
+		const q = new URLSearchParams({
+			arg: path,
+			create: 'true',
+			parents: 'true',
+			truncate: 'true',
+		});
+		await this.fileUploadRequest('files/write', q, bytes);
+	}
+
+	/**
+	 * `files/read?arg=<path>` — read an MFS file's bytes (the counterpart to
+	 * {@link filesWrite}). A body-less read: nothing is uploaded.
+	 *
+	 * A path that does not exist is a non-2xx from Kubo, so it raises the loud
+	 * {@link KuboRpcError} naming the endpoint + status like every other call —
+	 * absence is never a silent empty buffer. A caller that treats "no such file"
+	 * as "no metadata yet" catches that error deliberately.
+	 */
+	async filesRead(path: string): Promise<Uint8Array> {
+		const res = await this.request(
+			'files/read',
+			new URLSearchParams({arg: path}),
+		);
+		return new Uint8Array(await res.arrayBuffer());
+	}
+
 	/** `files/ls?arg=<path>[&l=true]` — list an MFS directory. */
 	filesLs<T = unknown>(path: string, long = true): Promise<T> {
 		const q = new URLSearchParams({arg: path});
@@ -260,15 +306,30 @@ export class KuboRpcClient {
 	 * `content-type: multipart/form-data; boundary=…` itself. Setting it manually
 	 * would omit/override the boundary and break the request.
 	 */
-	private fileUpload<T = unknown>(
+	private async fileUpload<T = unknown>(
 		endpoint: string,
 		query: URLSearchParams | undefined,
 		bytes: Uint8Array,
 		field = 'file',
 	): Promise<T> {
+		const res = await this.fileUploadRequest(endpoint, query, bytes, field);
+		return (await res.json()) as T;
+	}
+
+	/**
+	 * {@link fileUpload} without the JSON decode, for the upload endpoints whose
+	 * successful response carries NO body (`files/write`), where parsing would
+	 * throw on the empty body.
+	 */
+	private fileUploadRequest(
+		endpoint: string,
+		query: URLSearchParams | undefined,
+		bytes: Uint8Array,
+		field = 'file',
+	): Promise<Response> {
 		const form = new FormData();
 		form.append(field, new Blob([bytes as BlobPart]), field);
-		return this.requestJson<T>(endpoint, query, form);
+		return this.request(endpoint, query, form);
 	}
 
 	/** `name/publish?arg=<cidPath>&key=<key>&lifetime=..&ttl=..` — sign+publish IPNS. */

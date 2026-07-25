@@ -302,6 +302,109 @@ describe('KuboRpcClient, name/resolve (the migrate SOURCE read)', () => {
 	});
 });
 
+/**
+ * MFS file read/write: the channel a site's `metadata.json` travels on
+ * (`/sites/<id>/metadata.json`). `files/write` is a file-upload endpoint (same
+ * multipart contract as `add`/`dag/import`), `files/read` is a plain body-less
+ * read that streams the bytes back.
+ */
+describe('KuboRpcClient, MFS file write/read (metadata.json channel)', () => {
+	it('filesWrite hits files/write?arg=<path>&create&parents&truncate with the bearer', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock, 'mfs-token');
+		await client.filesWrite('/sites/mysite/metadata.json', new Uint8Array([1]));
+		const req = mock.lastRequest!;
+		expect(req.method).toBe('POST');
+		expect(req.path).toBe('files/write');
+		expect(req.query.get('arg')).toBe('/sites/mysite/metadata.json');
+		// create-or-fully-replace: create the file (and its parents) if absent,
+		// truncate it to zero first so a re-write REPLACES rather than appends.
+		expect(req.query.get('create')).toBe('true');
+		expect(req.query.get('parents')).toBe('true');
+		expect(req.query.get('truncate')).toBe('true');
+		expect(req.headers['authorization']).toBe('Bearer mfs-token');
+	});
+
+	it('filesWrite sends multipart/form-data with a `file` part (no hand-set content-type)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		const bytes = new TextEncoder().encode('{"mode":"ipns"}');
+		await client.filesWrite('/sites/mysite/metadata.json', bytes);
+		const req = mock.lastRequest!;
+		expect(req.contentType).toBe('multipart/form-data');
+		// The caller must NOT hand-set content-type: fetch owns the boundary.
+		expect(req.headers['content-type']).toBeUndefined();
+		const filePart = req.fileParts?.find((p) => p.field === 'file');
+		expect(filePart).toBeDefined();
+		expect(new TextDecoder().decode(filePart!.bytes)).toBe('{"mode":"ipns"}');
+	});
+
+	it('a re-write sends the same truncating request shape (replace, never append)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.filesWrite('/sites/mysite/metadata.json', new Uint8Array([1]));
+		await client.filesWrite('/sites/mysite/metadata.json', new Uint8Array([2]));
+		const writes = mock.requestsFor('files/write');
+		expect(writes.length).toBe(2);
+		for (const req of writes) {
+			expect(req.query.get('truncate')).toBe('true');
+			expect(req.query.get('create')).toBe('true');
+		}
+		expect(
+			Array.from(writes[1]!.fileParts!.find((p) => p.field === 'file')!.bytes),
+		).toEqual([2]);
+	});
+
+	it('filesWrite raises the loud KuboRpcError on a non-2xx', async () => {
+		const mock = new MockKuboApi().on('files/write', {
+			status: 500,
+			text: 'file does not exist',
+		});
+		const client = clientWith(mock);
+		await expect(
+			client.filesWrite('/sites/nope/metadata.json', new Uint8Array([1])),
+		).rejects.toThrow(KuboRpcError);
+	});
+
+	it('filesRead hits files/read?arg=<path> with the bearer and returns the bytes', async () => {
+		const mock = new MockKuboApi().on('files/read', {
+			text: '{"ensName":"example.eth"}',
+		});
+		const client = clientWith(mock, 'mfs-token');
+		const bytes = await client.filesRead('/sites/mysite/metadata.json');
+		const req = mock.lastRequest!;
+		expect(req.method).toBe('POST');
+		expect(req.path).toBe('files/read');
+		expect(req.query.get('arg')).toBe('/sites/mysite/metadata.json');
+		expect(req.headers['authorization']).toBe('Bearer mfs-token');
+		// A body-less read: nothing is uploaded.
+		expect(req.contentType).toBeUndefined();
+		expect(req.fileParts).toBeUndefined();
+		expect(req.bodyText).toBe('');
+		expect(new TextDecoder().decode(bytes)).toBe('{"ensName":"example.eth"}');
+	});
+
+	it('filesRead raises the loud KuboRpcError naming endpoint + status when the file is missing', async () => {
+		const mock = new MockKuboApi().on('files/read', {
+			status: 500,
+			text: 'file does not exist',
+		});
+		const client = clientWith(mock);
+		await expect(
+			client.filesRead('/sites/mysite/metadata.json'),
+		).rejects.toThrow(KuboRpcError);
+		try {
+			await client.filesRead('/sites/mysite/metadata.json');
+		} catch (e) {
+			const err = e as KuboRpcError;
+			expect(err.endpoint).toBe('files/read');
+			expect(err.status).toBe(500);
+			// Kubo's own message is passed through, so "absent" is legible.
+			expect(err.message).toContain('file does not exist');
+		}
+	});
+});
+
 describe('KuboRpcClient — error path', () => {
 	it('raises a loud KuboRpcError naming the endpoint and status on non-2xx', async () => {
 		const mock = new MockKuboApi().on('files/stat', {
