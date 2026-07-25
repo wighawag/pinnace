@@ -1,3 +1,7 @@
+<p align="center">
+	<img src="assets/logo.svg" alt="pinnace" width="300" height="96">
+</p>
+
 # pinnace
 
 Self-host a static website on IPFS across one or more self-owned Kubo nodes, without a paid pinning service. `pinnace` provisions the nodes (generated cloud-init), deploys your site as a content-addressed archive pinned on every node with the same CID, manages mutable `ipns://` names via a master-key-derived per-site key with publisher/keyless-replica failover, keeps public-gateway caches warm, and emits CI, all over the nodes' bearer-guarded Kubo RPC API.
@@ -6,9 +10,14 @@ It is both a **CLI** (`pinnace`) and a **TypeScript library**: the core owns all
 
 ## Getting started
 
+Install `pinnace` as a **dev dependency** of the project whose site you deploy, so the version is pinned in `package.json` and your CI uses the same one:
+
 ```sh
-npm install -g pinnace
+npm install --save-dev pinnace     # or: pnpm add -D pinnace
+npx pinnace --help                 # or: pnpm pinnace --help
 ```
+
+Requires Node >= 22. The docs write commands as `pinnace <...>`; run them as `npx pinnace <...>`, or wire a script into `package.json` (e.g. `"deploy": "pinnace deploy ./dist mysite"`).
 
 The full setup guide (mental model, config + secrets, and the end-to-end provision -> deploy -> failover flow) is in the package README:
 

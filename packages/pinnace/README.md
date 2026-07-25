@@ -1,3 +1,7 @@
+<p align="center">
+	<img src="https://raw.githubusercontent.com/wighawag/pinnace/main/assets/logo.svg" alt="pinnace" width="300" height="96">
+</p>
+
 # pinnace
 
 Self-host a static website on IPFS across one or more self-owned Kubo nodes, without a paid pinning service. `pinnace` provisions the nodes (generated cloud-init), deploys your site as a content-addressed archive pinned on every node with the same CID, manages mutable `ipns://` names via a master-key-derived per-site key, keeps public-gateway caches warm, and emits CI, all over the nodes' bearer-guarded Kubo RPC API. Hetzner is the first host; other hosts sit behind a provider seam.
@@ -6,13 +10,30 @@ Self-host a static website on IPFS across one or more self-owned Kubo nodes, wit
 
 ## Install
 
+Install it as a **dev dependency** of the project whose site you deploy: the version is then pinned in `package.json`, your CI uses exactly that version, and nothing depends on a machine-wide install.
+
 ```sh
-npm install -g pinnace
-# or, per-project:
-npm install pinnace
+npm install --save-dev pinnace     # or: pnpm add -D pinnace
 ```
 
-Requires Node >= 22.
+Run the local binary with your package manager's runner:
+
+```sh
+npx pinnace --help                 # or: pnpm pinnace --help
+```
+
+Every example below writes the command as `pinnace <...>` for brevity; run it as `npx pinnace <...>`, or wire it into `package.json` scripts:
+
+```json
+{
+  "scripts": {
+    "deploy": "pinnace deploy ./dist mysite",
+    "status": "pinnace status"
+  }
+}
+```
+
+Requires Node >= 22. (The nodes themselves install `pinnace` globally for their on-box timers, but that is done for you by the generated cloud-init.)
 
 ## Mental model
 
@@ -28,7 +49,7 @@ Requires Node >= 22.
 
 Every setting resolves **CLI arg > exported env > `.env.local` > `.env` > `pinnace.json`**.
 
-On startup the `pinnace` bin auto-loads `.env` then `.env.local` from the current directory into the environment (via `ldenv`), so a global install (`npm install -g pinnace`) picks up your secrets with no wrapper: just drop them in `.env.local` and run `pinnace …`. Loading is silent and cwd-only (never a home/global location), and it only AUGMENTS the environment: a value you exported explicitly still wins over the file (`.env.local` overrides `.env`, both sit below an exported var and above `pinnace.json`).
+On startup the `pinnace` bin auto-loads `.env` then `.env.local` from the current directory into the environment (via `ldenv`), so a plain `npx pinnace …` (or a `package.json` script) picks up your secrets with no wrapper: just drop them in `.env.local` and run the command. Loading is silent and cwd-only (never a home/global location), and it only AUGMENTS the environment: a value you exported explicitly still wins over the file (`.env.local` overrides `.env`, both sit below an exported var and above `pinnace.json`).
 
 `pinnace.json` holds only NON-secret structure (commit-safe):
 
