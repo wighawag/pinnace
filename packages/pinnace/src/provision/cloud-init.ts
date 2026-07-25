@@ -164,7 +164,7 @@ const DEFAULT_KUBO_VERSION = 'v0.38.1';
  * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
  * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
  */
-const DEFAULT_PINNACE_VERSION = '0.3.2';
+const DEFAULT_PINNACE_VERSION = '0.3.3';
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
@@ -416,12 +416,19 @@ write_files:
       install -d -o ipfs -g ipfs /var/lib/ipfs
 
       export IPFS_PATH=/var/lib/ipfs/.ipfs
+      # HOME must be passed to every sudo -u ipfs invocation: sudo does not
+      # inherit it, and the ipfs binary aborts (Error: HOME is not defined) since
+      # it resolves HOME/.config/ipfs for the nopfs denylists. Without this,
+      # ipfs init fails under set -e and aborts this whole script before the
+      # datadir/config are set up (the box then crash-loops). Point it at the
+      # ipfs user home (the datadir root).
+      IPFS_HOME=/var/lib/ipfs
       if [ ! -f "$IPFS_PATH/config" ]; then
         # 'server' profile disables local-network announce (good for a datacenter box)
-        sudo -u ipfs env IPFS_PATH="$IPFS_PATH" ipfs init --profile server
+        sudo -u ipfs env IPFS_PATH="$IPFS_PATH" HOME="$IPFS_HOME" ipfs init --profile server
       fi
 
-      cfg() { sudo -u ipfs env IPFS_PATH="$IPFS_PATH" ipfs config "$@"; }
+      cfg() { sudo -u ipfs env IPFS_PATH="$IPFS_PATH" HOME="$IPFS_HOME" ipfs config "$@"; }
 
       # --- Reachability: bind API + gateway to localhost only (NEVER public) ---
       cfg Addresses.API   "/ip4/127.0.0.1/tcp/5001"
@@ -477,12 +484,14 @@ write_files:
       # dies at startup with "denylists: permission denied". Setting HOME here
       # keeps that lookup inside the writable datadir.
       Environment=HOME=/var/lib/ipfs
-      # Guarantee the datadir exists (owned by ipfs) BEFORE the sandboxed daemon
-      # starts: ReadWritePaths=/var/lib/ipfs requires the path to exist at unit
-      # start, so a missing datadir otherwise fails namespace setup with
-      # 226/NAMESPACE and crash-loops. The leading '+' runs this as root, outside
-      # the sandbox; it is idempotent.
-      ExecStartPre=+/usr/bin/install -d -o ipfs -g ipfs /var/lib/ipfs
+      # NOTE: the datadir /var/lib/ipfs is created by a runcmd step BEFORE this
+      # unit is enabled (see runcmd) — NOT via ExecStartPre. ReadWritePaths=
+      # /var/lib/ipfs makes systemd set up the mount namespace (referencing that
+      # path) BEFORE running any Exec* line, including ExecStartPre — even an
+      # ExecStartPre=+ one — so if the path is missing, namespace setup fails
+      # with 226/NAMESPACE and the ExecStartPre can never create it (a catch-22).
+      # The path must therefore exist before the unit starts, guaranteed outside
+      # the unit.
       ExecStart=/usr/local/bin/ipfs daemon --migrate=true --enable-gc
       Restart=on-failure
       RestartSec=5
@@ -584,7 +593,14 @@ runcmd:
   - ufw allow 443/tcp
   - ufw --force enable
 
-  # Install + start Kubo
+  # Install + start Kubo.
+  # Create the datadir FIRST, unconditionally, before anything that needs it.
+  # This MUST happen outside the ipfs.service unit: that unit's
+  # ReadWritePaths=/var/lib/ipfs makes systemd fail namespace setup
+  # (226/NAMESPACE) if the path is missing, before any ExecStartPre could create
+  # it. And it must not depend on ipfs-setup.sh reaching its own mkdir (that
+  # script can abort early). So we guarantee it here, first.
+  - install -d -o ipfs -g ipfs /var/lib/ipfs
   - /usr/local/sbin/ipfs-setup.sh
   - systemctl daemon-reload
   - systemctl enable --now ipfs.service

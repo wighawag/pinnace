@@ -101,16 +101,27 @@ describe('provision: security invariants', () => {
 		// optional with a built-in default, so the generator must NOT run a
 		// `cfg ... Provide.Interval` command (a comment mentioning it is fine).
 		expect(contents).not.toMatch(/cfg[^\n]*Provide\.Interval/);
-		// The datadir must be guaranteed before the sandboxed daemon starts, or
-		// ReadWritePaths=/var/lib/ipfs fails namespace setup (226/NAMESPACE).
-		expect(contents).toMatch(
-			/ExecStartPre=\+\/usr\/bin\/install -d -o ipfs -g ipfs \/var\/lib\/ipfs/,
-		);
+		// The datadir must be created in runcmd (outside the unit) BEFORE the
+		// ipfs.service is enabled: the unit's ReadWritePaths=/var/lib/ipfs makes
+		// systemd fail namespace setup (226/NAMESPACE) if the path is missing,
+		// before any ExecStartPre could create it (a catch-22). So there must be a
+		// runcmd `install -d ... /var/lib/ipfs` and it must NOT be an ExecStartPre.
+		expect(contents).toMatch(/- install -d -o ipfs -g ipfs \/var\/lib\/ipfs/);
+		expect(contents).not.toMatch(/ExecStartPre=[^\n]*\/var\/lib\/ipfs/);
 		// HOME must be set in the daemon unit: Kubo's nopfs plugin reads
 		// $HOME/.config/ipfs/denylists, and with HOME unset it falls back under
 		// /home/ipfs which ProtectHome=true hides -> "denylists: permission denied"
 		// crash. HOME=/var/lib/ipfs keeps it inside the writable datadir.
 		expect(contents).toMatch(/Environment=HOME=\/var\/lib\/ipfs/);
+		// EVERY `sudo -u ipfs env ... ipfs ...` call in the setup script MUST pass
+		// HOME: sudo does not inherit it, and `ipfs init`/`ipfs config` abort with
+		// "Error: HOME is not defined", which under set -e aborts the whole setup
+		// script before the datadir/config exist (fresh box then crash-loops).
+		for (const m of contents.matchAll(/sudo -u ipfs env ([^\n]*?) ipfs\b/g)) {
+			expect(m[1]).toMatch(/HOME=/);
+		}
+		// (and there is at least one such call, so the loop above is meaningful)
+		expect(contents).toMatch(/sudo -u ipfs env [^\n]*HOME=[^\n]* ipfs/);
 	});
 
 	// Kubo 0.38 (the pinned DEFAULT_KUBO_VERSION) renamed `Reprovider.*` ->
@@ -154,7 +165,7 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
 		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.3.2"');
+		expect(contents).toContain('PINNACE_VERSION="0.3.3"');
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {
