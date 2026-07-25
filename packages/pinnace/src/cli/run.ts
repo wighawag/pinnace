@@ -72,6 +72,7 @@ import {
 } from '../deploy/deploy.js';
 import {
 	pinExternal as corePinExternal,
+	PinSourceResolveError,
 	type PinExternalInput,
 	type PinExternalResult,
 	type PinTarget,
@@ -663,12 +664,28 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 	return 0;
 }
 
+/** The two forms of the `pin` verb: one source each, never both, never neither. */
+const PIN_USAGE =
+	'usage: pinnace pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]\n' +
+	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]';
+
 /**
  * `pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]` ->
  * core {@link ClientDeps.pinExternal}. Pins an EXTERNAL network CID (content the
  * operator has only the CID for) on EVERY configured node by default — the same
  * redundancy `deploy` gives — and tracks it in MFS at `/sites/<name>` so it
  * shows on the dashboard and gets gateway-warmed.
+ *
+ * A pin takes EXACTLY ONE source, the positional `<cid>` XOR `--from-ipns
+ * <name>`; giving both or neither is a usage error. `--from-ipns` MIGRATES from
+ * an existing IPNS name: the core resolves that SOURCE name to the cid it points
+ * at right now and pins THAT (reported as `resolved ipns <src> -> <cid>`), so
+ * `pin --from-ipns <src> --as ronan --mode ipns` is the one-command ENS
+ * migration: the source's current content on the operator's nodes, published
+ * under the OPERATOR's own `ipns://<id>`. It is a SNAPSHOT, not a follow: the CLI
+ * says so, and pulling a newer one is re-running the same command (the name is
+ * stable; only the cid it points at moves). A source name that resolves nowhere
+ * is a loud {@link PinSourceResolveError} (exit 1), never a silent success.
  *
  * `--mode` is the SAME per-site mode `deploy` takes (CONTEXT.md `mode`), here
  * defaulting to `ipfs` (pin + MFS only; the pin is addressed by the immutable
@@ -699,10 +716,25 @@ async function runPin(
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv, ['no-recursive']);
 	const [cid] = positionals;
+	const fromIpns = flags['from-ipns'];
 	const pinName = flags['as'];
-	if (!cid || !pinName) {
+	if (!pinName) {
+		rc.err(`pinnace pin: --as <name> is required\n${PIN_USAGE}`);
+		return 1;
+	}
+	// EXACTLY ONE source: the cid the operator has, or the IPNS name to resolve
+	// one from. Two sources is a contradiction; none is nothing to pin.
+	if (cid && fromIpns) {
 		rc.err(
-			'pinnace pin: usage: pinnace pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]',
+			`pinnace pin: give exactly one source: the positional <cid> ('${cid}') ` +
+				`or --from-ipns ('${fromIpns}'), not both\n${PIN_USAGE}`,
+		);
+		return 1;
+	}
+	if (!cid && !fromIpns) {
+		rc.err(
+			'pinnace pin: give exactly one source: a positional <cid>, or ' +
+				`--from-ipns <name> to migrate from an existing IPNS name\n${PIN_USAGE}`,
 		);
 		return 1;
 	}
@@ -778,14 +810,32 @@ async function runPin(
 		throw error;
 	}
 
-	const result = await rc.deps.pinExternal({
-		targets,
-		cid,
-		name: pinName,
-		recursive: flags['no-recursive'] === undefined,
-		mode,
-		...(derived ? {derived} : {}),
-	});
+	let result: PinExternalResult;
+	try {
+		result = await rc.deps.pinExternal({
+			targets,
+			...(fromIpns ? {fromIpns} : {cid: cid as string}),
+			name: pinName,
+			recursive: flags['no-recursive'] === undefined,
+			mode,
+			...(derived ? {derived} : {}),
+		});
+	} catch (error) {
+		// The one failure the CLI cannot pre-check: the SOURCE name resolved on no
+		// node, so there is no cid to pin (Kubo's own words come through).
+		if (error instanceof PinSourceResolveError) {
+			rc.err(`pinnace pin: ${error.message}`);
+			return 1;
+		}
+		throw error;
+	}
+	// Migrating: say WHAT the source name currently points at (and whose view).
+	if (result.fromIpns) {
+		rc.out(
+			`resolved ipns ${result.fromIpns} -> ${result.cid}` +
+				`${result.resolvedBy ? ` (via ${result.resolvedBy})` : ''}`,
+		);
+	}
 	rc.out(
 		`pinned ${result.cid} as ${result.name}${result.recursive ? '' : ' (root block only)'}`,
 	);
@@ -801,6 +851,14 @@ async function runPin(
 	}
 	// The whole point of ipns mode: the mutable pointer the operator now controls.
 	if (result.ipns) rc.out(`ipns://${result.ipns}`);
+	// A migrate is a SNAPSHOT, not a follow: nothing watches the source, so say it
+	// where the operator is looking rather than only in the docs.
+	if (result.fromIpns) {
+		rc.out(
+			`note: a snapshot of ${result.fromIpns}, not a follow. Re-run this ` +
+				`command to pull a newer one (pinnace never tracks the source itself)`,
+		);
+	}
 	return result.success ? 0 : 1;
 }
 

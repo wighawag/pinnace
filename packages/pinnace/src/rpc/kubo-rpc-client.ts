@@ -280,6 +280,52 @@ export class KuboRpcClient {
 		return this.requestJson<T>('name/publish', q);
 	}
 
+	/**
+	 * `name/resolve?arg=/ipns/<name>&recursive=true`: resolve an IPNS NAME to the
+	 * `/ipfs/<cid>` it CURRENTLY points at, and return that cid. This is the read
+	 * the `pin --from-ipns <source>` MIGRATE path stands on: the SOURCE name
+	 * (someone else's, or the operator's old one) turned into the snapshot cid the
+	 * existing pin flow then pins. It is a plain read: nothing is signed, and the
+	 * operator's OWN name (the `--as <name>` derived key) is untouched.
+	 *
+	 * `name` is normalised, so all three forms an operator has in hand work: a
+	 * bare id (`k51...`), an `/ipns/<id>` path, and the `ipns://<id>` address
+	 * pinnace itself prints (and ENS contenthashes carry). A DNSLink name
+	 * (`example.com`) normalises the same way and is Kubo's business to resolve.
+	 *
+	 * BLOCKING, like {@link pinAdd}: Kubo does the DHT/DNSLink work and answers
+	 * when it has an answer or gives up. No timeout is imposed here (Kubo's own
+	 * resolve behaviour is the bound). `recursive=true` is sent EXPLICITLY (as
+	 * {@link pinAdd} sends `recursive`) so the request shape states the intent:
+	 * follow a chain of names to the content it ends at.
+	 *
+	 * @returns the resolved content path WITHOUT the `/ipfs/` prefix: normally a
+	 * bare cid, and `<cid>/<subpath>` for the unusual name that points INTO a
+	 * directory, which every downstream call (`pin/add`, `files/cp`,
+	 * `name/publish`) accepts verbatim, so the pinned content is exactly what the
+	 * name said rather than a silently widened parent.
+	 * @throws {KuboRpcError} on any non-2xx, carrying Kubo's own message (e.g. `routing:
+	 * not found` for a name that never resolved or whose record expired).
+	 * @throws if a 2xx body carries no `/ipfs/...` path (never a silent empty cid).
+	 */
+	async nameResolve(name: string): Promise<string> {
+		const ipnsPath = ipnsPathFor(name);
+		const q = new URLSearchParams({arg: ipnsPath, recursive: 'true'});
+		const body = await this.requestJson<{Path?: string}>('name/resolve', q);
+		const path = body?.Path ?? '';
+		const cid = path.startsWith(IPFS_PATH_PREFIX)
+			? path.slice(IPFS_PATH_PREFIX.length)
+			: '';
+		if (!cid) {
+			throw new Error(
+				`Kubo RPC name/resolve ${ipnsPath} returned no ${IPFS_PATH_PREFIX}<cid> ` +
+					`path (got ${JSON.stringify(body?.Path ?? body)}): that name does ` +
+					`not currently point at content`,
+			);
+		}
+		return cid;
+	}
+
 	/** `routing/get?arg=<ipnsPath>` — fetch the raw signed record for a name. */
 	async routingGet(ipnsPath: string): Promise<Uint8Array> {
 		const res = await this.request(
@@ -301,6 +347,27 @@ export class KuboRpcClient {
 		const q = new URLSearchParams({arg: ipnsPath});
 		await this.fileUpload('routing/put', q, record, 'value-file');
 	}
+}
+
+/** The prefix a resolved IPNS name's content path carries. */
+const IPFS_PATH_PREFIX = '/ipfs/';
+
+/**
+ * Normalise the three forms an IPNS name reaches us in into the single
+ * `/ipns/<id>` path `name/resolve` takes: a bare id (`k51...`), an `/ipns/<id>`
+ * path, and the `ipns://<id>` address pinnace prints and ENS contenthashes
+ * carry.
+ */
+function ipnsPathFor(name: string): string {
+	const id = name
+		.trim()
+		.replace(/^ipns:\/\//, '')
+		.replace(/^\/ipns\//, '')
+		.replace(/^\/+/, '');
+	if (!id) {
+		throw new Error('nameResolve requires an IPNS name to resolve');
+	}
+	return `/ipns/${id}`;
 }
 
 /** Read a response body as text without throwing (best-effort for errors). */

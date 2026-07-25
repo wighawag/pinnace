@@ -1,5 +1,6 @@
 import {describe, it, expect} from 'vitest';
 import {run, type ClientDeps, type RunContext} from '../../src/cli/run.js';
+import {PinSourceResolveError} from '../../src/pin/pin-external.js';
 import type {PinnaceConfigFile} from '../../src/config/config-resolution.js';
 
 /**
@@ -66,15 +67,24 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 		pinExternal: async (input) => {
 			calls.pinExternal.push(input);
 			const publishes = input.mode === 'ipns';
+			// A `fromIpns` source is resolved by the CORE (its own tests cover the
+			// name/resolve seam); the stub models that: no cid in, a resolved cid out.
+			const cid = input.cid ?? 'bafyresolvedstub';
 			return {
-				cid: input.cid,
+				cid,
+				...(input.fromIpns
+					? {
+							fromIpns: input.fromIpns,
+							resolvedBy: input.targets[0]?.baseUrl,
+						}
+					: {}),
 				name: input.name,
 				recursive: input.recursive ?? true,
 				mode: input.mode ?? 'ipfs',
 				...(publishes ? {ipns: 'k51stubid'} : {}),
 				ok: input.targets.map((t) => ({
 					baseUrl: t.baseUrl,
-					cid: input.cid,
+					cid,
 					name: input.name,
 					recursive: input.recursive ?? true,
 					published: publishes && t.role === 'publisher',
@@ -405,6 +415,14 @@ describe('pin <cid> --as <name> — dispatches to core pinExternal (all nodes)',
 		});
 	});
 
+	it('passes the cid as the pin SOURCE (no fromIpns in the ordinary form)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		await run(['pin', 'bafyexternal', '--as', 'archive'], context);
+		expect(calls.pinExternal[0]).toMatchObject({cid: 'bafyexternal'});
+		expect(calls.pinExternal[0]).not.toHaveProperty('fromIpns');
+	});
+
 	it('requires the <cid> and --as <name> (usage error, never dispatches)', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
@@ -574,6 +592,107 @@ describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () =>
 		expect(code).not.toBe(0);
 		expect(calls.pinExternal.length).toBe(0);
 		expect(err.join('\n')).toContain('--mode');
+	});
+});
+
+describe('pin --from-ipns <source>: MIGRATE from an existing IPNS name', () => {
+	/** The master is env-ONLY (never a pinnace.json field), exactly as promote. */
+	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
+
+	it('hands the SOURCE name (not a cid) to the core and reports what it resolved to', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', '--from-ipns', 'k51source', '--as', 'ronan'],
+			context,
+		);
+		expect(code).toBe(0);
+		const input = calls.pinExternal[0] as {
+			cid?: string;
+			fromIpns?: string;
+			name: string;
+			targets: Array<{baseUrl: string}>;
+		};
+		// The source is the NAME; no cid is invented for it.
+		expect(input.fromIpns).toBe('k51source');
+		expect(input.cid).toBeUndefined();
+		// `--as` stays the OPERATOR's id (the MFS entry / KDF input), never the source.
+		expect(input.name).toBe('ronan');
+		// Still every configured node (the redundancy of the pin flow is reused).
+		expect(input.targets.map((t) => t.baseUrl)).toEqual([
+			'https://a.example',
+			'https://b.example',
+		]);
+		// The operator sees WHAT was pinned (the resolved snapshot).
+		expect(out.join('\n')).toContain('k51source');
+		expect(out.join('\n')).toContain('bafyresolvedstub');
+		// ...and that this is a snapshot, not a follow of the source.
+		expect(out.join('\n')).toMatch(/snapshot/i);
+	});
+
+	it('one command migrates onto the operator OWN name: --mode ipns prints ipns://<their id>', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			['pin', '--from-ipns', 'k51source', '--as', 'ronan', '--mode', 'ipns'],
+			context,
+		);
+		expect(code).toBe(0);
+		// The key is derived from the master + the OPERATOR's id, NOT the source.
+		expect(calls.deriveIpnsKey[0]).toMatchObject({
+			master: 'the-master-secret',
+			keyId: 'ronan',
+		});
+		expect(calls.pinExternal[0]).toMatchObject({
+			fromIpns: 'k51source',
+			mode: 'ipns',
+		});
+		expect(out.join('\n')).toContain('ipns://k51stubid');
+	});
+
+	it('rejects BOTH a positional cid and --from-ipns (exactly one source)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--from-ipns', 'k51source', '--as', 'ronan'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('--from-ipns');
+		expect(err.join('\n')).toMatch(/one source/i);
+	});
+
+	it('rejects NEITHER a cid nor --from-ipns (exactly one source)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(['pin', '--as', 'ronan'], context);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('--from-ipns');
+	});
+
+	it('fails loud (exit 1) when the source name does not resolve anywhere', async () => {
+		const {deps} = recordingDeps();
+		const failing: ClientDeps = {
+			...deps,
+			pinExternal: async (input) => {
+				throw new PinSourceResolveError(input.fromIpns ?? '', [
+					{
+						baseUrl: 'https://a.example',
+						error: new Error('routing: not found'),
+					},
+				]);
+			},
+		};
+		const {context, err} = ctx({deps: failing, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', '--from-ipns', 'k51nothere', '--as', 'ronan'],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(err.join('\n')).toContain('k51nothere');
+		expect(err.join('\n')).toContain('routing: not found');
 	});
 });
 

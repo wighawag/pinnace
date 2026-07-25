@@ -5,6 +5,7 @@ import {
 	pinExternal,
 	PinStageError,
 	PinPublisherRequiredError,
+	PinSourceResolveError,
 	type PinTarget,
 } from '../../src/pin/pin-external.js';
 import {removeSite} from '../../src/site/site-management.js';
@@ -523,6 +524,209 @@ describe('pinExternal — a failed publish is reported as its OWN stage', () => 
 		// It DID pin + place (the failure is downstream of both).
 		expect(a.requestsFor('pin/add').length).toBe(1);
 		expect(a.requestsFor('files/cp').length).toBe(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// `--from-ipns <source>`: MIGRATE from an existing IPNS name (task
+// `pin-from-ipns-migrate`). The source name is resolved to the CID it CURRENTLY
+// points at on one reachable target, and everything after that is the EXISTING
+// pin flow with that resolved CID. The SOURCE name is never the operator's name:
+// in `ipns` mode the publish still happens under the `--as <name>` derived key.
+// ---------------------------------------------------------------------------
+
+const SOURCE_NAME = 'k51sourcename';
+const RESOLVED_CID = 'bafycurrentsnapshot';
+
+/** A node that resolves the source name to {@link RESOLVED_CID}. */
+function resolvingNode(baseUrl: string, cid = RESOLVED_CID): MockKuboApi {
+	const mock = mockNode(baseUrl, cid);
+	mock.on('name/resolve', {json: {Path: `/ipfs/${cid}`}});
+	return mock;
+}
+
+describe('pinExternal: fromIpns resolves the SOURCE name, then pins that cid', () => {
+	it('resolves on ONE target, then pins the RESOLVED cid on EVERY node', async () => {
+		const a = resolvingNode('https://node-a.test');
+		const b = resolvingNode('https://node-b.test');
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
+			fromIpns: SOURCE_NAME,
+			name: 'archive',
+		});
+
+		// The resolve is ONE read on the first reachable node (not per-node).
+		expect(a.requestsFor('name/resolve').length).toBe(1);
+		expect(a.requestsFor('name/resolve')[0].query.get('arg')).toBe(
+			`/ipns/${SOURCE_NAME}`,
+		);
+		expect(b.requestsFor('name/resolve').length).toBe(0);
+
+		// ...and it happens BEFORE the pin, whose arg is the RESOLVED CID, never
+		// the name.
+		expect(a.requests.map((r) => r.path)).toEqual([
+			'name/resolve',
+			'pin/add',
+			'files/mkdir',
+			'files/rm',
+			'files/cp',
+		]);
+		for (const mock of [a, b]) {
+			const pin = mock.requestsFor('pin/add');
+			expect(pin.length).toBe(1);
+			expect(pin[0].query.get('arg')).toBe(RESOLVED_CID);
+			expect(mock.requestsFor('files/cp')[0].query.getAll('arg')).toEqual([
+				`/ipfs/${RESOLVED_CID}`,
+				'/sites/archive',
+			]);
+		}
+
+		// The operator is told WHAT was pinned, and where the source resolved.
+		expect(result.cid).toBe(RESOLVED_CID);
+		expect(result.fromIpns).toBe(SOURCE_NAME);
+		expect(result.resolvedBy).toBe('https://node-a.test');
+		expect(result.success).toBe(true);
+		expect(result.ok.map((r) => r.cid)).toEqual([RESOLVED_CID, RESOLVED_CID]);
+	});
+
+	it('falls back to the NEXT target when the first cannot resolve (reachability)', async () => {
+		const unreachable = resolvingNode('https://down.test');
+		unreachable.on('name/resolve', {status: 500, text: 'routing: not found'});
+		const up = resolvingNode('https://up.test');
+		const result = await pinExternal({
+			targets: [
+				targetWith(unreachable, 'token-down'),
+				targetWith(up, 'token-up'),
+			],
+			fromIpns: SOURCE_NAME,
+			name: 'archive',
+		});
+		expect(result.resolvedBy).toBe('https://up.test');
+		expect(result.cid).toBe(RESOLVED_CID);
+		// The node that could not resolve still PINS (the fan-out is unchanged).
+		expect(unreachable.requestsFor('pin/add')[0].query.get('arg')).toBe(
+			RESOLVED_CID,
+		);
+	});
+
+	it('ipns mode publishes the RESOLVED cid under the operator OWN derived key', async () => {
+		const a = resolvingNode('https://publisher.test');
+		a.on('key/list', {json: {Keys: []}});
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			fromIpns: SOURCE_NAME,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+
+		const published = a.requestsFor('name/publish');
+		expect(published.length).toBe(1);
+		// The RESOLVED snapshot, published under the operator's OWN name: the
+		// source name is NOT the key (migrating never hands over the source's key).
+		expect(published[0].query.get('arg')).toBe(`/ipfs/${RESOLVED_CID}`);
+		expect(published[0].query.get('key')).toBe(GOLDEN_NAME);
+		expect(a.requestsFor('key/import')[0].query.get('arg')).toBe(GOLDEN_NAME);
+		expect(result.ipns).toBe(GOLDEN_IPNS_ID);
+		expect(result.fromIpns).toBe(SOURCE_NAME);
+		expect(result.cid).toBe(RESOLVED_CID);
+	});
+
+	it('re-running RE-RESOLVES the source (a manual re-migrate, never an auto-follow)', async () => {
+		const a = resolvingNode('https://publisher.test', 'bafyoldsnapshot');
+		a.on('key/list', {json: {Keys: [{Name: GOLDEN_NAME, Id: GOLDEN_IPNS_ID}]}});
+		const first = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			fromIpns: SOURCE_NAME,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+		// The source moved on; a SECOND run picks up the newer snapshot.
+		a.on('name/resolve', {json: {Path: '/ipfs/bafynewsnapshot'}});
+		const second = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			fromIpns: SOURCE_NAME,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+
+		expect(first.cid).toBe('bafyoldsnapshot');
+		expect(second.cid).toBe('bafynewsnapshot');
+		// Each run re-resolves (nothing tracks the source between runs)...
+		expect(a.requestsFor('name/resolve').length).toBe(2);
+		// ...and the operator's OWN name is stable across both.
+		expect(second.ipns).toBe(first.ipns);
+		expect(
+			a.requestsFor('name/publish').map((r) => r.query.get('arg')),
+		).toEqual(['/ipfs/bafyoldsnapshot', '/ipfs/bafynewsnapshot']);
+	});
+});
+
+describe('pinExternal: exactly ONE source: a cid XOR fromIpns', () => {
+	it('refuses BOTH a cid and a fromIpns, touching no node', async () => {
+		const a = resolvingNode('https://node-a.test');
+		await expect(
+			pinExternal({
+				targets: [targetWith(a, 'token-a')],
+				cid: EXTERNAL_CID,
+				fromIpns: SOURCE_NAME,
+				name: 'archive',
+			}),
+		).rejects.toThrow(/one source/i);
+		expect(a.requests.length).toBe(0);
+	});
+
+	it('refuses NEITHER a cid nor a fromIpns, touching no node', async () => {
+		const a = resolvingNode('https://node-a.test');
+		await expect(
+			pinExternal({targets: [targetWith(a, 'token-a')], name: 'archive'}),
+		).rejects.toThrow(/source/i);
+		expect(a.requests.length).toBe(0);
+	});
+});
+
+describe('pinExternal: a source name that does not resolve fails loud', () => {
+	it('throws PinSourceResolveError carrying Kubo message, pinning nothing', async () => {
+		const a = resolvingNode('https://node-a.test');
+		const b = resolvingNode('https://node-b.test');
+		a.on('name/resolve', {status: 500, text: 'routing: not found'});
+		b.on('name/resolve', {status: 500, text: 'routing: not found'});
+		const promise = pinExternal({
+			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
+			fromIpns: SOURCE_NAME,
+			name: 'archive',
+		});
+		await expect(promise).rejects.toThrow(PinSourceResolveError);
+		try {
+			await promise;
+		} catch (e) {
+			const error = e as PinSourceResolveError;
+			expect(error.fromIpns).toBe(SOURCE_NAME);
+			// Kubo's own words, per node it tried.
+			expect(error.message).toContain('routing: not found');
+			expect(error.message).toContain('https://node-b.test');
+			expect(error.failures.length).toBe(2);
+		}
+		// Nothing was pinned under a name whose content we never found.
+		expect(a.requestsFor('pin/add').length).toBe(0);
+		expect(b.requestsFor('pin/add').length).toBe(0);
+	});
+
+	it('checks the ipns-mode preconditions BEFORE resolving the source', async () => {
+		const replica = resolvingNode('https://replica.test');
+		await expect(
+			pinExternal({
+				targets: [targetWith(replica, 'token-rep', {role: 'replica'})],
+				fromIpns: SOURCE_NAME,
+				name: GOLDEN_NAME,
+				mode: 'ipns',
+				derived: derivedForGoldenName(),
+			}),
+		).rejects.toThrow(PinPublisherRequiredError);
+		// A refusal never even asks the network to resolve the source.
+		expect(replica.requests.length).toBe(0);
 	});
 });
 

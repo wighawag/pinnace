@@ -241,6 +241,67 @@ describe('KuboRpcClient — file-upload endpoints send multipart/form-data', () 
 	});
 });
 
+/**
+ * `name/resolve`: resolving an IPNS NAME to the CID it CURRENTLY points at.
+ * This is the read the `pin --from-ipns <source>` migrate path stands on: the
+ * SOURCE name (someone else's, or the operator's old one) resolved to a
+ * snapshot CID, which the existing pin flow then pins. Kubo does the DHT work;
+ * this seam only asserts the call shape, the auth, and the `/ipfs/<cid>` parse.
+ */
+describe('KuboRpcClient, name/resolve (the migrate SOURCE read)', () => {
+	it('nameResolve hits name/resolve?arg=/ipns/<name> and parses the /ipfs/<cid>', async () => {
+		const mock = new MockKuboApi().on('name/resolve', {
+			json: {Path: '/ipfs/bafycurrentsnapshot'},
+		});
+		const client = clientWith(mock, 'resolve-token');
+		const cid = await client.nameResolve('k51source');
+		const req = mock.lastRequest!;
+		expect(req.method).toBe('POST');
+		expect(req.path).toBe('name/resolve');
+		expect(req.query.get('arg')).toBe('/ipns/k51source');
+		expect(req.headers['authorization']).toBe('Bearer resolve-token');
+		// The CID the SOURCE name currently points at (what a migrate then pins).
+		expect(cid).toBe('bafycurrentsnapshot');
+	});
+
+	it('normalises a bare id, an /ipns/<id> path and an ipns://<id> address alike', async () => {
+		const mock = new MockKuboApi().on('name/resolve', {
+			json: {Path: '/ipfs/bafycurrentsnapshot'},
+		});
+		const client = clientWith(mock);
+		for (const form of ['k51source', '/ipns/k51source', 'ipns://k51source']) {
+			await client.nameResolve(form);
+			expect(mock.lastRequest!.query.get('arg')).toBe('/ipns/k51source');
+		}
+	});
+
+	it('raises the loud KuboRpcError when the name does not resolve (Kubo says so)', async () => {
+		const mock = new MockKuboApi().on('name/resolve', {
+			status: 500,
+			text: 'routing: not found',
+		});
+		const client = clientWith(mock);
+		await expect(client.nameResolve('k51nothere')).rejects.toThrow(
+			KuboRpcError,
+		);
+		try {
+			await client.nameResolve('k51nothere');
+		} catch (e) {
+			// Kubo's own message is passed through, not swallowed.
+			expect((e as KuboRpcError).message).toContain('routing: not found');
+			expect((e as KuboRpcError).endpoint).toBe('name/resolve');
+		}
+	});
+
+	it('fails loudly when the resolved path is not /ipfs/<cid> (never a silent empty cid)', async () => {
+		const mock = new MockKuboApi().on('name/resolve', {json: {}});
+		const client = clientWith(mock);
+		await expect(client.nameResolve('k51source')).rejects.toThrow(
+			/name\/resolve/,
+		);
+	});
+});
+
 describe('KuboRpcClient — error path', () => {
 	it('raises a loud KuboRpcError naming the endpoint and status on non-2xx', async () => {
 		const mock = new MockKuboApi().on('files/stat', {

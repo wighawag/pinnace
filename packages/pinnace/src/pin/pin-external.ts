@@ -55,6 +55,27 @@
  * single-node case (`--host`) is just a one-element `targets` list — there is no
  * separate code path.
  *
+ * MIGRATING FROM AN IPNS NAME (`fromIpns`, the CLI's `--from-ipns <source>`).
+ * A pin's source is EXACTLY ONE of two things: a `cid` the operator already has,
+ * or a SOURCE IPNS NAME to resolve one from ({@link resolveIpnsSource} ->
+ * {@link KuboRpcClient.nameResolve} on the first target that answers). Once
+ * resolved, NOTHING downstream differs: the same redundant `pin/add`, the same
+ * MFS placement, the same `ipns`-mode publish. That is the one-command ENS
+ * migration: `pin --from-ipns <src> --as ronan --mode ipns` resolves the source,
+ * pins its current content on every node, and publishes it under the OPERATOR's
+ * derived key so they have an `ipns://<their-id>` to point ENS at.
+ *
+ * Two things the migrate does NOT do, deliberately (CONTEXT.md keeps the SOURCE
+ * name and the operator's OWN name distinct):
+ *  - it does not hand over the SOURCE's key. The operator gets THEIR OWN name
+ *    (master + the `name`/`--as` id) pointing at a SNAPSHOT of the source's
+ *    current content. The content stays someone else's; the name is theirs.
+ *  - it does not FOLLOW the source. Each call re-resolves, so pulling a newer
+ *    snapshot is a MANUAL re-migrate (re-run the same command, which re-publishes
+ *    the newer cid under the same stable name). Auto-follow (watching the source
+ *    and re-pinning on its every change) is a separate, larger feature that does
+ *    not exist here.
+ *
  * RETRIEVABILITY (the honest caveat): `pin/add` only succeeds if SOMETHING on
  * the network still serves the content. A node that cannot find it fails with
  * that node's {@link PinStageError} (stage `pin`) carrying Kubo's own message,
@@ -63,10 +84,13 @@
  * imposed here (a default one would abort legitimately slow large-DAG pins).
  *
  * DECISIONS behind this module's shape are recorded in
- * `work/notes/observations/pin-external-cid-decisions.md` (the pin verb) and
+ * `work/notes/observations/pin-external-cid-decisions.md` (the pin verb),
  * `work/notes/observations/pin-external-cid-ipns-mode-decisions.md` (the mode
  * branch: why `mode` is reused rather than re-meant, why `role` became optional
- * here, and why the publish call shape moved to a shared home).
+ * here, and why the publish call shape moved to a shared home) and
+ * `work/notes/observations/pin-from-ipns-migrate-decisions.md` (the `fromIpns`
+ * source: why resolution lives in this core rather than the CLI, which node
+ * resolves, and what the resolved value may contain).
  */
 import {KuboRpcClient, type FetchLike} from '../rpc/kubo-rpc-client.js';
 import {placeInMfs} from '../site/site-management.js';
@@ -108,8 +132,21 @@ export interface PinTarget {
 export interface PinExternalInput {
 	/** The nodes to pin on (all configured nodes by default; one when narrowed). */
 	targets: PinTarget[];
-	/** The external CID to fetch + pin (a bare CID, as `pin/add?arg=` takes). */
-	cid: string;
+	/**
+	 * The external CID to fetch + pin (a bare CID, as `pin/add?arg=` takes).
+	 * EXACTLY ONE of `cid` / {@link fromIpns} must be given: the caller either
+	 * already has the cid, or names the SOURCE to resolve one from.
+	 */
+	cid?: string;
+	/**
+	 * MIGRATE instead: the SOURCE IPNS name to resolve to its CURRENT cid, which
+	 * is then pinned by the ordinary flow (`k51...`, `/ipns/<id>` or `ipns://<id>`;
+	 * a DNSLink name resolves too). The source is someone else's (or the
+	 * operator's old) name; it is NEVER the operator's own name, which in `ipns`
+	 * mode is minted from the master + {@link name} as usual. A snapshot, not a
+	 * follow: re-calling re-resolves (see the module JSDoc).
+	 */
+	fromIpns?: string;
 	/** The name to track it under: its MFS entry `/sites/<name>` (a site `id`). */
 	name: string;
 	/** Pin the whole DAG (default true) rather than the root block alone. */
@@ -154,6 +191,34 @@ export class PinStageError extends Error {
 	) {
 		super(message, {cause});
 		this.name = 'PinStageError';
+	}
+}
+
+/**
+ * The SOURCE IPNS name ({@link PinExternalInput.fromIpns}) could not be resolved
+ * on ANY target, so there is no cid to pin: a loud, per-node failure report
+ * carrying Kubo's own words (`routing: not found` for a name that was never
+ * published or whose record expired) rather than a silent empty pin. Thrown
+ * BEFORE anything is pinned, so a failed migrate leaves no half-done state.
+ */
+export class PinSourceResolveError extends Error {
+	constructor(
+		/** The source IPNS name that would not resolve. */
+		readonly fromIpns: string,
+		/** What each target answered when asked to resolve it. */
+		readonly failures: Array<{baseUrl: string; error: Error}>,
+	) {
+		super(
+			`could not resolve the source IPNS name ${fromIpns} on ` +
+				(failures.length === 0
+					? 'any node: there are no pin targets to resolve it on'
+					: `any of the ${failures.length} pin target(s): ` +
+						`${failures
+							.map((f) => `${f.baseUrl} (${f.error.message})`)
+							.join('; ')}. Is that name published and still valid (an ` +
+						`expired or never-published record does not resolve)?`),
+		);
+		this.name = 'PinSourceResolveError';
 	}
 }
 
@@ -209,8 +274,17 @@ export interface PinNodeFailure {
 
 /** The overall result: the CID/name, and the per-node breakdown. */
 export interface PinExternalResult {
-	/** The external CID that was pinned. */
+	/**
+	 * The external CID that was pinned: the RESOLVED one when migrating from a
+	 * {@link fromIpns} source, which is `<cid>/<subpath>` for the unusual source
+	 * name that points INTO a directory rather than at a root (see
+	 * {@link KuboRpcClient.nameResolve}).
+	 */
 	cid: string;
+	/** The SOURCE IPNS name this pin was migrated from, when it was. */
+	fromIpns?: string;
+	/** The node that resolved {@link fromIpns} to {@link cid}, when migrating. */
+	resolvedBy?: string;
 	/** The name it is tracked under on every successful node. */
 	name: string;
 	/** Whether the whole DAG was pinned. */
@@ -248,8 +322,13 @@ interface PinPlan {
  * `Promise.allSettled` so one unreachable/failing node never sinks the others;
  * always RESOLVES with the per-node breakdown (callers inspect `success`).
  *
- * @throws if `cid` or `name` is empty — a nameless pin would be untrackable
- * (nothing to place in MFS, so nothing would show on the dashboard).
+ * With `fromIpns` instead of `cid`, the source name is resolved FIRST (on the
+ * first target that answers) and everything below runs on the resolved cid.
+ *
+ * @throws unless EXACTLY ONE source (`cid` XOR `fromIpns`) is given, or if
+ * `name` is empty: a nameless pin would be untrackable (nothing to place in
+ * MFS, so nothing would show on the dashboard).
+ * @throws {PinSourceResolveError} when `fromIpns` resolves on no target.
  * @throws {PinPublisherRequiredError} in `ipns` mode when no target can sign.
  * @throws if `ipns` mode is asked for without the `derived` key.
  *
@@ -259,8 +338,19 @@ interface PinPlan {
 export async function pinExternal(
 	input: PinExternalInput,
 ): Promise<PinExternalResult> {
-	const {targets, cid, name} = input;
-	if (!cid) throw new Error('pinExternal requires a `cid` to pin');
+	const {targets, name} = input;
+	if (input.cid && input.fromIpns) {
+		throw new Error(
+			'pinExternal takes exactly one source: a `cid` to pin, OR `fromIpns` ' +
+				'(an IPNS name to resolve a cid from). Both were given',
+		);
+	}
+	if (!input.cid && !input.fromIpns) {
+		throw new Error(
+			'pinExternal requires exactly one source: a `cid` to pin, or `fromIpns` ' +
+				'(an IPNS name to resolve to its current cid)',
+		);
+	}
 	if (!name) throw new Error('pinExternal requires a `name` to track it under');
 	const mode: SiteMode = input.mode ?? 'ipfs';
 	if (mode === 'ipns') {
@@ -274,6 +364,14 @@ export async function pinExternal(
 			throw new PinPublisherRequiredError(targets.map((t) => t.role));
 		}
 	}
+
+	// MIGRATE: turn the SOURCE name into the cid it points at RIGHT NOW. This is
+	// the only network call before the fan-out, and it happens AFTER the refusals
+	// above so a rejected pin never touches a node.
+	const resolved = input.fromIpns
+		? await resolveIpnsSource(targets, input.fromIpns)
+		: undefined;
+	const cid = resolved?.cid ?? (input.cid as string);
 
 	const plan: PinPlan = {
 		cid,
@@ -305,6 +403,9 @@ export async function pinExternal(
 	const ipns = ok.find((node) => node.published)?.ipns;
 	return {
 		cid: plan.cid,
+		...(resolved
+			? {fromIpns: input.fromIpns as string, resolvedBy: resolved.resolvedBy}
+			: {}),
 		name,
 		recursive: plan.recursive,
 		mode,
@@ -313,6 +414,44 @@ export async function pinExternal(
 		failed,
 		success: ok.length > 0,
 	};
+}
+
+/**
+ * Resolve the SOURCE IPNS name to the cid it currently points at, on the FIRST
+ * target that answers ({@link KuboRpcClient.nameResolve}).
+ *
+ * SEQUENTIALLY, not fanned out: one node's `name/resolve` is one DHT lookup for
+ * a single answer every node would give alike, so the later targets are a
+ * REACHABILITY fallback (a down/misconfigured first node must not sink a
+ * migrate), not a quorum. The resolving node is reported so the operator can see
+ * whose view of the name they pinned.
+ *
+ * @throws {PinSourceResolveError} when NO target could resolve it, carrying each
+ * node's own Kubo message.
+ */
+async function resolveIpnsSource(
+	targets: PinTarget[],
+	fromIpns: string,
+): Promise<{cid: string; resolvedBy: string}> {
+	const failures: Array<{baseUrl: string; error: Error}> = [];
+	for (const target of targets) {
+		try {
+			const cid = await clientFor(target).nameResolve(fromIpns);
+			return {cid, resolvedBy: target.baseUrl};
+		} catch (cause) {
+			failures.push({baseUrl: target.baseUrl, error: asError(cause)});
+		}
+	}
+	throw new PinSourceResolveError(fromIpns, failures);
+}
+
+/** The per-node client every step of the pin speaks through (one per target). */
+function clientFor(target: PinTarget): KuboRpcClient {
+	return new KuboRpcClient({
+		baseUrl: target.baseUrl,
+		token: target.token,
+		fetchImpl: target.fetchImpl,
+	});
 }
 
 /**
@@ -332,11 +471,7 @@ function canSign(target: PinTarget): boolean {
  */
 async function pinOnNode(target: PinTarget, plan: PinPlan): Promise<PinNodeOk> {
 	const {cid, name, recursive, sitesDir} = plan;
-	const client = new KuboRpcClient({
-		baseUrl: target.baseUrl,
-		token: target.token,
-		fetchImpl: target.fetchImpl,
-	});
+	const client = clientFor(target);
 
 	// 1. Fetch + pin. This is the step that needs the content to be RETRIEVABLE.
 	try {

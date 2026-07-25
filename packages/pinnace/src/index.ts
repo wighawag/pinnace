@@ -142,6 +142,7 @@ export {
 	pinExternal,
 	PinStageError,
 	PinPublisherRequiredError,
+	PinSourceResolveError,
 	type PinExternalInput,
 	type PinExternalResult,
 	type PinTarget,
