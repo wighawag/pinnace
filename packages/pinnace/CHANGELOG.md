@@ -1,5 +1,25 @@
 # pinnace
 
+## 0.6.0
+
+### Minor Changes
+
+- eb9fc38: `pinnace pin <cid> --as <name>` gains `--mode ipfs|ipns`. The default `ipfs` is unchanged (fetch + pin on every node, tracked in MFS at `/sites/<name>`, addressed by the immutable `ipfs://<cid>`). `--mode ipns` ADDS your OWN stable name for content you mirror: the per-site key derived from the env-only master + the `--as <name>` id is imported onto the PUBLISHER node (the same `key/import` `promote` makes, skipped when the publisher already holds it), which then signs `name/publish arg=/ipfs/<cid> key=<name>`. The CLI prints the resulting `ipns://<id>` — the same `k51...` `pinnace derive <name>` prints, so you can set a contenthash before ever pinning. Re-pinning a NEWER CID under the same `--as <name>` re-publishes, so the name follows the new snapshot while staying stable.
+
+  The pin still fans out to EVERY node; only the publisher signs (a replica is keyless and never signs — it re-announces via the on-box `mirror` timer, and because the pin sits at `/sites/<name>` with a same-named key on the publisher, an ipns-mode pin inherits the deployed-site failover machinery for free). `--mode ipns` with no publisher among the targets (a publisher-less config, or `--host` pointing at a replica) is a LOUD refusal before any node is touched, as is an unset `PINNACE_MASTER`.
+
+  Under it: `pinExternal` takes `mode` + the `derived` key and its targets carry an optional `role`; per-node results now report `published`/`ipns`, and a failed publish is its own `PinStageError` stage (`publish`, the content IS pinned). The `key/list` + `name/publish` call shape moved into one shared home (`lookupIpnsKeyId` + `publishSiteRecord`, exported), now used by deploy's ipns mode, `pin --mode ipns` and the on-box republish timer alike, so the record lifetime/ttl cannot drift between them.
+
+- f184eda: `pinnace pin` can now MIGRATE from an existing IPNS name: `pinnace pin --from-ipns <source-ipns-name> --as <name> [--mode ipfs|ipns]`. A pin takes EXACTLY ONE source, the positional `<cid>` XOR `--from-ipns <name>` (both, or neither, is a loud usage error). With `--from-ipns`, pinnace resolves that SOURCE name (`name/resolve`, on the first reachable target) to the cid it points at right now, prints `resolved ipns <source> -> <cid> (via <node>)`, and then runs the UNCHANGED pin flow on that cid: the redundant `pin/add` on every node, the MFS placement at `/sites/<name>`, and, with `--mode ipns`, the publish under the operator's OWN master-derived key.
+
+  That makes ENS migration one command: `pinnace pin --from-ipns <src> --as ronan --mode ipns` pins the source's current content on your nodes and prints `ipns://<your-id>` to point `ronan.eth` at. What you get is YOUR OWN name over a SNAPSHOT of someone else's content: no key changes hands, and nothing follows the source afterwards. Pulling a newer snapshot is re-running the same command (it re-resolves and re-publishes; your name stays stable, only the cid it points at moves), and the CLI says so on every migrate. A source name that resolves on no node is a loud `PinSourceResolveError` (exit 1) carrying Kubo's own message, never a silent success.
+
+  Under it: `KuboRpcClient.nameResolve(name)` issues `name/resolve?arg=/ipns/<name>&recursive=true` with the node's bearer and parses the returned `/ipfs/<cid>` (a bare `k51...`, an `/ipns/<id>` path and an `ipns://<id>` address all normalise; a non-2xx raises the usual loud `KuboRpcError`). `pinExternal`'s `cid` became optional next to the new `fromIpns`, exactly one of which is required, and its result reports `fromIpns` + `resolvedBy` alongside the resolved `cid`.
+
+### Patch Changes
+
+- 3cec57c: Bump the emitted cloud-init's default on-box pinnace version (`DEFAULT_PINNACE_VERSION`) to `0.6.0`, the release that adds `pinnace pin --from-ipns <name>` (migrate an existing IPNS site onto your own nodes + your own IPNS name in one command).
+
 ## 0.5.0
 
 ### Minor Changes
