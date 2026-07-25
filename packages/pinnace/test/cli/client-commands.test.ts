@@ -26,6 +26,7 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 		statusReport: [],
 		deriveIpnsId: [],
 		pinExternal: [],
+		deriveIpnsKey: [],
 	};
 	const deps: Partial<ClientDeps> = {
 		provision: (input) => {
@@ -64,18 +65,31 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 		},
 		pinExternal: async (input) => {
 			calls.pinExternal.push(input);
+			const publishes = input.mode === 'ipns';
 			return {
 				cid: input.cid,
 				name: input.name,
 				recursive: input.recursive ?? true,
+				mode: input.mode ?? 'ipfs',
+				...(publishes ? {ipns: 'k51stubid'} : {}),
 				ok: input.targets.map((t) => ({
 					baseUrl: t.baseUrl,
 					cid: input.cid,
 					name: input.name,
 					recursive: input.recursive ?? true,
+					published: publishes && t.role === 'publisher',
+					...(publishes && t.role === 'publisher' ? {ipns: 'k51stubid'} : {}),
 				})),
 				failed: [],
 				success: true,
+			};
+		},
+		deriveIpnsKey: (input) => {
+			calls.deriveIpnsKey.push(input);
+			return {
+				seed: new Uint8Array(32),
+				publicKey: new Uint8Array(32),
+				ipnsId: 'k51stubid',
 			};
 		},
 	};
@@ -445,6 +459,121 @@ describe('pin <cid> --as <name> — dispatches to core pinExternal (all nodes)',
 		const code = await run(['pin', 'bafymissing', '--as', 'archive'], context);
 		expect(code).not.toBe(0);
 		expect(err.join('\n')).toContain('merkledag: not found');
+	});
+});
+
+describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () => {
+	/** The master is env-ONLY (never a pinnace.json field), exactly as promote. */
+	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
+
+	it('defaults to ipfs mode: no derivation, no publish, no ipns printed', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['pin', 'bafyexternal', '--as', 'archive'], context);
+		expect(code).toBe(0);
+		expect(calls.pinExternal[0]).toMatchObject({mode: 'ipfs'});
+		expect(calls.deriveIpnsKey.length).toBe(0);
+		expect(out.join('\n')).not.toContain('ipns://');
+	});
+
+	it('derives the key from the env-only master + the --as <name> id', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'ipns'],
+			context,
+		);
+		expect(code).toBe(0);
+
+		// The `--as <name>` IS the KDF input (one id), same as derive/promote.
+		expect(calls.deriveIpnsKey.length).toBe(1);
+		expect(calls.deriveIpnsKey[0]).toMatchObject({
+			master: 'the-master-secret',
+			keyId: 'archive',
+		});
+
+		const input = calls.pinExternal[0] as {
+			mode: string;
+			derived: {ipnsId: string};
+			targets: Array<{baseUrl: string; role: string}>;
+		};
+		expect(input.mode).toBe('ipns');
+		expect(input.derived.ipnsId).toBe('k51stubid');
+		// Every node is still a pin target; each carries its ROLE so only the
+		// publisher signs.
+		expect(input.targets.map((t) => [t.baseUrl, t.role])).toEqual([
+			['https://a.example', 'publisher'],
+			['https://b.example', 'replica'],
+		]);
+
+		// The operator is told the mutable pointer they now control.
+		expect(out.join('\n')).toContain('ipns://k51stubid');
+	});
+
+	it('FAILS LOUD when the master is unset (env-only, never from the config)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'ipns'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('PINNACE_MASTER');
+	});
+
+	it('FAILS LOUD when --host narrows to a REPLICA (a replica never signs)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			[
+				'pin',
+				'bafyexternal',
+				'--as',
+				'archive',
+				'--mode',
+				'ipns',
+				'--host',
+				'b',
+			],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toMatch(/publisher/i);
+		expect(err.join('\n')).toContain('b');
+	});
+
+	it('FAILS LOUD when NO configured host is a publisher', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({
+			deps,
+			env: {...masterEnv},
+			loadConfigFile: () => ({
+				hosts: [
+					{name: 'b', endpoint: 'https://b.example', role: 'replica' as const},
+				],
+			}),
+		});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'ipns'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toMatch(/publisher/i);
+	});
+
+	it('rejects an invalid --mode value (the surface is an allow-list)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'sideways'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('--mode');
 	});
 });
 

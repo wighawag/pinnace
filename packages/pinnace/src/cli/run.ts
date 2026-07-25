@@ -664,11 +664,26 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 }
 
 /**
- * `pin <cid> --as <name> [--host <name>] [--no-recursive]` -> core
- * {@link ClientDeps.pinExternal}. Pins an EXTERNAL network CID (content the
+ * `pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]` ->
+ * core {@link ClientDeps.pinExternal}. Pins an EXTERNAL network CID (content the
  * operator has only the CID for) on EVERY configured node by default — the same
  * redundancy `deploy` gives — and tracks it in MFS at `/sites/<name>` so it
  * shows on the dashboard and gets gateway-warmed.
+ *
+ * `--mode` is the SAME per-site mode `deploy` takes (CONTEXT.md `mode`), here
+ * defaulting to `ipfs` (pin + MFS only; the pin is addressed by the immutable
+ * `ipfs://<cid>`). `--mode ipns` ADDS the operator's OWN stable name for the
+ * mirrored content: the key derived from the env-ONLY master + the `--as <name>`
+ * id (the same single-`id`-is-the-KDF-input rule as `derive`/`promote`) is
+ * imported onto the PUBLISHER, which then signs `name/publish` for the pinned
+ * cid. Re-pinning a newer cid under the same name moves that name.
+ *
+ * Two loud refusals guard the ipns path HERE, before the core is called, so the
+ * message can name what the operator typed: an unset master (env-only, never
+ * from `pinnace.json`), and a target set with no publisher in it (`--host` a
+ * replica, or a publisher-less config) — a replica is keyless and never signs.
+ * The core repeats the second check for library callers
+ * ({@link PinPublisherRequiredError}).
  *
  * `--host <name>` NARROWS the fan-out to that one node (note this differs from
  * `site`/`promote`, where `--host` SELECTS the single node it acts on and is
@@ -687,7 +702,16 @@ async function runPin(
 	const pinName = flags['as'];
 	if (!cid || !pinName) {
 		rc.err(
-			'pinnace pin: usage: pinnace pin <cid> --as <name> [--host <name>] [--no-recursive]',
+			'pinnace pin: usage: pinnace pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]',
+		);
+		return 1;
+	}
+
+	// The mode surface is an explicit allow-list (same two values as a site's).
+	const mode = (flags['mode'] ?? 'ipfs') as SiteMode;
+	if (mode !== 'ipfs' && mode !== 'ipns') {
+		rc.err(
+			`pinnace pin: --mode must be 'ipfs' (pin + MFS only, the default) or 'ipns' (also publish the pin under your derived key)`,
 		);
 		return 1;
 	}
@@ -715,11 +739,36 @@ async function runPin(
 		hosts = [match];
 	}
 
+	// ipns mode: the operator's own name for the mirrored content. The master is
+	// env-ONLY, and SOMETHING among the targets must be able to sign.
+	let derived: DerivedIpnsKey | undefined;
+	if (mode === 'ipns') {
+		const master = resolveMasterSecret({env: rc.env});
+		if (!master) {
+			rc.err(
+				'pinnace pin: --mode ipns needs the master secret — export PINNACE_MASTER (env-only; never read from pinnace.json)',
+			);
+			return 1;
+		}
+		if (!hosts.some((h) => h.role === 'publisher')) {
+			rc.err(
+				`pinnace pin: --mode ipns needs a publisher to sign the name, but ` +
+					`${hosts.map((h) => `${h.name} (${h.role})`).join(', ')} cannot — a ` +
+					`replica is keyless and only re-announces the publisher's record. ` +
+					`Pin with --mode ipfs, or target the publisher.`,
+			);
+			return 1;
+		}
+		// The `--as <name>` IS the site id AND the KDF input (one identifier).
+		derived = rc.deps.deriveIpnsKey({master, keyId: pinName});
+	}
+
 	let targets: PinTarget[];
 	try {
 		targets = hosts.map((h) => ({
 			baseUrl: h.endpoint,
 			token: resolveHostToken({hostName: h.name, env: rc.env, cli}),
+			role: h.role,
 		}));
 	} catch (error) {
 		if (error instanceof MissingHostTokenError) {
@@ -734,16 +783,24 @@ async function runPin(
 		cid,
 		name: pinName,
 		recursive: flags['no-recursive'] === undefined,
+		mode,
+		...(derived ? {derived} : {}),
 	});
 	rc.out(
 		`pinned ${result.cid} as ${result.name}${result.recursive ? '' : ' (root block only)'}`,
 	);
-	for (const ok of result.ok) rc.out(`  ok  ${ok.baseUrl}`);
+	for (const ok of result.ok) {
+		rc.out(
+			`  ok  ${ok.baseUrl}${ok.published && ok.ipns ? ` (ipns ${ok.ipns})` : ''}`,
+		);
+	}
 	for (const failure of result.failed) {
 		rc.err(
 			`  FAIL ${failure.baseUrl} (${failure.stage}): ${failure.error.message}`,
 		);
 	}
+	// The whole point of ipns mode: the mutable pointer the operator now controls.
+	if (result.ipns) rc.out(`ipns://${result.ipns}`);
 	return result.success ? 0 : 1;
 }
 

@@ -21,7 +21,7 @@ Requires Node >= 22.
 - **CID / CAR**: your site is built client-side into a CAR (Content Addressable aRchive) whose root is the site's UnixFS directory; the same CAR is imported into every node so they all serve the identical **CID**.
 - **master key -> per-site IPNS key**: one operator-held secret (env-only, never on a node, never in the config file) deterministically derives each site's IPNS key: `HKDF-SHA256(master, info = "pinnace:ipns:v1:" + id)` -> ed25519 seed -> the `k51...` IPNS name. Names are recoverable from the master alone; provisioning is stateless. This is a frozen contract (see the ADRs).
 - **site `id`**: one value per site, used as BOTH its MFS entry (`/sites/<id>`) AND the key-derivation input. Pick anything stable (e.g. `mysite`, or `ronan.eth`).
-- **mode**: per-site `ipfs` (land + pin + MFS only; you point a contenthash at `ipfs://<cid>` per deploy) or `ipns` (also publish/refresh; point it at `ipns://<id>` once).
+- **mode**: `ipfs` (land + pin + MFS only; you point a contenthash at `ipfs://<cid>` per deploy) or `ipns` (also publish/refresh; point it at `ipns://<id>` once). Per site for `deploy`, and per pin for `pin` (`--mode ipns` gives an externally-pinned CID your own stable name too).
 - **gateway warming**: re-fetching each site's CID through public gateways so their caches stay hot; sites are auto-discovered from MFS.
 
 ## Configuration + secrets
@@ -140,7 +140,7 @@ curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the export
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
 | `pinnace deploy [--mode ipfs\|ipns] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place in MFS; in `ipns` mode publish on the publisher. |
-| `pinnace pin <cid> --as <name> [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in MFS at `/sites/<name>` so it is warmed and shows in `status`. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
+| `pinnace pin <cid> --as <name> [--mode ipfs\|ipns] [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in MFS at `/sites/<name>` so it is warmed and shows in `status`. With `--mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows). Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace promote <id> [--host <name>]` | Derive the per-site key from the master and import it onto the host, making it the publisher (also the replica-promotion path). |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, network-announce, gateway-serves. |

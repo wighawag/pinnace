@@ -4,10 +4,13 @@ import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
 import {
 	pinExternal,
 	PinStageError,
+	PinPublisherRequiredError,
 	type PinTarget,
 } from '../../src/pin/pin-external.js';
 import {removeSite} from '../../src/site/site-management.js';
 import {discoverSites} from '../../src/node/node-commands.js';
+import {deriveIpnsKey} from '../../src/derive/ipns-key-derivation.js';
+import {serializeIpnsKeyForImport} from '../../src/publisher/key-import.js';
 
 /**
  * `pinExternal` tests (task `pin-external-cid`).
@@ -38,8 +41,17 @@ function mockNode(baseUrl: string, cid = EXTERNAL_CID): MockKuboApi {
 }
 
 /** A pin target backed by its own recording mock (distinct baseUrl + token). */
-function targetWith(mock: MockKuboApi, token: string): PinTarget {
-	return {baseUrl: mock.baseUrl, token, fetchImpl: mock.fetchImpl};
+function targetWith(
+	mock: MockKuboApi,
+	token: string,
+	extra: Partial<PinTarget> = {},
+): PinTarget {
+	return {
+		baseUrl: mock.baseUrl,
+		token,
+		fetchImpl: mock.fetchImpl,
+		...extra,
+	};
 }
 
 describe('pinExternal — pin/add an arbitrary CID on EVERY node (redundant)', () => {
@@ -267,5 +279,293 @@ describe('site remove — the EXISTING verb unpins a pin-added site', () => {
 		const unpin = a.requestsFor('pin/rm');
 		expect(unpin.length).toBe(1);
 		expect(unpin[0].query.get('arg')).toBe(EXTERNAL_CID);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// `--mode ipns`: the pin ALSO gets the operator's OWN stable IPNS name
+// (task `pin-external-cid-ipns-mode`). The mode branch MIRRORS deploy's:
+// `ipfs` = pin + MFS only; `ipns` ADDS key import + key/list + name/publish, on
+// the PUBLISHER target only (a replica never signs).
+// ---------------------------------------------------------------------------
+
+/**
+ * The FROZEN golden vector from `test/derive/ipns-key-derivation.test.ts`: the
+ * same (master, id) MUST yield the same `k51...` id here as `derive`/`promote`
+ * print, so an operator can pre-set the name before ever pinning.
+ */
+const GOLDEN_MASTER = 'test-master-secret';
+const GOLDEN_NAME = 'mysite';
+const GOLDEN_IPNS_ID =
+	'k51qzi5uqu5dkkob0ou1d9xbkr1yskaj07trqc5czn58kvkos6n7y2yid3u4n5';
+
+/** The derived per-site key the CLI resolves from the env-only master. */
+function derivedForGoldenName() {
+	return deriveIpnsKey({master: GOLDEN_MASTER, keyId: GOLDEN_NAME});
+}
+
+/** A publisher whose keystore is EMPTY (the FIRST pin: the key must be imported). */
+function keylessPublisher(baseUrl: string, cid = EXTERNAL_CID): MockKuboApi {
+	const mock = mockNode(baseUrl, cid);
+	mock.on('key/list', {json: {Keys: []}});
+	return mock;
+}
+
+/** A publisher that ALREADY holds the same-named key (the re-pin path). */
+function keyedPublisher(
+	baseUrl: string,
+	ipnsId = GOLDEN_IPNS_ID,
+	cid = EXTERNAL_CID,
+): MockKuboApi {
+	const mock = mockNode(baseUrl, cid);
+	mock.on('key/list', {json: {Keys: [{Name: GOLDEN_NAME, Id: ipnsId}]}});
+	return mock;
+}
+
+describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
+	it('issues no key/list, no key/import and no name/publish (mode omitted)', async () => {
+		const a = keylessPublisher('https://publisher.test');
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+		});
+
+		expect(a.requests.map((r) => r.path)).toEqual([
+			'pin/add',
+			'files/mkdir',
+			'files/rm',
+			'files/cp',
+		]);
+		expect(result.mode).toBe('ipfs');
+		expect(result.ipns).toBeUndefined();
+		expect(result.ok[0].published).toBe(false);
+		expect(result.ok[0].ipns).toBeUndefined();
+	});
+
+	it('is identical when ipfs is passed EXPLICITLY (no key, no publish)', async () => {
+		const a = keylessPublisher('https://publisher.test');
+		await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipfs',
+			// Even WITH a derived key in hand, ipfs mode must not publish.
+			derived: derivedForGoldenName(),
+		});
+		expect(a.requestsFor('key/list').length).toBe(0);
+		expect(a.requestsFor('key/import').length).toBe(0);
+		expect(a.requestsFor('name/publish').length).toBe(0);
+	});
+});
+
+describe('pinExternal — mode ipns ADDS the publish path (publisher only)', () => {
+	it('pins, places, imports the derived key, then name/publishes /ipfs/<cid>', async () => {
+		const a = keylessPublisher('https://publisher.test');
+		const derived = derivedForGoldenName();
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived,
+		});
+
+		// The FULL sequence: the pin + MFS placement FIRST (unchanged), THEN the
+		// key lookup, the import of the missing key, and the publish.
+		expect(a.requests.map((r) => r.path)).toEqual([
+			'pin/add',
+			'files/mkdir',
+			'files/rm',
+			'files/cp',
+			'key/list',
+			'key/import',
+			'name/publish',
+		]);
+
+		// The key was imported under the site name (the `--as <name>` id) as the
+		// MATERIAL Kubo signs with — the exact bytes the key-import seam produces.
+		const imported = a.requestsFor('key/import')[0];
+		expect(imported.query.get('arg')).toBe(GOLDEN_NAME);
+		expect(imported.contentType).toBe('multipart/form-data');
+		expect(
+			Buffer.from(imported.fileParts?.[0].bytes ?? []).toString('hex'),
+		).toBe(Buffer.from(serializeIpnsKeyForImport(derived)).toString('hex'));
+
+		// The node (never the client) signs: name/publish points the name at the
+		// PINNED cid, with the frozen record lifetime/ttl.
+		const published = a.requestsFor('name/publish');
+		expect(published.length).toBe(1);
+		expect(published[0].query.get('arg')).toBe(`/ipfs/${EXTERNAL_CID}`);
+		expect(published[0].query.get('key')).toBe(GOLDEN_NAME);
+		expect(published[0].query.get('lifetime')).toBe('72h');
+		expect(published[0].query.get('ttl')).toBe('1h');
+		expect(published[0].headers['authorization']).toBe('Bearer token-a');
+
+		expect(result.mode).toBe('ipns');
+		expect(result.success).toBe(true);
+		expect(result.ok[0].published).toBe(true);
+	});
+
+	it('reports the operator OWN name: the golden derived id for that <name>', async () => {
+		const a = keylessPublisher('https://publisher.test');
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+		// Same (master, id) -> same k51... as `derive`/`promote` print.
+		expect(result.ipns).toBe(GOLDEN_IPNS_ID);
+		expect(result.ok[0].ipns).toBe(GOLDEN_IPNS_ID);
+	});
+
+	it('prefers the id the node reports for the key when it gives one', async () => {
+		const a = keyedPublisher('https://publisher.test', GOLDEN_IPNS_ID);
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+		expect(result.ipns).toBe(GOLDEN_IPNS_ID);
+	});
+
+	it('does NOT re-import a key the publisher already holds (still publishes)', async () => {
+		const a = keyedPublisher('https://publisher.test');
+		await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+		expect(a.requestsFor('key/list').length).toBe(1);
+		expect(a.requestsFor('key/import').length).toBe(0);
+		expect(a.requestsFor('name/publish').length).toBe(1);
+	});
+
+	it('re-pinning a NEWER cid under the same name re-publishes: the name updates', async () => {
+		const a = keyedPublisher('https://publisher.test');
+		const derived = derivedForGoldenName();
+		const first = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: 'bafyoldsnapshot',
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived,
+		});
+		const second = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: 'bafynewsnapshot',
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived,
+		});
+
+		const published = a.requestsFor('name/publish');
+		expect(published.length).toBe(2);
+		expect(published[0].query.get('arg')).toBe('/ipfs/bafyoldsnapshot');
+		expect(published[1].query.get('arg')).toBe('/ipfs/bafynewsnapshot');
+		// The NAME is stable across the re-pin; only the cid it points at moved.
+		expect(published[1].query.get('key')).toBe(GOLDEN_NAME);
+		expect(second.ipns).toBe(first.ipns);
+		expect(second.cid).toBe('bafynewsnapshot');
+	});
+
+	it('publishes on the publisher ONLY: a replica pins + places but NEVER signs', async () => {
+		const publisher = keylessPublisher('https://publisher.test');
+		const replica = keylessPublisher('https://replica.test');
+		const result = await pinExternal({
+			targets: [
+				targetWith(publisher, 'token-pub', {role: 'publisher'}),
+				targetWith(replica, 'token-rep', {role: 'replica'}),
+			],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+
+		// The pin still fans out to EVERY node (redundancy is unchanged)...
+		expect(result.ok.length).toBe(2);
+		expect(replica.requestsFor('pin/add').length).toBe(1);
+		expect(replica.requestsFor('files/cp').length).toBe(1);
+		// ...but ONLY the publisher holds a key and signs.
+		expect(publisher.requestsFor('name/publish').length).toBe(1);
+		expect(replica.requestsFor('name/publish').length).toBe(0);
+		expect(replica.requestsFor('key/import').length).toBe(0);
+		expect(replica.requestsFor('key/list').length).toBe(0);
+
+		const byUrl = new Map(result.ok.map((o) => [o.baseUrl, o]));
+		expect(byUrl.get('https://publisher.test')?.published).toBe(true);
+		expect(byUrl.get('https://replica.test')?.published).toBe(false);
+		expect(byUrl.get('https://replica.test')?.ipns).toBeUndefined();
+	});
+});
+
+describe('pinExternal — a failed publish is reported as its OWN stage', () => {
+	it('reports stage `publish` (the content IS pinned; only the name did not move)', async () => {
+		const a = keyedPublisher('https://publisher.test');
+		a.on('name/publish', {status: 500, text: 'no key'});
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+		expect(result.failed[0].stage).toBe('publish');
+		expect(result.failed[0].error).toBeInstanceOf(PinStageError);
+		expect(result.failed[0].error.message).toContain('ipns');
+		// It DID pin + place (the failure is downstream of both).
+		expect(a.requestsFor('pin/add').length).toBe(1);
+		expect(a.requestsFor('files/cp').length).toBe(1);
+	});
+});
+
+describe('pinExternal — mode ipns REFUSES loudly without a publisher to sign', () => {
+	it('throws when no target is a publisher, touching NO node', async () => {
+		const replica = keylessPublisher('https://replica.test');
+		await expect(
+			pinExternal({
+				targets: [targetWith(replica, 'token-rep', {role: 'replica'})],
+				cid: EXTERNAL_CID,
+				name: GOLDEN_NAME,
+				mode: 'ipns',
+				derived: derivedForGoldenName(),
+			}),
+		).rejects.toThrow(PinPublisherRequiredError);
+		// It refuses BEFORE pinning anything (no half-done state to reason about).
+		expect(replica.requests.length).toBe(0);
+	});
+
+	it('treats a role-less target as unable to sign (ipfs-mode targets)', async () => {
+		const a = keylessPublisher('https://node-a.test');
+		await expect(
+			pinExternal({
+				targets: [targetWith(a, 'token-a')],
+				cid: EXTERNAL_CID,
+				name: GOLDEN_NAME,
+				mode: 'ipns',
+				derived: derivedForGoldenName(),
+			}),
+		).rejects.toThrow(PinPublisherRequiredError);
+		expect(a.requests.length).toBe(0);
+	});
+
+	it('throws when the derived key is missing (the master is env-only, upstream)', async () => {
+		const a = keylessPublisher('https://publisher.test');
+		await expect(
+			pinExternal({
+				targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+				cid: EXTERNAL_CID,
+				name: GOLDEN_NAME,
+				mode: 'ipns',
+			}),
+		).rejects.toThrow(/derived/i);
+		expect(a.requests.length).toBe(0);
 	});
 });

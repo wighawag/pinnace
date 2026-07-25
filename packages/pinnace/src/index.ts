@@ -87,6 +87,11 @@ export {
 	type KeyImportResult,
 } from './publisher/key-import.js';
 export {
+	lookupIpnsKeyId,
+	publishSiteRecord,
+	type PublishSiteRecordInput,
+} from './publisher/ipns-publish.js';
+export {
 	republishAndExport,
 	mirrorAndReannounce,
 	makeRepublishOp,
@@ -136,6 +141,7 @@ export {
 export {
 	pinExternal,
 	PinStageError,
+	PinPublisherRequiredError,
 	type PinExternalInput,
 	type PinExternalResult,
 	type PinTarget,

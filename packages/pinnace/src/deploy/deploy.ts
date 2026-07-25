@@ -28,24 +28,23 @@
  *
  * SEAM BOUNDARY (see the sibling tasks): this module wires the per-mode call
  * SEQUENCE only. The full publisher/replica record export+mirror lives in
- * `publisher-replica-model`, and importing the derived key into the publisher's
- * keystore lives in `key-import-publisher`. So deploy here does NOT `key/gen`
- * or `key/import` — it assumes the publisher already holds the key (looked up
- * via `key/list`) and issues `name/publish`. If a publisher has no matching key
- * yet, the publish is reported as skipped rather than silently generating one
- * (key provisioning is that other task's job, not deploy's).
+ * `publisher-replica-model`, the `key/list` + `name/publish` call shape lives in
+ * `../publisher/ipns-publish.ts` (shared with `pin --mode ipns` and the on-box
+ * republish timer), and importing the derived key into the publisher's keystore
+ * lives in `key-import-publisher`. So deploy here does NOT `key/gen` or
+ * `key/import` — it assumes the publisher already holds the key (looked up via
+ * `key/list`) and issues `name/publish`. If a publisher has no matching key yet,
+ * the publish is reported as skipped rather than silently generating one (key
+ * provisioning is that other task's job, not deploy's).
  */
 import {KuboRpcClient, type FetchLike} from '../rpc/kubo-rpc-client.js';
 import {buildCar, type BuiltCar} from '../car/car-build.js';
 import {placeInMfs} from '../site/site-management.js';
+import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
 import type {HostRole, SiteMode} from '../config/config-resolution.js';
 
 /** The MFS directory sites live under (matches site-management). */
 const DEFAULT_SITES_DIR = '/sites';
-
-/** Reference record values (ported from the prototype / on-box republish). */
-const RECORD_LIFETIME = '72h';
-const RECORD_TTL = '1h';
 
 /**
  * One deploy target: a node's RPC endpoint + its OWN token + its role. In
@@ -213,34 +212,30 @@ function shouldPublish(target: DeployTarget): boolean {
 /**
  * The publish path (ipns mode, publisher only): `key/list` to resolve the site
  * key's IPNS id, then `name/publish` to sign+refresh the record for
- * `/ipfs/<cid>`. The keystore key name is the site's single `id` (the same
- * value key-import imports under — one identifier, so the lookup cannot miss by
- * a name/keyId split). Does NOT `key/gen`/`key/import`: the key is provisioned
- * by the sibling `key-import-publisher` task; here we assume it exists. If it
- * does not yet, we skip the publish (returning undefined) rather than silently
- * generating a key deploy has no business owning.
+ * `/ipfs/<cid>` — both through the shared `ipns-publish` seam, so deploy, `pin
+ * --mode ipns` and the on-box republish timer issue the IDENTICAL calls. The
+ * keystore key name is the site's single `id` (the same value key-import imports
+ * under — one identifier, so the lookup cannot miss by a name/keyId split).
+ *
+ * Does NOT `key/gen`/`key/import`: the key is provisioned by the sibling
+ * `key-import-publisher` task; here we assume it exists. If it does not yet, we
+ * skip the publish (returning undefined) rather than silently generating a key
+ * deploy has no business owning. (`pin --mode ipns` composes the same two calls
+ * with the OPPOSITE policy: it imports the derived key first, because the
+ * operator just asked for that name.)
  */
 async function publish(
 	client: KuboRpcClient,
 	id: string,
 	cid: string,
 ): Promise<string | undefined> {
-	const keys = await client.keyList<{
-		Keys?: Array<{Name?: string; Id?: string}> | null;
-	}>();
-	const ipns = (keys.Keys ?? []).find((k) => k?.Name === id)?.Id;
+	const ipns = await lookupIpnsKeyId(client, id);
 	if (!ipns) {
 		// The publisher has no key for this site yet (key-import-publisher owns
 		// provisioning it). Land the content but do not sign.
 		return undefined;
 	}
-	await client.namePublish({
-		cidPath: `/ipfs/${cid}`,
-		key: id,
-		lifetime: RECORD_LIFETIME,
-		ttl: RECORD_TTL,
-		allowOffline: true,
-	});
+	await publishSiteRecord({client, id, cid});
 	return ipns;
 }
 

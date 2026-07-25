@@ -47,6 +47,11 @@ import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import type {HostRole} from '../config/config-resolution.js';
 import type {DerivedIpnsKey} from '../derive/ipns-key-derivation.js';
 import {importIpnsKeyIntoPublisher} from './key-import.js';
+import {
+	publishSiteRecord,
+	RECORD_LIFETIME,
+	RECORD_TTL,
+} from './ipns-publish.js';
 import type {
 	DiscoveredSite,
 	NodeCommandContext,
@@ -57,11 +62,12 @@ import type {
 
 /**
  * Records are ~72h valid, refreshed with a ~1h ttl (the reference values). The
- * republish timer fires well within 72h so the record never lapses. Exported so
- * tests pin the exact validity contract and callers do not re-magic-number it.
+ * republish timer fires well within 72h so the record never lapses. Re-exported
+ * from their single home `./ipns-publish.ts` (which owns the `name/publish` call
+ * shape shared with deploy + `pin --mode ipns`), so this module's public API is
+ * unchanged and there is only ONE copy of the validity contract.
  */
-export const RECORD_LIFETIME = '72h';
-export const RECORD_TTL = '1h';
+export {RECORD_LIFETIME, RECORD_TTL};
 
 /** The exported record file suffix (raw signed record bytes). */
 const RECORD_SUFFIX = '.ipns-record';
@@ -98,12 +104,12 @@ export async function republishAndExport(
 		}
 
 		// The NODE signs here (refreshing validity). Not the client, not a replica.
-		await ctx.client.namePublish({
-			cidPath: `/ipfs/${site.cid}`,
-			key: site.id,
-			lifetime: RECORD_LIFETIME,
-			ttl: RECORD_TTL,
-			allowOffline: true,
+		// Through the shared publish seam, so the on-box refresh and the client-side
+		// deploy/pin publishes cannot drift in lifetime/ttl/allow-offline.
+		await publishSiteRecord({
+			client: ctx.client,
+			id: site.id,
+			cid: site.cid,
 		});
 
 		// Export the raw signed record for replicas to mirror.
