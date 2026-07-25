@@ -269,6 +269,181 @@ describe('deploy <dir> <id> — dispatches to core deploy with resolved targets'
 	});
 });
 
+/**
+ * The two ensName verb-flags (task `deploy-pin-write-site-metadata`), on BOTH
+ * the `deploy` and `pin` verbs. The CLI's job is to turn what the operator
+ * typed into ONE of the four write intents the core persists; omitting both
+ * flags is the LEAVE-ALONE intent (never a wipe, never a materialised name).
+ */
+describe('--set-ens-name / --unset-ens-name — the ensName write intent', () => {
+	/** The `ensName` intent the CLI handed the core deploy. */
+	function deployIntent(calls: Record<string, unknown[]>): unknown {
+		return (calls.deploy[0] as {ensName?: unknown}).ensName;
+	}
+
+	it('deploy --set-ens-name <name>: the SET intent, with the name verbatim', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', '--set-ens-name', 'alice.eth', './dist', 'mysite'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(deployIntent(calls)).toEqual({kind: 'set', name: 'alice.eth'});
+		// The flag's value is not mistaken for a positional (dir/id survive).
+		expect(calls.deploy[0]).toMatchObject({sourceDir: './dist', id: 'mysite'});
+	});
+
+	it('deploy --set-ens-name BARE (end of args): the INFER intent on a `.eth` id', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', '--mode', 'ipfs', './dist', 'mysite.eth', '--set-ens-name'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(deployIntent(calls)).toEqual({kind: 'infer'});
+	});
+
+	it('deploy --set-ens-name BARE followed by another --flag: still the INFER intent', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', '--set-ens-name', '--mode', 'ipfs', './dist', 'mysite.eth'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(deployIntent(calls)).toEqual({kind: 'infer'});
+		expect(calls.deploy[0]).toMatchObject({mode: 'ipfs', id: 'mysite.eth'});
+	});
+
+	it('deploy --set-ens-name BARE on a NON-`.eth` id: FAILS LOUD, no deploy', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', './dist', 'mysite', '--set-ens-name'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toContain('.eth');
+		expect(err.join('\n')).toContain('mysite');
+	});
+
+	it('deploy --unset-ens-name: the OPT-OUT intent (and it swallows no positional)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', '--unset-ens-name', './dist', 'mysite'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(deployIntent(calls)).toEqual({kind: 'unset'});
+		expect(calls.deploy[0]).toMatchObject({sourceDir: './dist', id: 'mysite'});
+	});
+
+	it('deploy with NEITHER flag: the PRESERVE (leave-alone) intent', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		await run(['deploy', './dist', 'mysite'], context);
+		expect(deployIntent(calls)).toEqual({kind: 'preserve'});
+	});
+
+	it('deploy with BOTH flags: a usage error, no deploy', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			[
+				'deploy',
+				'--unset-ens-name',
+				'--set-ens-name',
+				'alice.eth',
+				'./dist',
+				'mysite',
+			],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toContain('--set-ens-name');
+		expect(err.join('\n')).toContain('--unset-ens-name');
+	});
+
+	it('pin carries the same three explicit intents (and preserve by default)', async () => {
+		const intentOf = (calls: Record<string, unknown[]>): unknown =>
+			(calls.pinExternal[0] as {ensName?: unknown}).ensName;
+
+		const set = recordingDeps();
+		await run(
+			[
+				'pin',
+				'bafyexternal',
+				'--as',
+				'archive',
+				'--set-ens-name',
+				'archive.eth',
+			],
+			ctx({deps: set.deps, env: {...hostTokenEnv}}).context,
+		);
+		expect(intentOf(set.calls)).toEqual({kind: 'set', name: 'archive.eth'});
+
+		const infer = recordingDeps();
+		await run(
+			['pin', 'bafyexternal', '--as', 'archive.eth', '--set-ens-name'],
+			ctx({deps: infer.deps, env: {...hostTokenEnv}}).context,
+		);
+		expect(intentOf(infer.calls)).toEqual({kind: 'infer'});
+
+		const unset = recordingDeps();
+		await run(
+			['pin', '--unset-ens-name', 'bafyexternal', '--as', 'archive'],
+			ctx({deps: unset.deps, env: {...hostTokenEnv}}).context,
+		);
+		expect(intentOf(unset.calls)).toEqual({kind: 'unset'});
+		// --unset-ens-name takes no value, so the <cid> positional survives it.
+		expect(unset.calls.pinExternal[0]).toMatchObject({cid: 'bafyexternal'});
+
+		const preserve = recordingDeps();
+		await run(
+			['pin', 'bafyexternal', '--as', 'archive'],
+			ctx({deps: preserve.deps, env: {...hostTokenEnv}}).context,
+		);
+		expect(intentOf(preserve.calls)).toEqual({kind: 'preserve'});
+	});
+
+	it('pin --set-ens-name BARE on a NON-`.eth` name: FAILS LOUD, nothing pinned', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--set-ens-name'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('.eth');
+	});
+
+	it('pin with BOTH flags: a usage error, nothing pinned', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			[
+				'pin',
+				'bafyexternal',
+				'--as',
+				'archive',
+				'--set-ens-name',
+				'archive.eth',
+				'--unset-ens-name',
+			],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('--unset-ens-name');
+	});
+});
+
 describe('install-ci — dispatches to core emitCi with resolved args', () => {
 	it('parses args and calls core emitCi, reporting the workflow + secrets/vars', async () => {
 		const {deps, calls} = recordingDeps();

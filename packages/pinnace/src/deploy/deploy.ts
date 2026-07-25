@@ -40,6 +40,12 @@
 import {KuboRpcClient, type FetchLike} from '../rpc/kubo-rpc-client.js';
 import {buildCar, type BuiltCar} from '../car/car-build.js';
 import {placeInMfs} from '../site/site-management.js';
+import {
+	assertEnsNameIntent,
+	resolveSiteMetadataToWrite,
+	PRESERVE_ENS_NAME,
+	type EnsNameIntent,
+} from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
 import type {HostRole, SiteMode} from '../config/config-resolution.js';
 
@@ -78,6 +84,13 @@ export interface DeployInput {
 	id: string;
 	/** ipfs (land+pin+MFS) or ipns (also key/list + name/publish on publishers). */
 	mode: SiteMode;
+	/**
+	 * What this deploy says about the site's `ensName` in the wrapper metadata
+	 * ({@link EnsNameIntent}). Omitted = PRESERVE: the deploy leaves whatever the
+	 * site already carries (absent on a first deploy, unchanged on a re-deploy),
+	 * so a deploy never silently wipes — or invents — an eth.limo name.
+	 */
+	ensName?: EnsNameIntent;
 	/** The nodes to deploy to (each with its own token); the CAR lands on all. */
 	targets: DeployTarget[];
 	/** The MFS directory sites live under (default `/sites`). */
@@ -129,12 +142,17 @@ export interface DeployResult {
  * callers inspect `success`.
  *
  * @throws if neither `sourceDir` nor `car` is supplied, or both are.
+ * @throws {EnsNameInferenceError} for a bare `--set-ens-name` (the `infer`
+ * intent) on a non-`.eth` id — checked BEFORE the CAR is built or any node is
+ * touched, so a refusal leaves nothing half-done.
  */
 export async function deploy(input: DeployInput): Promise<DeployResult> {
 	const {sourceDir, car, id, mode, targets} = input;
 	if ((sourceDir === undefined) === (car === undefined)) {
 		throw new Error('deploy requires exactly one of `sourceDir` or `car`');
 	}
+	const ensName = input.ensName ?? PRESERVE_ENS_NAME;
+	assertEnsNameIntent(ensName, id);
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
 
 	// Build the CAR ONCE — the same bytes (and thus the same CID) land on every
@@ -143,7 +161,9 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 
 	// Fan out. allSettled so one node's failure never sinks the others.
 	const settled = await Promise.allSettled(
-		targets.map((target) => deployToNode(target, built, id, mode, sitesDir)),
+		targets.map((target) =>
+			deployToNode(target, built, id, mode, sitesDir, ensName),
+		),
 	);
 
 	const ok: DeployNodeOk[] = [];
@@ -177,6 +197,7 @@ async function deployToNode(
 	id: string,
 	mode: SiteMode,
 	sitesDir: string,
+	ensName: EnsNameIntent,
 ): Promise<DeployNodeOk> {
 	const client = new KuboRpcClient({
 		baseUrl: target.baseUrl,
@@ -189,10 +210,18 @@ async function deployToNode(
 
 	// 2. Place it in the MFS wrapper /sites/<id>/ (content + metadata.json).
 	//    Reuses the single implementation of that sequence (site-management).
-	//    The metadata records the `mode` this deploy ran in; the `ensName` lever
-	//    (and preserving a prior one) is the `deploy-pin-write-site-metadata`
-	//    task's job, not this placement's.
-	await placeInMfs(client, sitesDir, id, built.rootCid, {mode});
+	//    The metadata records the `mode` this deploy ran in plus the `ensName`
+	//    state the operator asked for — resolved against THIS node's existing
+	//    metadata when the intent is `preserve` (the read-modify-write that makes
+	//    omitting the flags leave an existing name alone).
+	const metadata = await resolveSiteMetadataToWrite({
+		client,
+		sitesDir,
+		id,
+		mode,
+		ensName,
+	});
+	await placeInMfs(client, sitesDir, id, built.rootCid, metadata);
 
 	// 3. Mode branch: ipns mode ADDS publish, and ONLY on a publishing publisher.
 	if (mode === 'ipns' && shouldPublish(target)) {

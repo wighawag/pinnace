@@ -8,6 +8,10 @@ import {
 	encodeSiteMetadata,
 	parseSiteMetadata,
 	readSiteMetadata,
+	resolveSiteMetadataToWrite,
+	assertEnsNameIntent,
+	EnsNameInferenceError,
+	type EnsNameIntent,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
 
@@ -149,5 +153,152 @@ describe('readSiteMetadata — files/read of the wrapper metadata', () => {
 		expect(await readSiteMetadata(clientWith(mock), '/sites', 'bob')).toEqual(
 			{},
 		);
+	});
+});
+
+/**
+ * The WRITE side of the three-valued `ensName`: what a `deploy`/`pin` actually
+ * puts in `metadata.json` for each of the four operator intents (task
+ * `deploy-pin-write-site-metadata`).
+ *
+ * `preserve` (both flags omitted) is the load-bearing one: it never authors a
+ * name, so a FIRST write leaves the field absent (a `.eth` id then infers) and
+ * a RE-write carries the existing value forward — including a prior `""`
+ * opt-out, which a naive "absent means nothing to say" write would silently
+ * wipe.
+ */
+
+/** A mock whose `/sites/<id>/metadata.json` reads back as `text`. */
+function mockHolding(text: string): MockKuboApi {
+	const mock = new MockKuboApi();
+	mock.on('files/read', {text});
+	return mock;
+}
+
+/** A mock with NO metadata for the site (Kubo's loud non-2xx for a missing path). */
+function mockWithoutMetadata(): MockKuboApi {
+	const mock = new MockKuboApi();
+	mock.on('files/read', {status: 500, text: 'file does not exist'});
+	return mock;
+}
+
+/** Resolve the metadata a write would carry for `id` under `intent`. */
+function resolveFor(
+	mock: MockKuboApi,
+	id: string,
+	ensName: EnsNameIntent,
+): Promise<SiteMetadata> {
+	return resolveSiteMetadataToWrite({
+		client: clientWith(mock),
+		sitesDir: '/sites',
+		id,
+		mode: 'ipfs',
+		ensName,
+	});
+}
+
+describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
+	it('set: writes the name verbatim (no .eth requirement on an explicit name)', async () => {
+		const mock = mockWithoutMetadata();
+		expect(
+			await resolveFor(mock, 'blog', {kind: 'set', name: 'alice.eth'}),
+		).toEqual({ensName: 'alice.eth', mode: 'ipfs'});
+		// An explicit name is the operator NAMING the gateway to warm; neither the
+		// id nor the name has to be `.eth`.
+		expect(
+			await resolveFor(mock, 'blog', {kind: 'set', name: 'alice'}),
+		).toEqual({ensName: 'alice', mode: 'ipfs'});
+	});
+
+	it('infer (bare set): leaves the key ABSENT on a `.eth` id', async () => {
+		const resolved = await resolveFor(
+			mockHolding('{"ensName":"old.eth"}'),
+			'a.eth',
+			{
+				kind: 'infer',
+			},
+		);
+		expect(resolved).toEqual({mode: 'ipfs'});
+		expect('ensName' in resolved).toBe(false);
+	});
+
+	it('infer (bare set): FAILS LOUD on a non-`.eth` id (nothing to infer)', async () => {
+		await expect(
+			resolveFor(mockWithoutMetadata(), 'blog', {kind: 'infer'}),
+		).rejects.toBeInstanceOf(EnsNameInferenceError);
+		// ...and the same refusal is available BEFORE any node is touched.
+		expect(() => assertEnsNameIntent({kind: 'infer'}, 'blog')).toThrow(
+			EnsNameInferenceError,
+		);
+		expect(() => assertEnsNameIntent({kind: 'infer'}, 'a.eth')).not.toThrow();
+		// The other intents never carry the `.eth` requirement.
+		expect(() =>
+			assertEnsNameIntent({kind: 'set', name: 'alice.eth'}, 'blog'),
+		).not.toThrow();
+		expect(() => assertEnsNameIntent({kind: 'unset'}, 'blog')).not.toThrow();
+		expect(() => assertEnsNameIntent({kind: 'preserve'}, 'blog')).not.toThrow();
+	});
+
+	it('unset: writes the `""` opt-out (never warm, even a `.eth` id)', async () => {
+		const resolved = await resolveFor(mockWithoutMetadata(), 'a.eth', {
+			kind: 'unset',
+		});
+		expect(resolved).toEqual({ensName: '', mode: 'ipfs'});
+		expect(resolved.ensName).toBe('');
+	});
+
+	it('preserve: carries an existing name forward (read-modify-write)', async () => {
+		const mock = mockHolding('{"ensName":"kept.eth","mode":"ipns"}');
+		expect(await resolveFor(mock, 'blog', {kind: 'preserve'})).toEqual({
+			ensName: 'kept.eth',
+			// The MODE is the one this operation runs in, never the stored one.
+			mode: 'ipfs',
+		});
+		expect(mock.requestsFor('files/read')[0].query.get('arg')).toBe(
+			'/sites/blog/metadata.json',
+		);
+	});
+
+	it('preserve: carries a prior `""` opt-out forward (never silently re-warms)', async () => {
+		const resolved = await resolveFor(
+			mockHolding('{"ensName":"","mode":"ipfs"}'),
+			'a.eth',
+			{kind: 'preserve'},
+		);
+		expect(resolved.ensName).toBe('');
+	});
+
+	it('preserve: stays ABSENT when the site has no metadata yet (first write)', async () => {
+		const resolved = await resolveFor(mockWithoutMetadata(), 'a.eth', {
+			kind: 'preserve',
+		});
+		expect(resolved).toEqual({mode: 'ipfs'});
+		// Omitting the flags NEVER writes a name — not even the `.eth` id itself:
+		// the on-box warm rule infers it from the absent field.
+		expect('ensName' in resolved).toBe(false);
+	});
+
+	it('preserve is the DEFAULT when the caller states no intent', async () => {
+		const mock = mockHolding('{"ensName":"kept.eth"}');
+		expect(
+			await resolveSiteMetadataToWrite({
+				client: clientWith(mock),
+				sitesDir: '/sites',
+				id: 'blog',
+				mode: 'ipns',
+			}),
+		).toEqual({ensName: 'kept.eth', mode: 'ipns'});
+	});
+
+	it('reads the existing metadata ONLY when preserving (the other intents are total)', async () => {
+		for (const intent of [
+			{kind: 'set', name: 'alice.eth'},
+			{kind: 'unset'},
+			{kind: 'infer'},
+		] satisfies EnsNameIntent[]) {
+			const mock = mockHolding('{"ensName":"kept.eth"}');
+			await resolveFor(mock, 'a.eth', intent);
+			expect(mock.requestsFor('files/read').length).toBe(0);
+		}
 	});
 });

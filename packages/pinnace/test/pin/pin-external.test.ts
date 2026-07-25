@@ -11,6 +11,7 @@ import {
 import {removeSite} from '../../src/site/site-management.js';
 import {
 	parseSiteMetadata,
+	EnsNameInferenceError,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
 import {discoverSites} from '../../src/node/node-commands.js';
@@ -48,11 +49,21 @@ function mockNode(baseUrl: string, cid = EXTERNAL_CID): MockKuboApi {
 
 /** The site metadata a recorded `files/write` carried (Kubo's `file` part). */
 function metadataOf(mock: MockKuboApi): SiteMetadata {
+	return parseSiteMetadata(metadataBytesOf(mock));
+}
+
+/** The RAW `metadata.json` text a recorded `files/write` carried. */
+function metadataTextOf(mock: MockKuboApi): string {
+	return Buffer.from(metadataBytesOf(mock)).toString('utf8');
+}
+
+/** The bytes of the `file` part of the first recorded `files/write`. */
+function metadataBytesOf(mock: MockKuboApi): Uint8Array {
 	const part = mock
 		.requestsFor('files/write')[0]
 		.fileParts?.find((p) => p.field === 'file');
 	if (!part) throw new Error('files/write carried no `file` part');
-	return parseSiteMetadata(part.bytes);
+	return part.bytes;
 }
 
 /** A pin target backed by its own recording mock (distinct baseUrl + token). */
@@ -148,9 +159,12 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 		});
 
 		// The exact call sequence: pin FIRST (the node must hold the bytes), then
-		// the MFS placement that makes status/warm/republish discover it.
+		// the MFS placement that makes status/warm/republish discover it (the
+		// `files/read` is the metadata read-modify-write: with no ens flag the pin
+		// PRESERVES whatever ensName the entry already carries).
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
+			'files/read',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -168,7 +182,7 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 		]);
 
 		// The wrapper's metadata.json records the mode the pin ran in (`ipfs` by
-		// default); the ensName lever is the sibling metadata-write task's job.
+		// default).
 		const write = a.requestsFor('files/write')[0];
 		expect(write.query.get('arg')).toBe('/sites/archive/metadata.json');
 		expect(metadataOf(a)).toEqual({mode: 'ipfs'});
@@ -359,6 +373,7 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
+			'files/read',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -402,6 +417,7 @@ describe('pinExternal — mode ipns ADDS the publish path (publisher only)', () 
 		// key lookup, the import of the missing key, and the publish.
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
+			'files/read',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -597,6 +613,7 @@ describe('pinExternal: fromIpns resolves the SOURCE name, then pins that cid', (
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'name/resolve',
 			'pin/add',
+			'files/read',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -802,5 +819,150 @@ describe('pinExternal — mode ipns REFUSES loudly without a publisher to sign',
 			}),
 		).rejects.toThrow(/derived/i);
 		expect(a.requests.length).toBe(0);
+	});
+});
+
+/**
+ * The per-site metadata `pin` WRITES (task `deploy-pin-write-site-metadata`),
+ * across BOTH entry points — `pin <cid>` and `pin --from-ipns <source>` (they
+ * share one placement path, so both must carry the same metadata).
+ *
+ * A pin records the `mode` it ran in; the `ensName` field is reached through
+ * the operator's two verb-flags, and OMITTING them never authors a name: a
+ * first pin leaves the field ABSENT (a `.eth` id then infers via the on-box
+ * warm rule) and a re-pin carries the existing value forward.
+ */
+describe('pinExternal — writes the per-site metadata {ensName?, mode}', () => {
+	/** A pinned-site node that already carries `metadata.json` (the re-pin case). */
+	function nodeHolding(metadataJson: string): MockKuboApi {
+		const mock = mockNode('https://node-a.test');
+		mock.on('files/read', {text: metadataJson});
+		return mock;
+	}
+
+	/** A node with NO metadata for the name yet (the FIRST pin). */
+	function freshNode(): MockKuboApi {
+		const mock = mockNode('https://node-a.test');
+		mock.on('files/read', {status: 500, text: 'file does not exist'});
+		return mock;
+	}
+
+	it('--set-ens-name <name>: writes that name (no `.eth` requirement)', async () => {
+		const a = freshNode();
+		await pinExternal({
+			targets: [targetWith(a, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive',
+			ensName: {kind: 'set', name: 'archive.eth'},
+		});
+		expect(metadataOf(a)).toEqual({ensName: 'archive.eth', mode: 'ipfs'});
+	});
+
+	it('bare --set-ens-name on a `.eth` name: writes NO ensName key (infer)', async () => {
+		const a = nodeHolding('{"ensName":"stale.eth","mode":"ipfs"}');
+		await pinExternal({
+			targets: [targetWith(a, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive.eth',
+			ensName: {kind: 'infer'},
+		});
+		expect(metadataTextOf(a)).not.toContain('ensName');
+		expect(metadataOf(a)).toEqual({mode: 'ipfs'});
+	});
+
+	it('bare --set-ens-name on a NON-`.eth` name: FAILS LOUD, touching no node', async () => {
+		const a = freshNode();
+		await expect(
+			pinExternal({
+				targets: [targetWith(a, 'token-a')],
+				cid: EXTERNAL_CID,
+				name: 'archive',
+				ensName: {kind: 'infer'},
+			}),
+		).rejects.toBeInstanceOf(EnsNameInferenceError);
+		// The refusal precedes the fan-out (and the source resolve): nothing pinned.
+		expect(a.requests.length).toBe(0);
+	});
+
+	it('--unset-ens-name: writes the `""` opt-out', async () => {
+		const a = nodeHolding('{"ensName":"archive.eth","mode":"ipfs"}');
+		await pinExternal({
+			targets: [targetWith(a, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive.eth',
+			ensName: {kind: 'unset'},
+		});
+		expect(metadataOf(a)).toEqual({ensName: '', mode: 'ipfs'});
+	});
+
+	it('FIRST pin with no ens flag: the ensName key is ABSENT', async () => {
+		const a = freshNode();
+		await pinExternal({
+			targets: [targetWith(a, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive.eth',
+		});
+		expect(metadataTextOf(a)).not.toContain('ensName');
+		expect(metadataOf(a)).toEqual({mode: 'ipfs'});
+	});
+
+	it('RE-pin with no ens flag: PRESERVES the existing ensName (and a `""` opt-out)', async () => {
+		const named = nodeHolding('{"ensName":"custom.example","mode":"ipfs"}');
+		await pinExternal({
+			targets: [targetWith(named, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive',
+		});
+		expect(metadataOf(named)).toEqual({
+			ensName: 'custom.example',
+			mode: 'ipfs',
+		});
+		expect(named.requestsFor('files/read')[0].query.get('arg')).toBe(
+			'/sites/archive/metadata.json',
+		);
+
+		const optedOut = nodeHolding('{"ensName":"","mode":"ipfs"}');
+		await pinExternal({
+			targets: [targetWith(optedOut, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive.eth',
+		});
+		expect(metadataOf(optedOut).ensName).toBe('');
+	});
+
+	it('the --from-ipns entry point writes the SAME metadata', async () => {
+		const set = resolvingNode('https://node-a.test');
+		await pinExternal({
+			targets: [targetWith(set, 'token-a')],
+			fromIpns: SOURCE_NAME,
+			name: 'archive',
+			ensName: {kind: 'set', name: 'migrated.eth'},
+		});
+		expect(metadataOf(set)).toEqual({ensName: 'migrated.eth', mode: 'ipfs'});
+
+		const preserving = resolvingNode('https://node-b.test');
+		preserving.on('files/read', {text: '{"ensName":"kept.eth","mode":"ipfs"}'});
+		await pinExternal({
+			targets: [targetWith(preserving, 'token-b', {role: 'publisher'})],
+			fromIpns: SOURCE_NAME,
+			name: GOLDEN_NAME,
+			mode: 'ipns',
+			derived: derivedForGoldenName(),
+		});
+		expect(metadataOf(preserving)).toEqual({
+			ensName: 'kept.eth',
+			mode: 'ipns',
+		});
+
+		const refusing = resolvingNode('https://node-c.test');
+		await expect(
+			pinExternal({
+				targets: [targetWith(refusing, 'token-c')],
+				fromIpns: SOURCE_NAME,
+				name: 'archive',
+				ensName: {kind: 'infer'},
+			}),
+		).rejects.toBeInstanceOf(EnsNameInferenceError);
+		expect(refusing.requests.length).toBe(0);
 	});
 });

@@ -46,6 +46,11 @@ import {
 	type AddSiteInput,
 	type AddSiteResult,
 } from '../site/site-management.js';
+import {
+	assertEnsNameIntent,
+	EnsNameInferenceError,
+	type EnsNameIntent,
+} from '../site/site-wrapper.js';
 import {makeStatusOp} from '../status/status-report.js';
 import {
 	promoteReplicaToPublisher as corePromoteReplicaToPublisher,
@@ -477,25 +482,33 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 }
 
 /**
- * `deploy [--mode <m>] <dir> <id>` -> core {@link ClientDeps.deploy}. Resolves
- * every configured host into a {@link DeployTarget} (each host's OWN token
- * resolved env-only, LAZILY, via {@link resolveHostToken} — CLI > env, no file),
- * and the site's `mode` from the matching `pinnace.json` site entry (overridable
- * with `--mode`). A host with no resolvable token FAILS LOUD naming its exact
- * env var. Prints the resulting CID / per-node breakdown.
+ * `deploy [--mode <m>] [--set-ens-name [<name>] | --unset-ens-name] <dir> <id>`
+ * -> core {@link ClientDeps.deploy}. Resolves every configured host into a
+ * {@link DeployTarget} (each host's OWN token resolved env-only, LAZILY, via
+ * {@link resolveHostToken} — CLI > env, no file), and the site's `mode` from
+ * the matching `pinnace.json` site entry (overridable with `--mode`). A host
+ * with no resolvable token FAILS LOUD naming its exact env var. Prints the
+ * resulting CID / per-node breakdown.
+ *
+ * The two ensName verb-flags ({@link ensNameIntentFromFlags}) decide what the
+ * deploy writes into the site's MFS `metadata.json`; omitting them leaves the
+ * site's existing `ensName` untouched.
  */
 async function runDeploy(
 	argv: readonly string[],
 	rc: ResolvedRunContext,
 ): Promise<number> {
-	const {flags, positionals} = parseArgs(argv);
+	const {flags, positionals} = parseArgs(argv, ENS_NAME_BOOLEAN_FLAGS);
 	const [dir, siteId] = positionals;
 	if (!dir || !siteId) {
 		rc.err(
-			'pinnace deploy: usage: pinnace deploy [--mode ipfs|ipns] <dir> <id>',
+			'pinnace deploy: usage: pinnace deploy [--mode ipfs|ipns] ' +
+				'[--set-ens-name [<name>] | --unset-ens-name] <dir> <id>',
 		);
 		return 1;
 	}
+	const ensName = ensNameIntent('pinnace deploy', flags, siteId, rc);
+	if (!ensName) return 1; // ensNameIntent already emitted the loud error.
 
 	const cli = cliOverridesFromFlags(flags);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
@@ -530,7 +543,13 @@ async function runDeploy(
 		}
 		throw error;
 	}
-	const input: DeployInput = {sourceDir: dir, id: siteId, mode, targets};
+	const input: DeployInput = {
+		sourceDir: dir,
+		id: siteId,
+		mode,
+		targets,
+		ensName,
+	};
 
 	const result = await rc.deps.deploy(input);
 	rc.out(`cid: ${result.cid}`);
@@ -666,8 +685,8 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 
 /** The two forms of the `pin` verb: one source each, never both, never neither. */
 const PIN_USAGE =
-	'usage: pinnace pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]\n' +
-	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]';
+	'usage: pinnace pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]\n' +
+	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]';
 
 /**
  * `pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]` ->
@@ -714,7 +733,10 @@ async function runPin(
 	argv: readonly string[],
 	rc: ResolvedRunContext,
 ): Promise<number> {
-	const {flags, positionals} = parseArgs(argv, ['no-recursive']);
+	const {flags, positionals} = parseArgs(argv, [
+		'no-recursive',
+		...ENS_NAME_BOOLEAN_FLAGS,
+	]);
 	const [cid] = positionals;
 	const fromIpns = flags['from-ipns'];
 	const pinName = flags['as'];
@@ -722,6 +744,10 @@ async function runPin(
 		rc.err(`pinnace pin: --as <name> is required\n${PIN_USAGE}`);
 		return 1;
 	}
+	// The pin's `--as <name>` IS the site id, so it is what a bare
+	// --set-ens-name infers from (as the site id is for deploy).
+	const ensName = ensNameIntent('pinnace pin', flags, pinName, rc);
+	if (!ensName) return 1; // ensNameIntent already emitted the loud error.
 	// EXACTLY ONE source: the cid the operator has, or the IPNS name to resolve
 	// one from. Two sources is a contradiction; none is nothing to pin.
 	if (cid && fromIpns) {
@@ -818,6 +844,7 @@ async function runPin(
 			name: pinName,
 			recursive: flags['no-recursive'] === undefined,
 			mode,
+			ensName,
 			...(derived ? {derived} : {}),
 		});
 	} catch (error) {
@@ -865,6 +892,75 @@ async function runPin(
 // ---------------------------------------------------------------------------
 // Shared helpers.
 // ---------------------------------------------------------------------------
+
+/**
+ * The ensName flags that take NO value, for {@link parseArgs}. Only
+ * `--unset-ens-name` is here: `--set-ens-name` takes an OPTIONAL value, so it
+ * stays value-taking and its BARE form is the parser's existing no-value case
+ * (end of argv, or immediately followed by another `--flag`).
+ */
+const ENS_NAME_BOOLEAN_FLAGS = ['unset-ens-name'] as const;
+
+/**
+ * Turn the two ensName verb-flags into ONE {@link EnsNameIntent} (the core's
+ * write intent), or a usage error:
+ *
+ *   `--set-ens-name <name>`  -> set that name (no `.eth` requirement)
+ *   `--set-ens-name` (bare)  -> infer from a `.eth` id (the key is removed)
+ *   `--unset-ens-name`       -> the `""` opt-out (never warm)
+ *   neither                  -> preserve (leave the site's ensName alone)
+ *
+ * BARE is the existing {@link parseArgs} no-value convention: `--set-ens-name`
+ * at the end of argv, or immediately followed by another `--flag`, parses as an
+ * empty value. So `--set-ens-name ""` is ALSO read as bare/infer — the opt-out
+ * has its own flag (`--unset-ens-name`) precisely so an empty value never has
+ * to mean two things.
+ *
+ * The two flags are mutually exclusive, and a bare set is checked against the
+ * `id` HERE (before hosts/tokens are resolved) so the message can name what the
+ * operator typed; the core repeats the check for library callers.
+ */
+function ensNameIntentFromFlags(
+	flags: Record<string, string>,
+): EnsNameIntent | undefined {
+	const set = flags['set-ens-name'];
+	const unset = flags['unset-ens-name'] !== undefined;
+	if (set !== undefined && unset) return undefined; // contradictory: a usage error.
+	if (unset) return {kind: 'unset'};
+	if (set === undefined) return {kind: 'preserve'};
+	return set === '' ? {kind: 'infer'} : {kind: 'set', name: set};
+}
+
+/**
+ * {@link ensNameIntentFromFlags} + the `.eth` precondition, emitting the loud
+ * error and returning undefined on either failure (the `buildHostClient`
+ * pattern), so the verb can `return 1` without dispatching to the core.
+ */
+function ensNameIntent(
+	prefix: string,
+	flags: Record<string, string>,
+	id: string,
+	rc: ResolvedRunContext,
+): EnsNameIntent | undefined {
+	const intent = ensNameIntentFromFlags(flags);
+	if (!intent) {
+		rc.err(
+			`${prefix}: --set-ens-name and --unset-ens-name are mutually exclusive ` +
+				`(one names the gateway to warm, the other opts out); pass at most one`,
+		);
+		return undefined;
+	}
+	try {
+		assertEnsNameIntent(intent, id);
+	} catch (error) {
+		if (error instanceof EnsNameInferenceError) {
+			rc.err(`${prefix}: ${error.message}`);
+			return undefined;
+		}
+		throw error;
+	}
+	return intent;
+}
 
 /** Return the keys whose value is falsy (missing required flags), in order. */
 function missingFlags(required: Record<string, string | undefined>): string[] {

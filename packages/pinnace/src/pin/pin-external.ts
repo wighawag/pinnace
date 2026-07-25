@@ -94,6 +94,12 @@
  */
 import {KuboRpcClient, type FetchLike} from '../rpc/kubo-rpc-client.js';
 import {placeInMfs} from '../site/site-management.js';
+import {
+	assertEnsNameIntent,
+	resolveSiteMetadataToWrite,
+	PRESERVE_ENS_NAME,
+	type EnsNameIntent,
+} from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
 import {importIpnsKeyIntoPublisher} from '../publisher/key-import.js';
 import type {DerivedIpnsKey} from '../derive/ipns-key-derivation.js';
@@ -159,6 +165,14 @@ export interface PinExternalInput {
 	 * publisher, addressed `ipns://<id>`). Same two values as a site's `mode`.
 	 */
 	mode?: SiteMode;
+	/**
+	 * What this pin says about the site's `ensName` in the wrapper metadata
+	 * ({@link EnsNameIntent}) — the SAME lever `deploy` carries, for both pin
+	 * sources. Omitted = PRESERVE: the pin leaves whatever the entry already
+	 * carries (absent on a first pin, unchanged on a re-pin), so re-pinning a
+	 * newer cid never silently wipes — or invents — an eth.limo name.
+	 */
+	ensName?: EnsNameIntent;
 	/**
 	 * The per-site key derived from the operator's master + this pin's `name`
 	 * (`deriveIpnsKey`). REQUIRED in `ipns` mode and unused in `ipfs` mode. The
@@ -312,6 +326,7 @@ interface PinPlan {
 	recursive: boolean;
 	sitesDir: string;
 	mode: SiteMode;
+	ensName: EnsNameIntent;
 	derived?: DerivedIpnsKey;
 }
 
@@ -331,6 +346,8 @@ interface PinPlan {
  * @throws {PinSourceResolveError} when `fromIpns` resolves on no target.
  * @throws {PinPublisherRequiredError} in `ipns` mode when no target can sign.
  * @throws if `ipns` mode is asked for without the `derived` key.
+ * @throws {EnsNameInferenceError} for a bare `--set-ens-name` (the `infer`
+ * intent) on a non-`.eth` pin name.
  *
  * The `ipns`-mode preconditions are checked BEFORE any node is touched, so a
  * refusal never leaves a half-done pin behind.
@@ -352,6 +369,11 @@ export async function pinExternal(
 		);
 	}
 	if (!name) throw new Error('pinExternal requires a `name` to track it under');
+	// The pin's `name` IS the site id, so it is what a bare --set-ens-name would
+	// infer from. Checked here, with the other refusals, before any node is
+	// touched (and before the source name is even resolved).
+	const ensName = input.ensName ?? PRESERVE_ENS_NAME;
+	assertEnsNameIntent(ensName, name);
 	const mode: SiteMode = input.mode ?? 'ipfs';
 	if (mode === 'ipns') {
 		if (!input.derived) {
@@ -379,6 +401,7 @@ export async function pinExternal(
 		recursive: input.recursive ?? true,
 		sitesDir: input.sitesDir ?? DEFAULT_SITES_DIR,
 		mode,
+		ensName,
 		...(input.derived ? {derived: input.derived} : {}),
 	};
 
@@ -486,10 +509,18 @@ async function pinOnNode(target: PinTarget, plan: PinPlan): Promise<PinNodeOk> {
 
 	// 2. Track it like a site: the /sites/<name> wrapper (content +
 	//    metadata.json) is what warm/republish/status read. The metadata records
-	//    the `mode` this pin ran in; the `ensName` lever is the
-	//    `deploy-pin-write-site-metadata` task's job.
+	//    the `mode` this pin ran in plus the `ensName` state the operator asked
+	//    for — resolved against THIS node's existing metadata when the intent is
+	//    `preserve`, so a re-pin carries an existing name forward.
 	try {
-		await placeInMfs(client, sitesDir, name, cid, {mode});
+		const metadata = await resolveSiteMetadataToWrite({
+			client,
+			sitesDir,
+			id: name,
+			mode,
+			ensName: plan.ensName,
+		});
+		await placeInMfs(client, sitesDir, name, cid, metadata);
 	} catch (cause) {
 		throw new PinStageError(
 			'place',

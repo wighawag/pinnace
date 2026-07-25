@@ -6,6 +6,7 @@ import {MockKuboApi, type RecordedRequest} from '../../src/rpc/mock-kubo.js';
 import {deploy, type DeployTarget} from '../../src/deploy/deploy.js';
 import {
 	parseSiteMetadata,
+	EnsNameInferenceError,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
 
@@ -52,9 +53,19 @@ afterAll(async () => {
 
 /** The site metadata a recorded `files/write` carried (Kubo's `file` part). */
 function metadataOf(req: RecordedRequest): SiteMetadata {
+	return parseSiteMetadata(metadataBytesOf(req));
+}
+
+/** The RAW `metadata.json` text a recorded `files/write` carried. */
+function metadataTextOf(req: RecordedRequest): string {
+	return Buffer.from(metadataBytesOf(req)).toString('utf8');
+}
+
+/** The bytes of the `file` part of a recorded `files/write`. */
+function metadataBytesOf(req: RecordedRequest): Uint8Array {
 	const part = req.fileParts?.find((p) => p.field === 'file');
 	if (!part) throw new Error('files/write carried no `file` part');
-	return parseSiteMetadata(part.bytes);
+	return part.bytes;
 }
 
 /** A target backed by its own recording mock (distinct baseUrl + token). */
@@ -166,13 +177,160 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 			]);
 
 			// The wrapper's metadata.json is written alongside the content; deploy
-			// records the mode it deployed under (the ensName lever is the sibling
-			// `deploy-pin-write-site-metadata` task's job).
+			// records the mode it deployed under.
 			const write = mock.requestsFor('files/write');
 			expect(write.length).toBe(1);
 			expect(write[0].query.get('arg')).toBe('/sites/mysite.eth/metadata.json');
 			expect(metadataOf(write[0])).toEqual({mode: 'ipfs'});
 		}
+	});
+});
+
+/**
+ * The per-site metadata deploy WRITES (task `deploy-pin-write-site-metadata`).
+ *
+ * Every deploy records the `mode` it ran in; the `ensName` field is reached
+ * through the operator's two verb-flags, and OMITTING them never authors a
+ * name: a first deploy leaves the field ABSENT (a `.eth` id then infers via the
+ * on-box warm rule) and a re-deploy carries the existing value forward.
+ */
+describe('deploy — writes the per-site metadata {ensName?, mode}', () => {
+	/** The single `files/write` a one-node deploy made. */
+	function writeOf(mock: MockKuboApi): RecordedRequest {
+		const write = mock.requestsFor('files/write');
+		expect(write.length).toBe(1);
+		return write[0];
+	}
+
+	/** A node whose site already carries `metadata.json` (the re-deploy case). */
+	function nodeHolding(metadataJson: string): MockKuboApi {
+		const mock = mockNode('https://node-a.test');
+		mock.on('files/read', {text: metadataJson});
+		return mock;
+	}
+
+	/** A node with NO metadata for the site yet (the FIRST deploy). */
+	function freshNode(): MockKuboApi {
+		const mock = mockNode('https://node-a.test');
+		mock.on('files/read', {status: 500, text: 'file does not exist'});
+		return mock;
+	}
+
+	it('--set-ens-name <name>: writes that name (no `.eth` requirement)', async () => {
+		const a = freshNode();
+		await deploy({
+			sourceDir: siteDir,
+			id: 'plainsite',
+			mode: 'ipfs',
+			ensName: {kind: 'set', name: 'alice.eth'},
+			targets: [targetWith(a, 'token-a')],
+		});
+		expect(metadataOf(writeOf(a))).toEqual({
+			ensName: 'alice.eth',
+			mode: 'ipfs',
+		});
+	});
+
+	it('bare --set-ens-name on a `.eth` id: writes NO ensName key (infer)', async () => {
+		const a = nodeHolding('{"ensName":"stale.eth","mode":"ipfs"}');
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipfs',
+			ensName: {kind: 'infer'},
+			targets: [targetWith(a, 'token-a')],
+		});
+		const write = writeOf(a);
+		expect(metadataTextOf(write)).not.toContain('ensName');
+		expect(metadataOf(write)).toEqual({mode: 'ipfs'});
+	});
+
+	it('bare --set-ens-name on a NON-`.eth` id: FAILS LOUD, touching no node', async () => {
+		const a = freshNode();
+		await expect(
+			deploy({
+				sourceDir: siteDir,
+				id: 'plainsite',
+				mode: 'ipfs',
+				ensName: {kind: 'infer'},
+				targets: [targetWith(a, 'token-a')],
+			}),
+		).rejects.toBeInstanceOf(EnsNameInferenceError);
+		// The refusal precedes the fan-out: nothing was imported or written.
+		expect(a.requests.length).toBe(0);
+	});
+
+	it('--unset-ens-name: writes the `""` opt-out', async () => {
+		const a = nodeHolding('{"ensName":"alice.eth","mode":"ipfs"}');
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipns',
+			ensName: {kind: 'unset'},
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		expect(metadataOf(writeOf(a))).toEqual({ensName: '', mode: 'ipns'});
+	});
+
+	it('FIRST deploy with no ens flag: the ensName key is ABSENT', async () => {
+		const a = freshNode();
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipfs',
+			targets: [targetWith(a, 'token-a')],
+		});
+		const write = writeOf(a);
+		// Omitting the flags never writes a name — not even the `.eth` id itself.
+		expect(metadataTextOf(write)).not.toContain('ensName');
+		expect(metadataOf(write)).toEqual({mode: 'ipfs'});
+	});
+
+	it('RE-deploy with no ens flag: PRESERVES the existing ensName', async () => {
+		const a = nodeHolding('{"ensName":"custom.example","mode":"ipfs"}');
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipns',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		// The site's name survives; the MODE is the one this deploy ran in.
+		expect(metadataOf(writeOf(a))).toEqual({
+			ensName: 'custom.example',
+			mode: 'ipns',
+		});
+		expect(a.requestsFor('files/read')[0].query.get('arg')).toBe(
+			'/sites/mysite.eth/metadata.json',
+		);
+	});
+
+	it('RE-deploy with no ens flag: PRESERVES a prior `""` opt-out', async () => {
+		const a = nodeHolding('{"ensName":"","mode":"ipfs"}');
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipfs',
+			targets: [targetWith(a, 'token-a')],
+		});
+		expect(metadataOf(writeOf(a)).ensName).toBe('');
+	});
+
+	it('preserves PER NODE (each node carries its own metadata)', async () => {
+		const a = mockNode('https://node-a.test');
+		a.on('files/read', {text: '{"ensName":"a.example","mode":"ipfs"}'});
+		const b = mockNode('https://node-b.test');
+		b.on('files/read', {status: 500, text: 'file does not exist'});
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipfs',
+			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
+		});
+		expect(metadataOf(writeOf(a))).toEqual({
+			ensName: 'a.example',
+			mode: 'ipfs',
+		});
+		expect(metadataOf(writeOf(b))).toEqual({mode: 'ipfs'});
 	});
 });
 
@@ -189,6 +347,9 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		// Exactly the import + MFS calls, in order, and NOTHING publish-related.
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'dag/import',
+			// The read-modify-write of the metadata: with no ens flag, deploy
+			// PRESERVES whatever ensName the site already carries.
+			'files/read',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -210,6 +371,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		// The FULL sequence: import + MFS, THEN key/list + name/publish.
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'dag/import',
+			'files/read',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',

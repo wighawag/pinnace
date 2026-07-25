@@ -123,9 +123,15 @@ export {
 	encodeSiteMetadata,
 	parseSiteMetadata,
 	readSiteMetadata,
+	resolveSiteMetadataToWrite,
+	assertEnsNameIntent,
+	EnsNameInferenceError,
+	PRESERVE_ENS_NAME,
 	SITE_CONTENT_ENTRY,
 	SITE_METADATA_ENTRY,
 	type SiteMetadata,
+	type EnsNameIntent,
+	type ResolveSiteMetadataInput,
 } from './site/site-wrapper.js';
 export {
 	listSites,

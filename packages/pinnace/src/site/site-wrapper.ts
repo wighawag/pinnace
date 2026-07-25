@@ -25,6 +25,13 @@
  *
  * Absence is NORMAL, never an error: a site placed before metadata existed (or
  * by an older pinnace) simply has no `metadata.json`, and reads as `{}`.
+ *
+ * This module also owns the WRITE side of that three-valued field: what a
+ * `deploy`/`pin` actually puts in `metadata.json` for each operator intent
+ * ({@link EnsNameIntent}, {@link resolveSiteMetadataToWrite}), including the
+ * read-modify-write that makes OMITTING the flags leave an existing name alone.
+ * Decisions behind the intent shape are recorded in
+ * `work/notes/observations/deploy-pin-write-site-metadata-decisions.md`.
  */
 import type {SiteMode} from '../config/config-resolution.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
@@ -57,6 +64,134 @@ export interface SiteMetadata {
 	ensName?: string;
 	/** How the site is addressed: `ipfs` (cid) or `ipns` (stable name). */
 	mode?: SiteMode;
+}
+
+/**
+ * What ONE operation (a `deploy` / a `pin`) says about the site's `ensName` —
+ * the WRITE-side counterpart of the three-valued field above. It is an INTENT,
+ * not a value, because the fourth case (the operator said nothing) can only be
+ * resolved against what the site already carries:
+ *
+ *  - `set`      (`--set-ens-name <name>`) — warm `<name>.limo`. The name is NOT
+ *    required to be `.eth`, nor is the id: the operator is naming the gateway
+ *    to warm, and the ENS name is decoupled from the site identity.
+ *  - `infer`    (bare `--set-ens-name`) — REMOVE the key so the on-box rule
+ *    infers the name from a `.eth` id. Requires a `.eth` id (see
+ *    {@link assertEnsNameIntent}): there is nothing to infer otherwise.
+ *  - `unset`    (`--unset-ens-name`) — persist `""`, the opt-out (never warm,
+ *    even a `.eth` id).
+ *  - `preserve` (BOTH flags omitted, the DEFAULT) — leave the field exactly as
+ *    it is: absent on a first write, unchanged on a re-write. Omitting is not
+ *    deleting, and it never AUTHORS a name (a `.eth` site warms by INFERENCE,
+ *    with the field still absent).
+ */
+export type EnsNameIntent =
+	/** `--set-ens-name <name>`: warm `<name>.limo`. */
+	| {kind: 'set'; name: string}
+	/** bare `--set-ens-name`: drop the key so a `.eth` id is inferred. */
+	| {kind: 'infer'}
+	/** `--unset-ens-name`: persist `""` — never warm. */
+	| {kind: 'unset'}
+	/** neither flag: leave whatever the site already carries. */
+	| {kind: 'preserve'};
+
+/** The intent when the caller states none: leave the site's `ensName` alone. */
+export const PRESERVE_ENS_NAME: EnsNameIntent = {kind: 'preserve'};
+
+/**
+ * A bare `--set-ens-name` (the INFER intent) was asked for on a site whose `id`
+ * does not end in `.eth`, so there is NOTHING to infer: removing the key would
+ * leave the site with no eth.limo warming at all. A loud usage error rather
+ * than a silent no-op, so the operator learns their `--set-ens-name` needed a
+ * value here.
+ *
+ * The `.eth` requirement is specific to this ONE intent: an explicit
+ * `--set-ens-name <name>` names the gateway directly and needs no `.eth` id.
+ */
+export class EnsNameInferenceError extends Error {
+	constructor(
+		/** The site id that cannot infer an ENS name. */
+		readonly id: string,
+	) {
+		super(
+			`--set-ens-name with no value means "infer the ENS name from the site ` +
+				`id", but '${id}' does not end in .eth so there is nothing to infer. ` +
+				`Give the name explicitly (--set-ens-name <name>), opt out of ` +
+				`eth.limo warming (--unset-ens-name), or omit both flags to leave the ` +
+				`site's ensName unchanged`,
+		);
+		this.name = 'EnsNameInferenceError';
+	}
+}
+
+/**
+ * Check an {@link EnsNameIntent} against the site `id` BEFORE any node is
+ * touched, so a refusal never leaves a half-done deploy/pin behind (the same
+ * stance as `pin`'s publisher precondition). Only the `infer` intent has a
+ * precondition; the other three always apply.
+ *
+ * @throws {EnsNameInferenceError} for a bare set on a non-`.eth` id.
+ */
+export function assertEnsNameIntent(intent: EnsNameIntent, id: string): void {
+	if (intent.kind === 'infer' && !id.endsWith('.eth')) {
+		throw new EnsNameInferenceError(id);
+	}
+}
+
+/** Inputs to {@link resolveSiteMetadataToWrite}. */
+export interface ResolveSiteMetadataInput {
+	/** The client for the NODE this write targets (metadata is per node). */
+	client: KuboRpcClient;
+	/** The MFS directory sites live under (e.g. `/sites`). */
+	sitesDir: string;
+	/** The site `id` (its MFS wrapper dir). */
+	id: string;
+	/** The mode this operation is running in — always recorded. */
+	mode: SiteMode;
+	/** What to do with `ensName` (default: {@link PRESERVE_ENS_NAME}). */
+	ensName?: EnsNameIntent;
+}
+
+/**
+ * Resolve the {@link SiteMetadata} a `deploy`/`pin` will WRITE for one site on
+ * ONE node: the `mode` it is running in, plus the `ensName` state its
+ * {@link EnsNameIntent} asks for.
+ *
+ * `preserve` (the default) is the only intent that READS: it does a
+ * read-modify-write of `/sites/<id>/metadata.json` so a re-deploy carries the
+ * existing name — or an existing `""` opt-out — forward, and a FIRST write (no
+ * metadata to read) simply leaves the field absent. The other three intents are
+ * TOTAL (they fully determine the field), so they skip the read rather than pay
+ * for an answer they would discard.
+ *
+ * PER NODE, deliberately: metadata travels WITH the site on each node, so each
+ * node's own `metadata.json` is what is preserved (a node that never had the
+ * site starts absent, whatever its siblings hold). The `mode` is always the one
+ * this operation runs in, never the stored one — the operator's `--mode` is
+ * what they just asked for.
+ *
+ * @throws {EnsNameInferenceError} for a bare set on a non-`.eth` id (callers
+ * should {@link assertEnsNameIntent} up-front so this cannot fire mid-fan-out).
+ */
+export async function resolveSiteMetadataToWrite(
+	input: ResolveSiteMetadataInput,
+): Promise<SiteMetadata> {
+	const intent = input.ensName ?? PRESERVE_ENS_NAME;
+	assertEnsNameIntent(intent, input.id);
+	const metadata: SiteMetadata = {mode: input.mode};
+	if (intent.kind === 'set') return {ensName: intent.name, ...metadata};
+	if (intent.kind === 'unset') return {ensName: '', ...metadata};
+	if (intent.kind === 'infer') return metadata; // the key stays ABSENT.
+
+	// preserve: whatever the site already says, unchanged (absent stays absent).
+	const existing = await readSiteMetadata(
+		input.client,
+		input.sitesDir,
+		input.id,
+	);
+	return existing.ensName === undefined
+		? metadata
+		: {ensName: existing.ensName, ...metadata};
 }
 
 /** The site's WRAPPER dir, `/sites/<id>` (holds content + metadata). */
