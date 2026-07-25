@@ -47,6 +47,7 @@ import {
 } from '../publisher/record-sequence.js';
 import {
 	readSiteMetadata,
+	resolveEnsNameToWarm,
 	siteContentPath,
 	type SiteMetadata,
 } from '../site/site-wrapper.js';
@@ -325,9 +326,9 @@ async function defaultMirror(
 
 /**
  * Default `warm`. Re-fetch each site's current CID through every configured
- * gateway template (`{cid}` substituted); `.eth` names are ALSO warmed via
- * eth.limo. Warming failures are recorded, never thrown (a cold gateway must
- * not fail the whole run).
+ * gateway template (`{cid}` substituted), and ALSO warm the site's eth.limo
+ * name when it resolves one. Warming failures are recorded, never thrown (a
+ * cold gateway must not fail the whole run).
  */
 async function defaultWarm(
 	ctx: NodeCommandContext,
@@ -341,12 +342,13 @@ async function defaultWarm(
 			const url = template.replaceAll('{cid}', site.cid);
 			await safeWarm(warm, url);
 		}
-		// eth.limo warming heuristic: an `id` ending `.eth` is ALSO warmed via
-		// eth.limo (keyed off the MFS entry `id`, the value that flows through
-		// here). Making this an explicit `ensName` hint is the sibling ENS-demotion
-		// idea's job, out of scope for this config-model change.
-		if (site.id.endsWith('.eth')) {
-			await safeWarm(warm, `https://${site.id}.limo/`);
+		// eth.limo warming is driven by the site's MFS METADATA, not its identity:
+		// an explicit `ensName` names the gateway, `""` opts out, and only an
+		// absent field falls back to inferring from a `.eth` id (the whole rule
+		// lives in `resolveEnsNameToWarm`, beside the write side that fills it in).
+		const ensName = resolveEnsNameToWarm(site.id, site.metadata);
+		if (ensName !== undefined) {
+			await safeWarm(warm, `https://${ensName}.limo/`);
 		}
 		outcomes.push({id: site.id, cid: site.cid, status: 'warmed'});
 	}

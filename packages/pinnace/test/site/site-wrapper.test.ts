@@ -9,6 +9,7 @@ import {
 	parseSiteMetadata,
 	readSiteMetadata,
 	resolveSiteMetadataToWrite,
+	resolveEnsNameToWarm,
 	assertEnsNameIntent,
 	EnsNameInferenceError,
 	type EnsNameIntent,
@@ -300,5 +301,39 @@ describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
 			await resolveFor(mock, 'a.eth', intent);
 			expect(mock.requestsFor('files/read').length).toBe(0);
 		}
+	});
+});
+
+/**
+ * The READ side of the same three-valued field: which ENS name (if any) the
+ * on-box `warm` loop resolves for a site. This is the rule the WRITE intents
+ * above exist to feed, so it is asserted right next to them — the two sides
+ * must agree about what `""` and absent mean, or the lever silently inverts.
+ */
+describe('resolveEnsNameToWarm — the three-way eth.limo rule', () => {
+	it('explicit non-empty name wins, whatever the id says', () => {
+		expect(resolveEnsNameToWarm('blog', {ensName: 'alice.eth'})).toBe(
+			'alice.eth',
+		);
+		// ...including OVERRIDING a `.eth` id (the name, not the identity, is what
+		// gets warmed).
+		expect(resolveEnsNameToWarm('a.eth', {ensName: 'other.eth'})).toBe(
+			'other.eth',
+		);
+	});
+
+	it('`""` OPTS OUT — even for a `.eth` id (never falls through to inference)', () => {
+		expect(resolveEnsNameToWarm('a.eth', {ensName: ''})).toBeUndefined();
+		expect(resolveEnsNameToWarm('blog', {ensName: ''})).toBeUndefined();
+	});
+
+	it('ABSENT infers the name from a `.eth` id', () => {
+		expect(resolveEnsNameToWarm('a.eth', {})).toBe('a.eth');
+		expect(resolveEnsNameToWarm('a.eth', {mode: 'ipns'})).toBe('a.eth');
+	});
+
+	it('ABSENT on a non-`.eth` id resolves to nothing', () => {
+		expect(resolveEnsNameToWarm('blog', {})).toBeUndefined();
+		expect(resolveEnsNameToWarm('eth', {})).toBeUndefined();
 	});
 });

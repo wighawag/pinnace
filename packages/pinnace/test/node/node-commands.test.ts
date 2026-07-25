@@ -10,6 +10,10 @@ import {
 	type NodeCommandContext,
 	type NodeCommandOps,
 } from '../../src/node/node-commands.js';
+import {
+	encodeSiteMetadata,
+	type SiteMetadata,
+} from '../../src/site/site-wrapper.js';
 
 /**
  * These tests ISOLATE the on-box world:
@@ -378,6 +382,90 @@ describe('node mirror (replica) — default op wiring: fetch + routing/put + fal
 	});
 });
 
+/**
+ * A mock Kubo whose `/sites/*` holds the FOUR ensName cases, each with the
+ * metadata that selects it:
+ *  - `blog`      -> explicit `named.eth` (an id that is not `.eth` at all),
+ *  - `alice.eth` -> NO metadata.json    (infer the name from the id),
+ *  - `optout.eth`-> `ensName: ""`       (opt out, despite the `.eth` id),
+ *  - `bob`       -> NO metadata.json    (nothing to warm).
+ *
+ * `files/read` is single-path but the mock answers every path with ONE canned
+ * response, so the per-site metadata is seeded by intercepting the base fetch
+ * (the same pattern the status tests use for distinct CIDs). A site absent from
+ * the map gets Kubo's loud non-2xx for a missing path — i.e. really no
+ * `metadata.json`, as a site placed before metadata existed has. The bodies go
+ * through the REAL codec, so `""` reaches the warm rule exactly as MFS would
+ * hand it over.
+ */
+function mockWithFourEnsCases(): MockKuboApi {
+	const mock = new MockKuboApi();
+	mock.on('files/ls', {
+		json: {
+			Entries: [
+				{Name: 'blog'},
+				{Name: 'alice.eth'},
+				{Name: 'optout.eth'},
+				{Name: 'bob'},
+			],
+		},
+	});
+	mock.on('files/stat', {json: {Hash: 'bafysite', Type: 'directory'}});
+	return withPerSiteMetadata(mock, {
+		blog: {ensName: 'named.eth', mode: 'ipfs'},
+		'optout.eth': {ensName: '', mode: 'ipfs'},
+	});
+}
+
+/** Seed `/sites/<id>/metadata.json` per site (see {@link mockWithFourEnsCases}). */
+function withPerSiteMetadata(
+	mock: MockKuboApi,
+	byId: Record<string, SiteMetadata>,
+): MockKuboApi {
+	const base = mock.fetchImpl;
+	Object.defineProperty(mock, 'fetchImpl', {
+		value: async (input: string | URL, init?: Parameters<typeof base>[1]) => {
+			const url = new URL(typeof input === 'string' ? input : input.toString());
+			if (url.pathname.endsWith('/files/read')) {
+				const arg = url.searchParams.get('arg') ?? '';
+				await base(input, init); // record the call
+				const hit = Object.entries(byId).find(
+					([id]) => arg === `/sites/${id}/metadata.json`,
+				);
+				if (!hit) return new Response('file does not exist', {status: 500});
+				return new Response(
+					Buffer.from(encodeSiteMetadata(hit[1])).toString('utf8'),
+					{status: 200},
+				);
+			}
+			return base(input, init);
+		},
+		writable: true,
+	});
+	return mock;
+}
+
+/** Run `warm` against `mock`, returning every URL the fake gateway was asked for. */
+async function warmedUrls(
+	mock: MockKuboApi,
+	overrides: Partial<NodeCommandContext> = {},
+): Promise<string[]> {
+	const warmed: string[] = [];
+	const {ctx, dir} = await baseContext(mock, {
+		gatewayFetch: async (url: string) => {
+			warmed.push(url);
+			return 200;
+		},
+		...overrides,
+	});
+	try {
+		await runNodeCommand('warm', ctx);
+		return warmed;
+	} finally {
+		await rm(dir, {recursive: true, force: true});
+	}
+}
+
 describe('node warm — re-fetch each site CID through configured gateways + eth.limo', () => {
 	it('warms each site CID through every configured gateway, and .eth names via eth.limo', async () => {
 		const mock = mockWithTwoSites();
@@ -397,9 +485,84 @@ describe('node warm — re-fetch each site CID through configured gateways + eth
 			expect(gwWarms.length).toBe(4);
 			expect(warmed).toContain('https://bafysite.ipfs.dweb.link/');
 			expect(warmed).toContain('https://ipfs.io/ipfs/bafysite');
-			// alice.eth (an ENS name) is ALSO warmed via eth.limo; bob is not.
+			// Neither site has metadata, so alice.eth is ALSO warmed via eth.limo by
+			// INFERENCE from its id; bob (not `.eth`) is not. The metadata-driven
+			// cases are the describe block below.
 			expect(warmed).toContain('https://alice.eth.limo/');
 			expect(warmed.some((u) => u.includes('bob.limo'))).toBe(false);
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+});
+
+/**
+ * The eth.limo lever is the site's MFS `metadata.ensName`, NOT its id: the box
+ * reads the metadata that travels with the site (spec `sites-metadata-in-mfs`),
+ * so all four cases are reachable on a real box. The `.eth` id is only the
+ * INFERENCE fallback for a site that says nothing.
+ */
+describe('node warm — eth.limo resolved from metadata.ensName (three-way rule)', () => {
+	it('warms the EXPLICIT ensName, for an id that is not `.eth` at all', async () => {
+		const warmed = await warmedUrls(mockWithFourEnsCases());
+		expect(warmed).toContain('https://named.eth.limo/');
+		// The id itself is never warmed when a name is given.
+		expect(warmed.some((u) => u.includes('blog.limo'))).toBe(false);
+	});
+
+	it('INFERS the name from a `.eth` id when the site has no ensName', async () => {
+		const warmed = await warmedUrls(mockWithFourEnsCases());
+		expect(warmed).toContain('https://alice.eth.limo/');
+	});
+
+	it('`ensName: ""` OPTS OUT — no eth.limo warm even for a `.eth` id', async () => {
+		const warmed = await warmedUrls(mockWithFourEnsCases());
+		expect(warmed.some((u) => u.includes('optout.eth.limo'))).toBe(false);
+		// ...and the opt-out is not a whole-site skip: its CID still gets warmed.
+		expect(warmed.filter((u) => u.includes('bafysite')).length).toBe(4);
+	});
+
+	it('warms nothing extra for a non-`.eth` id with no ensName', async () => {
+		const warmed = await warmedUrls(mockWithFourEnsCases());
+		expect(warmed.some((u) => u.includes('bob.limo'))).toBe(false);
+		// Exactly TWO of the four sites resolve an ENS name: blog and alice.eth.
+		expect(warmed.filter((u) => u.includes('.limo'))).toEqual([
+			'https://named.eth.limo/',
+			'https://alice.eth.limo/',
+		]);
+	});
+
+	it('an explicit ensName OVERRIDES a `.eth` id (identity does not decide)', async () => {
+		const mock = new MockKuboApi();
+		mock.on('files/ls', {json: {Entries: [{Name: 'alice.eth'}]}});
+		mock.on('files/stat', {json: {Hash: 'bafysite', Type: 'directory'}});
+		const warmed = await warmedUrls(
+			withPerSiteMetadata(mock, {'alice.eth': {ensName: 'other.eth'}}),
+		);
+		expect(warmed).toContain('https://other.eth.limo/');
+		expect(warmed.some((u) => u.includes('alice.eth.limo'))).toBe(false);
+	});
+
+	it('records a failing warm rather than throwing (a cold gateway is not a run failure)', async () => {
+		const asked: string[] = [];
+		const {ctx, dir} = await baseContext(mockWithFourEnsCases(), {
+			gatewayFetch: async (url: string) => {
+				asked.push(url);
+				throw new Error('gateway is cold');
+			},
+		});
+		try {
+			const res = await runNodeCommand('warm', ctx);
+			expect(res.sites.map((s) => s.id)).toEqual([
+				'blog',
+				'alice.eth',
+				'optout.eth',
+				'bob',
+			]);
+			expect(res.sites.every((s) => s.status === 'warmed')).toBe(true);
+			// Every URL was still attempted — one failure never short-circuits.
+			expect(asked).toContain('https://named.eth.limo/');
+			expect(asked).toContain('https://alice.eth.limo/');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}

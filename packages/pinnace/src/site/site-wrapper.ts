@@ -26,10 +26,13 @@
  * Absence is NORMAL, never an error: a site placed before metadata existed (or
  * by an older pinnace) simply has no `metadata.json`, and reads as `{}`.
  *
- * This module also owns the WRITE side of that three-valued field: what a
- * `deploy`/`pin` actually puts in `metadata.json` for each operator intent
+ * This module also owns BOTH sides of that three-valued field: the WRITE side —
+ * what a `deploy`/`pin` puts in `metadata.json` for each operator intent
  * ({@link EnsNameIntent}, {@link resolveSiteMetadataToWrite}), including the
- * read-modify-write that makes OMITTING the flags leave an existing name alone.
+ * read-modify-write that makes OMITTING the flags leave an existing name alone —
+ * and the READ side, {@link resolveEnsNameToWarm}, the rule the on-box `warm`
+ * loop resolves each site's eth.limo name with. They live together so the two
+ * sides cannot drift about what `""` and ABSENT mean.
  * Decisions behind the intent shape are recorded in
  * `work/notes/observations/deploy-pin-write-site-metadata-decisions.md`.
  */
@@ -192,6 +195,39 @@ export async function resolveSiteMetadataToWrite(
 	return existing.ensName === undefined
 		? metadata
 		: {ensName: existing.ensName, ...metadata};
+}
+
+/**
+ * Resolve WHICH ENS name (if any) a site's eth.limo gateway warming targets —
+ * the READ side of the three-valued `ensName` ({@link SiteMetadata}), used by
+ * the on-box `warm` loop on the metadata it discovered from MFS.
+ *
+ * Four cases, in strict precedence order:
+ *
+ *  1. `ensName` a NON-EMPTY name -> that name (`https://<name>.limo/`). The
+ *     operator named the gateway; neither the name nor the `id` need be `.eth`,
+ *     and an explicit name OVERRIDES a `.eth` id.
+ *  2. `ensName` `""` -> NOTHING. The opt-out, and it must be checked BEFORE the
+ *     `.eth` inference or a `.eth` site could never opt out.
+ *  3. `ensName` ABSENT and the `id` ends in `.eth` -> INFER the name from the
+ *     id (a `.eth`-named site warms eth.limo with no configuration at all).
+ *  4. `ensName` ABSENT and a non-`.eth` id -> NOTHING.
+ *
+ * So the METADATA is the lever and the id is only the fallback inference: the
+ * identity alone no longer decides warming (spec `sites-metadata-in-mfs`).
+ *
+ * @returns the ENS name to warm, or `undefined` for "no eth.limo warming".
+ */
+export function resolveEnsNameToWarm(
+	id: string,
+	metadata: SiteMetadata,
+): string | undefined {
+	// A stated ensName is TOTAL: a name warms it, `""` opts out. Only an ABSENT
+	// field falls through to the `.eth` inference.
+	if (metadata.ensName !== undefined) {
+		return metadata.ensName === '' ? undefined : metadata.ensName;
+	}
+	return id.endsWith('.eth') ? id : undefined;
 }
 
 /** The site's WRAPPER dir, `/sites/<id>` (holds content + metadata). */

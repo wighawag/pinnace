@@ -124,6 +124,7 @@ export {
 	parseSiteMetadata,
 	readSiteMetadata,
 	resolveSiteMetadataToWrite,
+	resolveEnsNameToWarm,
 	assertEnsNameIntent,
 	EnsNameInferenceError,
 	PRESERVE_ENS_NAME,
