@@ -70,6 +70,21 @@ write_files:
       # MFS directory that holds your sites (one entry per site).
       SITES_DIR="/sites"
 
+      # On-box PATHS the \`pinnace node\` verbs read (they assemble their
+      # NodeCommandContext from these keys):
+      #   DASHBOARD_DIR  - where \`node status\` writes status.json (the dashboard
+      #                    vhost \${DASH_DOMAIN} serves this dir).
+      #   RECORDS_DIR    - where \`node republish\` (publisher) EXPORTS the signed
+      #                    record; UNDER the dashboard dir so it is served at
+      #                    \${DASH_DOMAIN}/records/<id>.ipns-record, exactly where a
+      #                    replica's PUBLISHER_ENDPOINT + /records/ fetch looks.
+      #   CACHE_DIR      - where \`node mirror\` (replica) CACHES the last good
+      #                    record for the publisher-outage fallback (under the
+      #                    ipfs user's writable home).
+      DASHBOARD_DIR="/var/www/ipfs-dash"
+      RECORDS_DIR="/var/www/ipfs-dash/records"
+      CACHE_DIR="/var/lib/ipfs/records-cache"
+
       # Role: "publisher" holds IPNS keys and signs/exports records; "replica"
       # holds NO key and MIRRORS the publisher's signed records. The pinnace node
       # timers self-gate on this, so scheduling all timers on every box is safe.

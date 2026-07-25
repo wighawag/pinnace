@@ -224,6 +224,19 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(rep.contents).toContain('NODE_ROLE="replica"');
 	});
 
+	it('emits the on-box PATH keys the node verbs read (records/cache/dashboard)', () => {
+		// The on-box `pinnace node` verbs assemble their NodeCommandContext from
+		// /etc/pinnace-node.env: recordsDir/cacheDir/dashboardDir come from these
+		// named keys. RECORDS_DIR must sit UNDER the dashboard dir so the publisher's
+		// exported record lands at ${DASH_DOMAIN}/records/<id>.ipns-record, which is
+		// exactly where the replica's mirror fetch (publisherEndpoint + /records/...)
+		// looks. Without these keys the on-box republish/mirror timers are no-ops.
+		const {contents} = provision(baseInput({role: 'publisher'})).cloudInit;
+		expect(contents).toContain('DASHBOARD_DIR="/var/www/ipfs-dash"');
+		expect(contents).toContain('RECORDS_DIR="/var/www/ipfs-dash/records"');
+		expect(contents).toContain('CACHE_DIR="/var/lib/ipfs/records-cache"');
+	});
+
 	it('carries the replica publisher endpoint into the env file', () => {
 		const {contents} = provision(
 			baseInput({

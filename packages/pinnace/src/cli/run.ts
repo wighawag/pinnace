@@ -15,14 +15,48 @@
  *    read or mutated — mirroring the `NodeCommandOps` injectable-ops pattern in
  *    node-commands and the explicit-`env` resolver in config-resolution).
  *
- * The on-box `pinnace node <verb>` and the `pinnace site <verb>` namespaces are
- * validated here for surface coherence (one CLI), but their full dispatch is
- * wired by their own tasks (node-agent-commands, site-management).
+ * The on-box `pinnace node <verb>` and the `pinnace site <verb>` namespaces,
+ * the `promote` verb, dispatch through the SAME {@link RunContext}/
+ * {@link ClientDeps} seam (they are NOT a forked dispatch idiom): the on-box
+ * `node` verbs assemble a {@link NodeCommandContext} from the box env
+ * (`/etc/pinnace-node.env`, exported into `process.env` by the systemd timer's
+ * `EnvironmentFile`) and call the core `runNodeCommand`; `site`/`promote`
+ * assemble a per-host {@link KuboRpcClient} from the resolved config and call
+ * the site / promote core.
  */
 import {readFileSync} from 'node:fs';
 import {name} from '../index.js';
-import {NODE_VERBS, type NodeVerb} from '../node/node-commands.js';
-import {SITE_VERBS, type SiteVerb} from '../site/site-management.js';
+import {
+	NODE_VERBS,
+	runNodeCommand as coreRunNodeCommand,
+	type NodeVerb,
+	type NodeCommandContext,
+	type NodeCommandResult,
+} from '../node/node-commands.js';
+import {
+	SITE_VERBS,
+	listSites as coreListSites,
+	removeSite as coreRemoveSite,
+	addSite as coreAddSite,
+	type SiteVerb,
+	type ListSitesInput,
+	type SiteListing,
+	type RemoveSiteInput,
+	type RemoveSiteResult,
+	type AddSiteInput,
+	type AddSiteResult,
+} from '../site/site-management.js';
+import {makeStatusOp} from '../status/status-report.js';
+import {
+	promoteReplicaToPublisher as corePromoteReplicaToPublisher,
+	type PromoteReplicaInput,
+	type PromoteReplicaResult,
+} from '../publisher/record-sequence.js';
+import {
+	deriveIpnsKey as coreDeriveIpnsKey,
+	type DeriveIpnsInput as DeriveIpnsKeyInput,
+	type DerivedIpnsKey,
+} from '../derive/ipns-key-derivation.js';
 import {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import {
 	provision as coreProvision,
@@ -81,6 +115,23 @@ export interface ClientDeps {
 	statusReport(input: StatusReportInput): Promise<StatusReport>;
 	/** `derive` -> the master + site `id` -> IPNS id derivation (no deploy). */
 	deriveIpnsId(input: DeriveIpnsInput): string;
+	/** `node <verb>` -> the on-box command runner (context assembled by the CLI). */
+	runNodeCommand(
+		verb: NodeVerb,
+		ctx: NodeCommandContext,
+	): Promise<NodeCommandResult>;
+	/** `site list` -> enumerate the node's MFS sites. */
+	listSites(input: ListSitesInput): Promise<SiteListing[]>;
+	/** `site remove` -> drop an MFS site + unpin its content. */
+	removeSite(input: RemoveSiteInput): Promise<RemoveSiteResult>;
+	/** `site add` -> place an already-imported CID into MFS as a site. */
+	addSite(input: AddSiteInput): Promise<AddSiteResult>;
+	/** `promote` -> derive the per-site key material from the master + `id`. */
+	deriveIpnsKey(input: DeriveIpnsKeyInput): DerivedIpnsKey;
+	/** `promote` -> import the key + flip the node's role to publisher (story 14). */
+	promoteReplicaToPublisher(
+		input: PromoteReplicaInput,
+	): Promise<PromoteReplicaResult>;
 }
 
 /** The real core, used when a caller does not inject stubs. */
@@ -90,6 +141,12 @@ const DEFAULT_DEPS: ClientDeps = {
 	emitCi: coreEmitCi,
 	statusReport: coreStatusReport,
 	deriveIpnsId: coreDeriveIpnsId,
+	runNodeCommand: coreRunNodeCommand,
+	listSites: coreListSites,
+	removeSite: coreRemoveSite,
+	addSite: coreAddSite,
+	deriveIpnsKey: coreDeriveIpnsKey,
+	promoteReplicaToPublisher: corePromoteReplicaToPublisher,
 };
 
 /**
@@ -262,6 +319,9 @@ export async function run(
 	}
 	if (command === 'derive' || command === 'ipns-id') {
 		return runDerive(rest, rc);
+	}
+	if (command === 'promote') {
+		return runPromote(rest, rc);
 	}
 
 	rc.err(`${name()}: unknown command '${command}'`);
@@ -616,14 +676,22 @@ function cliOverridesFromFlags(flags: Record<string, string>): CliOverrides {
 }
 
 /**
- * Parse `pinnace site <verb>` and validate the verb. The full context (Kubo
- * client from config-resolution, the site name / CID args) is assembled by the
- * CLI wiring in the site-management task; this thin router validates the verb
- * belongs to the `site` namespace. The three verbs (list/remove/add) are
- * implemented in `../site/site-management.ts`.
+ * `pinnace site <verb> [args] [--host <name>]` -> the site core
+ * ({@link ClientDeps.listSites}/{@link ClientDeps.removeSite}/
+ * {@link ClientDeps.addSite}). Assembles a per-host {@link KuboRpcClient} from
+ * the resolved config (endpoint) + the host's env-only token, then dispatches:
+ *   - `list`            -> listSites({client})
+ *   - `remove <id>`     -> removeSite({client, id})
+ *   - `add <id> <cid>`  -> addSite({client, id, cid})
+ * The `--host <name>` selects which configured node to act on; it may be
+ * omitted only when the config has exactly one host (see {@link selectHost}).
  */
-function runSiteCli(argv: readonly string[], rc: ResolvedRunContext): number {
-	const [verb] = argv;
+async function runSiteCli(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
+	const {flags, positionals} = parseArgs(argv);
+	const [verb, ...verbArgs] = positionals;
 	if (!verb) {
 		rc.err(`pinnace site: expected a verb (${SITE_VERBS.join(', ')})`);
 		return 1;
@@ -634,16 +702,68 @@ function runSiteCli(argv: readonly string[], rc: ResolvedRunContext): number {
 		);
 		return 1;
 	}
+
+	const cli = cliOverridesFromFlags(flags);
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
+	const client = buildHostClient('pinnace site', flags['host'], cfg, rc, cli);
+	if (!client) return 1; // buildHostClient already emitted the loud error.
+
+	if (verb === 'list') {
+		const sites = await rc.deps.listSites({client});
+		for (const site of sites) {
+			rc.out(
+				`${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''}`,
+			);
+		}
+		return 0;
+	}
+	if (verb === 'remove') {
+		const [id] = verbArgs;
+		if (!id) {
+			rc.err(
+				'pinnace site remove: usage: pinnace site remove <id> [--host <name>]',
+			);
+			return 1;
+		}
+		const result = await rc.deps.removeSite({client, id});
+		rc.out(
+			`removed ${result.id}${result.cid ? ` (cid ${result.cid}, unpinned=${result.unpinned})` : ''}`,
+		);
+		return 0;
+	}
+	// verb === 'add'
+	const [id, cid] = verbArgs;
+	if (!id || !cid) {
+		rc.err(
+			'pinnace site add: usage: pinnace site add <id> <cid> [--host <name>]',
+		);
+		return 1;
+	}
+	const result = await rc.deps.addSite({client, id, cid});
+	rc.out(`added ${result.id} -> ${result.cid}`);
 	return 0;
 }
 
 /**
- * Parse `pinnace node <verb>` and validate the verb. The full on-box context
- * (local Kubo client, role, on-box paths) is assembled by the cloud-init /
- * config-resolution wiring in the node-agent-commands task; this thin router
- * only validates the verb belongs to the `node` namespace.
+ * `pinnace node <verb>` -> the on-box command core ({@link
+ * ClientDeps.runNodeCommand}). This is the load-bearing on-box wiring: the verb
+ * runs ON a provisioned box (invoked by the systemd timer, whose
+ * `EnvironmentFile=/etc/pinnace-node.env` exports the box config into the
+ * environment {@link RunContext.env} reads). It assembles a
+ * {@link NodeCommandContext} from that env — a LOCAL Kubo client (127.0.0.1:5001
+ * + `RPC_BEARER_TOKEN`), the box `role` (`NODE_ROLE`), and the on-box paths
+ * (`RECORDS_DIR`/`CACHE_DIR`/`DASHBOARD_DIR`/`SITES_DIR`), the replica
+ * `PUBLISHER_ENDPOINT`, and the `WARM_GATEWAYS` list — and injects the OWNED
+ * `status` op ({@link makeStatusOp}, the real per-site announce/gateway report)
+ * so the production status path is not the thin default stub. It then invokes
+ * the core (NOT a validate-and-return-0). A live run proved that without this
+ * the `republish`/`mirror` timers are no-ops. The token is env-only and its
+ * absence is a LOUD, named error (never a silent empty bearer / 401).
  */
-function runNodeCli(argv: readonly string[], rc: ResolvedRunContext): number {
+async function runNodeCli(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
 	const [verb] = argv;
 	if (!verb) {
 		rc.err(`pinnace node: expected a verb (${NODE_VERBS.join(', ')})`);
@@ -655,5 +775,196 @@ function runNodeCli(argv: readonly string[], rc: ResolvedRunContext): number {
 		);
 		return 1;
 	}
+
+	const env = rc.env;
+	const token = env['RPC_BEARER_TOKEN'];
+	if (!token) {
+		rc.err(
+			'pinnace node: RPC_BEARER_TOKEN not set — the on-box bearer is env-only ' +
+				'(read from /etc/pinnace-node.env); never a silent empty token',
+		);
+		return 1;
+	}
+	const role = env['NODE_ROLE'];
+	if (role !== 'publisher' && role !== 'replica') {
+		rc.err(
+			"pinnace node: NODE_ROLE must be 'publisher' or 'replica' " +
+				'(read from /etc/pinnace-node.env)',
+		);
+		return 1;
+	}
+
+	// The box's OWN daemon: the local Kubo RPC on 127.0.0.1:5001 (Caddy fronts it
+	// for external clients, but the on-box agent speaks to it directly).
+	const client = new KuboRpcClient({
+		baseUrl: 'http://127.0.0.1:5001',
+		token,
+	});
+
+	const ctx: NodeCommandContext = {
+		client,
+		role,
+		// The production status path uses the OWNED status op (real announce +
+		// gateway report), not the thin defaultStatus stand-in.
+		ops: {status: makeStatusOp()},
+	};
+	if (env['SITES_DIR']) ctx.sitesDir = env['SITES_DIR'];
+	if (env['RECORDS_DIR']) ctx.recordsDir = env['RECORDS_DIR'];
+	if (env['CACHE_DIR']) ctx.cacheDir = env['CACHE_DIR'];
+	if (env['DASHBOARD_DIR']) ctx.dashboardDir = env['DASHBOARD_DIR'];
+	if (env['PUBLISHER_ENDPOINT'])
+		ctx.publisherEndpoint = env['PUBLISHER_ENDPOINT'];
+	const gateways = splitWarmGateways(env['WARM_GATEWAYS']);
+	if (gateways.length > 0) ctx.gateways = gateways;
+
+	const result = await rc.deps.runNodeCommand(verb as NodeVerb, ctx);
+	if (result.skipped) {
+		rc.out(`pinnace node ${verb}: skipped (${result.skippedReason})`);
+		return 0;
+	}
+	for (const site of result.sites) {
+		rc.out(
+			`  ${site.id}${site.cid ? ` cid ${site.cid}` : ''}${site.status ? ` (${site.status})` : ''}`,
+		);
+	}
 	return 0;
+}
+
+/**
+ * `pinnace promote <id> [--host <name>]` -> {@link
+ * ClientDeps.promoteReplicaToPublisher} (spec user story 14). Derives the
+ * per-site key from the env-only master + the site `id` (the KDF input,
+ * {@link ClientDeps.deriveIpnsKey}), assembles the chosen host's client, and
+ * promotes it: import the key + flip the role to publisher, recovering the name
+ * within the record's validity window without content downtime. The master is
+ * env-ONLY (never from `pinnace.json`); its absence is a LOUD error.
+ */
+async function runPromote(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
+	const {flags, positionals} = parseArgs(argv);
+	const [siteId] = positionals;
+	if (!siteId) {
+		rc.err('pinnace promote: usage: pinnace promote <id> [--host <name>]');
+		return 1;
+	}
+
+	const master = resolveMasterSecret({env: rc.env});
+	if (!master) {
+		rc.err(
+			'pinnace promote: master secret not set — export PINNACE_MASTER (env-only; never read from pinnace.json)',
+		);
+		return 1;
+	}
+
+	const cli = cliOverridesFromFlags(flags);
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
+	const host = pickHost('pinnace promote', flags['host'], cfg, rc);
+	if (!host) return 1;
+	const client = clientForHost('pinnace promote', host, rc, cli);
+	if (!client) return 1;
+
+	// The single `id` IS the KDF input (no separate keyId), matching `derive`.
+	const id = cfg.sites.find((s) => s.id === siteId)?.id ?? siteId;
+	const derived = rc.deps.deriveIpnsKey({master, keyId: id});
+	const result = await rc.deps.promoteReplicaToPublisher({
+		client,
+		currentRole: host.role,
+		keyName: id,
+		derived,
+	});
+	rc.out(
+		`promoted ${result.keyName} to ${result.role}${result.ipns ? ` (ipns ${result.ipns})` : ''}`,
+	);
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Host selection + client assembly (shared by site + promote).
+// ---------------------------------------------------------------------------
+
+/**
+ * Pick the configured host to act on. `--host <name>` selects it by name; it
+ * may be omitted ONLY when the config has exactly one host (the unambiguous
+ * case). Zero hosts, an unknown name, or an omitted name with several hosts is
+ * a LOUD, specific error (returns undefined after emitting it).
+ */
+function pickHost(
+	prefix: string,
+	hostName: string | undefined,
+	cfg: {hosts: Array<{name: string; endpoint: string; role: HostRole}>},
+	rc: ResolvedRunContext,
+): {name: string; endpoint: string; role: HostRole} | undefined {
+	if (cfg.hosts.length === 0) {
+		rc.err(`${prefix}: no hosts configured (add hosts to pinnace.json)`);
+		return undefined;
+	}
+	if (hostName) {
+		const match = cfg.hosts.find((h) => h.name === hostName);
+		if (!match) {
+			rc.err(
+				`${prefix}: unknown host '${hostName}'; configured hosts: ${cfg.hosts
+					.map((h) => h.name)
+					.join(', ')}`,
+			);
+			return undefined;
+		}
+		return match;
+	}
+	if (cfg.hosts.length > 1) {
+		rc.err(
+			`${prefix}: multiple hosts configured; pass --host <name> (one of ${cfg.hosts
+				.map((h) => h.name)
+				.join(', ')})`,
+		);
+		return undefined;
+	}
+	return cfg.hosts[0];
+}
+
+/**
+ * Build a {@link KuboRpcClient} for a chosen host, resolving its bearer token
+ * env-only (CLI > env, no file). A missing token is a LOUD, named error
+ * (returns undefined after emitting it).
+ */
+function clientForHost(
+	prefix: string,
+	host: {name: string; endpoint: string},
+	rc: ResolvedRunContext,
+	cli: CliOverrides,
+): KuboRpcClient | undefined {
+	let token: string;
+	try {
+		token = resolveHostToken({hostName: host.name, env: rc.env, cli});
+	} catch (error) {
+		if (error instanceof MissingHostTokenError) {
+			rc.err(`${prefix}: ${error.message}`);
+			return undefined;
+		}
+		throw error;
+	}
+	return new KuboRpcClient({baseUrl: host.endpoint, token});
+}
+
+/** Pick a host AND build its client in one step (the common site path). */
+function buildHostClient(
+	prefix: string,
+	hostName: string | undefined,
+	cfg: {hosts: Array<{name: string; endpoint: string; role: HostRole}>},
+	rc: ResolvedRunContext,
+	cli: CliOverrides,
+): KuboRpcClient | undefined {
+	const host = pickHost(prefix, hostName, cfg, rc);
+	if (!host) return undefined;
+	return clientForHost(prefix, host, rc, cli);
+}
+
+/** Split the space-separated `WARM_GATEWAYS` env value into a template list. */
+function splitWarmGateways(value: string | undefined): string[] {
+	if (!value) return [];
+	return value
+		.split(/\s+/)
+		.map((s) => s.trim())
+		.filter(Boolean);
 }

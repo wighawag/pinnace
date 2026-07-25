@@ -313,11 +313,15 @@ async function defaultWarm(
 }
 
 /**
- * Default `status`. Reuses the `status-report` core logic (injected via
- * {@link NodeCommandContext.ops}.status; this default is a thin stand-in until
- * that task lands) and writes the resulting report as `status.json` under the
- * box's dashboard directory ONLY. Reporting per-site CID / IPNS id happens in
- * the reused core; this wrapper just persists it where the dashboard reads.
+ * Default `status` — a thin stand-in used ONLY when no `status` op is injected.
+ * The PRODUCTION on-box path (`pinnace node status`, wired in cli/run.ts's
+ * `runNodeCli`) injects the OWNED `status` op ({@link makeStatusOp} from
+ * status-report) via {@link NodeCommandContext.ops}.status, which is the real
+ * per-site CID/IPNS/announce/gateway report. This default remains as the
+ * seam's safe fallback (e.g. a direct `runNodeCommand` call that does not want
+ * the live external checks / a hermetic test that injects its own op), so a
+ * bare call still reports current CID + IPNS id without reaching the network.
+ * The dashboard write is done by the command layer ({@link runNodeCommand}).
  */
 async function defaultStatus(
 	ctx: NodeCommandContext,
