@@ -164,7 +164,7 @@ const DEFAULT_KUBO_VERSION = 'v0.38.1';
  * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
  * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
  */
-const DEFAULT_PINNACE_VERSION = '0.3.0';
+const DEFAULT_PINNACE_VERSION = '0.3.1';
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
@@ -432,7 +432,10 @@ write_files:
       cfg Routing.Type "auto"
       # Re-announce everything we serve; interval well under the record expiry.
       # (Kubo 0.38 uses Provide.*; the pre-0.38 keys FATAL the daemon at boot.)
-      cfg Provide.Interval "12h"
+      # Provide.Interval is a DURATION value Kubo requires as JSON. Without --json,
+      # setting it errors (not found / maybe use --json) and, under set -e, aborts
+      # this whole setup script (leaving the box half-provisioned).
+      cfg --json Provide.Interval '"12h"'
       cfg Provide.Strategy "all"
 
       # --- Resource hygiene for a small box ---
@@ -468,6 +471,12 @@ write_files:
       User=ipfs
       Group=ipfs
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # Guarantee the datadir exists (owned by ipfs) BEFORE the sandboxed daemon
+      # starts: ReadWritePaths=/var/lib/ipfs requires the path to exist at unit
+      # start, so a missing datadir otherwise fails namespace setup with
+      # 226/NAMESPACE and crash-loops. The leading '+' runs this as root, outside
+      # the sandbox; it is idempotent.
+      ExecStartPre=+/usr/bin/install -d -o ipfs -g ipfs /var/lib/ipfs
       ExecStart=/usr/local/bin/ipfs daemon --migrate=true --enable-gc
       Restart=on-failure
       RestartSec=5

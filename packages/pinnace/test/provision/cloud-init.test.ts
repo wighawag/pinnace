@@ -97,6 +97,15 @@ describe('provision: security invariants', () => {
 		expect(contents).toMatch(/Routing\.Type[^\n]*auto/);
 		expect(contents).toContain('Provide.Interval');
 		expect(contents).toContain('Provide.Strategy');
+		// Provide.Interval is a DURATION value Kubo requires as JSON: without
+		// --json the `ipfs config` call errors and, under set -e, aborts the setup
+		// script (box left half-provisioned, daemon never inits). Guard the --json.
+		expect(contents).toMatch(/cfg --json Provide\.Interval/);
+		// The datadir must be guaranteed before the sandboxed daemon starts, or
+		// ReadWritePaths=/var/lib/ipfs fails namespace setup (226/NAMESPACE).
+		expect(contents).toMatch(
+			/ExecStartPre=\+\/usr\/bin\/install -d -o ipfs -g ipfs \/var\/lib\/ipfs/,
+		);
 	});
 
 	// Kubo 0.38 (the pinned DEFAULT_KUBO_VERSION) renamed `Reprovider.*` ->
@@ -141,7 +150,7 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
 		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.3.0"');
+		expect(contents).toContain('PINNACE_VERSION="0.3.1"');
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {

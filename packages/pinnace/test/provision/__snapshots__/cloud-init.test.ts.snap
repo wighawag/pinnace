@@ -99,7 +99,7 @@ write_files:
       # pinnace version installed on the box. Both are reproducible: the same
       # cloud-init always installs the same agent on the same runtime.
       NODE_MAJOR="22"
-      PINNACE_VERSION="0.3.0"
+      PINNACE_VERSION="0.3.1"
 
   # -- Kubo installer / initializer -----------------------------------------
   - path: /usr/local/sbin/ipfs-setup.sh
@@ -142,7 +142,10 @@ write_files:
       cfg Routing.Type "auto"
       # Re-announce everything we serve; interval well under the record expiry.
       # (Kubo 0.38 uses Provide.*; the pre-0.38 keys FATAL the daemon at boot.)
-      cfg Provide.Interval "12h"
+      # Provide.Interval is a DURATION value Kubo requires as JSON. Without --json,
+      # setting it errors (not found / maybe use --json) and, under set -e, aborts
+      # this whole setup script (leaving the box half-provisioned).
+      cfg --json Provide.Interval '"12h"'
       cfg Provide.Strategy "all"
 
       # --- Resource hygiene for a small box ---
@@ -178,6 +181,12 @@ write_files:
       User=ipfs
       Group=ipfs
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # Guarantee the datadir exists (owned by ipfs) BEFORE the sandboxed daemon
+      # starts: ReadWritePaths=/var/lib/ipfs requires the path to exist at unit
+      # start, so a missing datadir otherwise fails namespace setup with
+      # 226/NAMESPACE and crash-loops. The leading '+' runs this as root, outside
+      # the sandbox; it is idempotent.
+      ExecStartPre=+/usr/bin/install -d -o ipfs -g ipfs /var/lib/ipfs
       ExecStart=/usr/local/bin/ipfs daemon --migrate=true --enable-gc
       Restart=on-failure
       RestartSec=5
