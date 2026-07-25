@@ -214,11 +214,14 @@ export class KuboRpcClient {
 	}
 
 	/**
-	 * Kubo's file-upload endpoints (`add`, `dag/import`, `key/import`) require the
-	 * payload as a `multipart/form-data` body with the bytes as a file part under
-	 * the field name `file` (confirmed by the Kubo RPC docs' `-F file=@…` cURL
-	 * examples and a live daemon). A raw `application/octet-stream` body is
-	 * rejected with `400 file argument 'path' is required`.
+	 * Kubo's file-upload endpoints require the payload as a `multipart/form-data`
+	 * body with the bytes as a named file part (confirmed by the Kubo RPC docs'
+	 * `-F <field>=@…` cURL examples and a live daemon). A raw
+	 * `application/octet-stream` body is rejected with
+	 * `400 file argument '<field>' is required`.
+	 *
+	 * The field name is endpoint-specific: `add`, `dag/import` and `key/import`
+	 * expect `file` (the default), while `routing/put` expects `value-file`.
 	 *
 	 * We build a {@link FormData} and pass it as the body WITHOUT a hand-set
 	 * `content-type`: `fetch` serialises the FormData and sets
@@ -229,9 +232,10 @@ export class KuboRpcClient {
 		endpoint: string,
 		query: URLSearchParams | undefined,
 		bytes: Uint8Array,
+		field = 'file',
 	): Promise<T> {
 		const form = new FormData();
-		form.append('file', new Blob([bytes as BlobPart]), 'file');
+		form.append(field, new Blob([bytes as BlobPart]), field);
 		return this.requestJson<T>(endpoint, query, form);
 	}
 
@@ -253,12 +257,17 @@ export class KuboRpcClient {
 		return new Uint8Array(await res.arrayBuffer());
 	}
 
-	/** `routing/put?arg=<ipnsPath>` — (re-)announce a signed record body. */
+	/**
+	 * `routing/put?arg=<ipnsPath>` — (re-)announce a signed record body. Kubo's
+	 * `routing/put` takes the record as a `multipart/form-data` file part named
+	 * **`value-file`** (NOT the generic `file` the other upload endpoints use); a
+	 * raw `application/octet-stream` body is rejected with
+	 * `400 file argument 'value-file' is required`. Goes through {@link fileUpload}
+	 * so `fetch` owns the multipart boundary (no hand-set content-type).
+	 */
 	async routingPut(ipnsPath: string, record: Uint8Array): Promise<void> {
 		const q = new URLSearchParams({arg: ipnsPath});
-		await this.request('routing/put', q, new Blob([record as BlobPart]), {
-			'content-type': 'application/octet-stream',
-		});
+		await this.fileUpload('routing/put', q, record, 'value-file');
 	}
 }
 

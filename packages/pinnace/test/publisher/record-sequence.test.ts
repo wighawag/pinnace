@@ -36,6 +36,19 @@ import {
  * cache) and the load-bearing invariant that a REPLICA NEVER SIGNS.
  */
 
+/**
+ * The record bytes of a `routing/put` now travel as the `value-file` multipart
+ * part (Kubo's contract; see kubo-rpc-client.test.ts), NOT as a raw body, so
+ * they land in `fileParts` rather than `bodyText`. Decode that part back to
+ * text so the sequence tests can assert the exact record bytes re-announced.
+ */
+function putRecordText(req: {
+	fileParts?: Array<{field: string; bytes: Uint8Array}>;
+}): string | undefined {
+	const part = req.fileParts?.find((p) => p.field === 'value-file');
+	return part ? Buffer.from(part.bytes).toString('utf8') : undefined;
+}
+
 function clientWith(mock: MockKuboApi, token = 'on-box-token') {
 	return new KuboRpcClient({
 		baseUrl: mock.baseUrl,
@@ -154,11 +167,11 @@ describe('mirrorAndReannounce (replica) — fetch + routing/put, NEVER signs', (
 			// ...and re-announced via routing/put for each site, NEVER signing.
 			expect(mock.requestsFor('routing/put').length).toBe(2);
 			expect(mock.requestsFor('name/publish').length).toBe(0);
-			// The re-announced body is the fetched publisher record bytes.
+			// The re-announced record (the `value-file` part) is the fetched bytes.
 			expect(
 				mock
 					.requestsFor('routing/put')
-					.every((p) => p.bodyText === 'PUB-RECORD'),
+					.every((p) => putRecordText(p) === 'PUB-RECORD'),
 			).toBe(true);
 			expect(res.sites.every((s) => s.status === 're-announced')).toBe(true);
 			// A freshly fetched record is cached so a later outage can fall back.
@@ -187,7 +200,7 @@ describe('mirrorAndReannounce (replica) — fetch + routing/put, NEVER signs', (
 			const res = await mirrorAndReannounce(ctx, SITES);
 			const puts = mock.requestsFor('routing/put');
 			// alice.eth fell back to cache and STILL re-announced its cached bytes.
-			expect(puts.some((p) => p.bodyText === 'CACHED-RECORD')).toBe(true);
+			expect(puts.some((p) => putRecordText(p) === 'CACHED-RECORD')).toBe(true);
 			expect(puts.some((p) => p.query.get('arg') === '/ipns/k51cached')).toBe(
 				true,
 			);
@@ -266,7 +279,7 @@ describe('full sequence: publisher EXPORT -> replica FETCH -> routing/put -> fal
 			await mirrorAndReannounce(liveCtx, SITES);
 			// The replica re-announced the EXACT bytes the publisher exported.
 			const put = repMock.requestsFor('routing/put')[0];
-			expect(put.bodyText).toBe('SIGNED-RECORD-BYTES');
+			expect(putRecordText(put)).toBe('SIGNED-RECORD-BYTES');
 			expect(put.query.get('arg')).toBe('/ipns/k51alice');
 			// It never signed.
 			expect(repMock.requestsFor('name/publish').length).toBe(0);

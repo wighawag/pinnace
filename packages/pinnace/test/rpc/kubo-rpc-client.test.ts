@@ -164,16 +164,37 @@ describe('KuboRpcClient — file-upload endpoints send multipart/form-data', () 
 		expect(req.query.get('ttl')).toBe('1h');
 	});
 
-	it('routing/get and routing/put', async () => {
+	it('routing/get is a body-less read (no multipart, no file part)', async () => {
 		const mock = new MockKuboApi();
 		const client = clientWith(mock);
 		await client.routingGet('/ipns/k51xxx');
-		expect(mock.lastRequest!.path).toBe('routing/get');
-		expect(mock.lastRequest!.query.get('arg')).toBe('/ipns/k51xxx');
+		const req = mock.lastRequest!;
+		expect(req.path).toBe('routing/get');
+		expect(req.query.get('arg')).toBe('/ipns/k51xxx');
+		// WRITE-side only takes a file: the read carries no body at all.
+		expect(req.contentType).toBeUndefined();
+		expect(req.fileParts).toBeUndefined();
+		expect(req.bodyText).toBe('');
+		expect(req.headers['authorization']).toBe('Bearer secret-token');
+	});
 
+	it('routingPut sends multipart/form-data with a `value-file` part (NOT `file`), keeping arg + bearer', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
 		await client.routingPut('/ipns/k51xxx', new Uint8Array([7, 7]));
-		expect(mock.lastRequest!.path).toBe('routing/put');
-		expect(mock.lastRequest!.query.get('arg')).toBe('/ipns/k51xxx');
+		const req = mock.lastRequest!;
+		expect(req.path).toBe('routing/put');
+		expect(req.query.get('arg')).toBe('/ipns/k51xxx');
+		expect(req.contentType).toBe('multipart/form-data');
+		// The caller must NOT hand-set content-type: fetch owns the boundary.
+		expect(req.headers['content-type']).toBeUndefined();
+		// Kubo's routing/put names the record part `value-file`, NOT the generic
+		// `file` the other upload endpoints use.
+		expect(req.fileParts?.some((p) => p.field === 'file')).toBeFalsy();
+		const valueFile = req.fileParts?.find((p) => p.field === 'value-file');
+		expect(valueFile).toBeDefined();
+		expect(Array.from(valueFile!.bytes)).toEqual([7, 7]);
+		expect(req.headers['authorization']).toBe('Bearer secret-token');
 	});
 
 	it('add posts to /api/v0/add', async () => {

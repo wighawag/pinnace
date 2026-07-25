@@ -27,6 +27,18 @@ function clientWith(mock: MockKuboApi, token = 'on-box-token') {
 	});
 }
 
+/**
+ * A `routing/put` re-announces its record as the `value-file` multipart part
+ * (Kubo's contract), so the record bytes live in `fileParts`, not `bodyText`.
+ * Decode that part so the mirror tests can assert the exact re-announced bytes.
+ */
+function putRecordText(req: {
+	fileParts?: Array<{field: string; bytes: Uint8Array}>;
+}): string | undefined {
+	const part = req.fileParts?.find((p) => p.field === 'value-file');
+	return part ? Buffer.from(part.bytes).toString('utf8') : undefined;
+}
+
 /** A mock Kubo API pre-seeded so `/sites/*` discovery yields two sites. */
 function mockWithTwoSites(): MockKuboApi {
 	const mock = new MockKuboApi();
@@ -314,8 +326,8 @@ describe('node mirror (replica) — default op wiring: fetch + routing/put + fal
 			// alice.eth fell back to cache and STILL re-announced.
 			const puts = mock.requestsFor('routing/put');
 			expect(puts.length).toBeGreaterThan(0);
-			// The re-announced body is the CACHED record bytes.
-			expect(puts.some((p) => p.bodyText === 'CACHED-RECORD')).toBe(true);
+			// The re-announced record (the `value-file` part) is the CACHED bytes.
+			expect(puts.some((p) => putRecordText(p) === 'CACHED-RECORD')).toBe(true);
 			// Never signs, even on the fallback path.
 			expect(mock.requestsFor('name/publish').length).toBe(0);
 			// A site with neither a live publisher NOR a cache is reported, not thrown.
