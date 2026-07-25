@@ -5,6 +5,7 @@ spec: sites-metadata-in-mfs
 promptGuidance.testFirst: true
 blockedBy: [deploy-pin-write-site-metadata]
 covers: [1, 2]
+needsAnswers: true
 ---
 
 ## What to build
