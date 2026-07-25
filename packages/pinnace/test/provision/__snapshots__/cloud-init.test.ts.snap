@@ -99,7 +99,7 @@ write_files:
       # pinnace version installed on the box. Both are reproducible: the same
       # cloud-init always installs the same agent on the same runtime.
       NODE_MAJOR="22"
-      PINNACE_VERSION="0.3.3"
+      PINNACE_VERSION="0.3.4"
 
   # -- Kubo installer / initializer -----------------------------------------
   - path: /usr/local/sbin/ipfs-setup.sh
@@ -109,6 +109,15 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
       source /etc/pinnace-node.env
+
+      # cloud-init runs runcmd with NO HOME in the environment, and the ipfs
+      # binary REFUSES to run without it (Error: HOME is not defined) because it
+      # resolves HOME/.config/ipfs for the nopfs denylists. Under set -e that
+      # aborts this script at the very first ipfs call (ipfs --version), before
+      # the user/datadir/repo are set up, leaving the box crash-looping. Set a
+      # default for the whole script; the per-user calls below override it with
+      # the ipfs user home.
+      export HOME="\${HOME:-/root}"
 
       ARCH="$(dpkg --print-architecture)"   # amd64 / arm64
       TARBALL="kubo_\${KUBO_VERSION}_linux-\${ARCH}.tar.gz"

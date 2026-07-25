@@ -164,7 +164,7 @@ const DEFAULT_KUBO_VERSION = 'v0.38.1';
  * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
  * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
  */
-const DEFAULT_PINNACE_VERSION = '0.3.3';
+const DEFAULT_PINNACE_VERSION = '0.3.4';
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
@@ -399,6 +399,15 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
       source /etc/pinnace-node.env
+
+      # cloud-init runs runcmd with NO HOME in the environment, and the ipfs
+      # binary REFUSES to run without it (Error: HOME is not defined) because it
+      # resolves HOME/.config/ipfs for the nopfs denylists. Under set -e that
+      # aborts this script at the very first ipfs call (ipfs --version), before
+      # the user/datadir/repo are set up, leaving the box crash-looping. Set a
+      # default for the whole script; the per-user calls below override it with
+      # the ipfs user home.
+      export HOME="\${HOME:-/root}"
 
       ARCH="$(dpkg --print-architecture)"   # amd64 / arm64
       TARBALL="kubo_\${KUBO_VERSION}_linux-\${ARCH}.tar.gz"

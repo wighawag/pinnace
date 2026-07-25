@@ -122,6 +122,11 @@ describe('provision: security invariants', () => {
 		}
 		// (and there is at least one such call, so the loop above is meaningful)
 		expect(contents).toMatch(/sudo -u ipfs env [^\n]*HOME=[^\n]* ipfs/);
+		// The setup script must also export a HOME for its ROOT-run ipfs calls
+		// (e.g. `ipfs --version`): cloud-init's runcmd has no HOME, and the ipfs
+		// binary refuses to run without one, aborting the script under set -e at
+		// the very first call — before the user/datadir/repo exist.
+		expect(contents).toMatch(/export HOME=/);
 	});
 
 	// Kubo 0.38 (the pinned DEFAULT_KUBO_VERSION) renamed `Reprovider.*` ->
@@ -165,7 +170,7 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
 		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.3.3"');
+		expect(contents).toContain('PINNACE_VERSION="0.3.4"');
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {
