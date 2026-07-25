@@ -26,7 +26,9 @@ Requires Node >= 22.
 
 ## Configuration + secrets
 
-Every setting resolves **CLI arg > env (via `ldenv`) > `pinnace.json`**.
+Every setting resolves **CLI arg > exported env > `.env.local` > `.env` > `pinnace.json`**.
+
+On startup the `pinnace` bin auto-loads `.env` then `.env.local` from the current directory into the environment (via `ldenv`), so a global install (`npm install -g pinnace`) picks up your secrets with no wrapper: just drop them in `.env.local` and run `pinnace …`. Loading is silent and cwd-only (never a home/global location), and it only AUGMENTS the environment: a value you exported explicitly still wins over the file (`.env.local` overrides `.env`, both sit below an exported var and above `pinnace.json`).
 
 `pinnace.json` holds only NON-secret structure (commit-safe):
 
@@ -46,13 +48,13 @@ Every setting resolves **CLI arg > env (via `ldenv`) > `pinnace.json`**.
 Secrets are **env-only, never in the config file** (structurally: the resolver has no file path for them). Each host's bearer token is read from `PINNACE_HOST_<NAME>_TOKEN` (the name upper-cased), and the master from `PINNACE_MASTER`:
 
 ```sh
-# .env.local (git-ignored) — the ONLY place secrets live
+# .env.local (git-ignored) — the ONLY place secrets live; auto-loaded from cwd
 PINNACE_MASTER=<your high-entropy master secret>
 PINNACE_HOST_PUBLISHER_TOKEN=<publisher bearer token>
 PINNACE_HOST_REPLICA_TOKEN=<replica bearer token>
 ```
 
-A missing token fails loud (naming the exact env var), never a silent empty token. Point the CLI at a config anywhere with `--config <path>`.
+This `.env.local` is loaded automatically from the directory you run `pinnace` in (no `export` needed); an explicitly exported value still takes precedence over it. A missing token fails loud (naming the exact env var), never a silent empty token. Point the CLI at a config anywhere with `--config <path>`.
 
 ## The end-to-end setup
 
