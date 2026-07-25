@@ -29,9 +29,16 @@
  * a SINGLE implementation (no bash/TS drift, per ADR-0002), and `status`
  * delegates to the `status-report` core injected via `ctx.ops`. This task owns
  * the command surface + role-gating + `warm` + the boundary ADR.
+ *
+ * DASHBOARD: the `status` verb's on-box persistence lives here (see
+ * {@link writeStatusReport}) and writes BOTH views of the report into
+ * {@link NodeCommandContext.dashboardDir}: `status.json` (machine) and
+ * `index.html` (human, rendered by the pure `../status/status-html.ts`), so the
+ * dashboard vhost ROOT is a readable page rather than raw JSON.
  */
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
+import {renderStatusHtml} from '../status/status-html.js';
 import type {HostRole} from '../config/config-resolution.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import {
@@ -87,6 +94,17 @@ export interface SiteOutcome {
 /** The uniform result an op returns: the per-site outcomes it produced. */
 export interface NodeOpResult {
 	sites: SiteOutcome[];
+	/**
+	 * `status`-verb only: this node's PeerID, as the `status` core already read it
+	 * (`id`) for the announce check. Threaded through this seam PURELY so the
+	 * dashboard HTML header can name the node WITHOUT a second `id` call (the
+	 * report is reused, never re-gathered). Optional: ops that do not know it (the
+	 * thin {@link defaultStatus} stand-in, an injected test fake) simply omit it
+	 * and the page renders the PeerID as `unknown`. Deliberately NOT added to the
+	 * `status.json` payload, whose shape stays exactly as machine consumers
+	 * already know it.
+	 */
+	peerId?: string;
 }
 
 /** The full result {@link runNodeCommand} returns for one verb invocation. */
@@ -161,7 +179,7 @@ export interface NodeCommandContext {
 	recordsDir?: string;
 	/** Where a replica CACHES the last good record for fallback. */
 	cacheDir?: string;
-	/** Where `status` writes its dashboard JSON. */
+	/** Where `status` writes its dashboard outputs (`status.json` + `index.html`). */
 	dashboardDir?: string;
 	/** Injected publisher-record fetch (replica); defaults to a `fetch` call. */
 	publisherFetch?: PublisherFetch;
@@ -341,17 +359,29 @@ async function defaultStatus(
 	return {sites: outcomes};
 }
 
-/** Serialise a status result to `status.json` under the dashboard dir only. */
+/**
+ * Persist a status result under the dashboard dir, and ONLY there. TWO views of
+ * the SAME report, sharing ONE timestamp (never two clocks):
+ *
+ *  - `status.json`: the machine payload (`{generated, sites}`), unchanged.
+ *  - `index.html`: the human dashboard page, so the vhost ROOT is readable
+ *    (rendered by the pure {@link renderStatusHtml}; it re-gathers nothing).
+ */
 async function writeStatusReport(
 	ctx: NodeCommandContext,
 	result: NodeOpResult,
 ): Promise<void> {
 	if (!ctx.dashboardDir) return;
 	await mkdir(ctx.dashboardDir, {recursive: true});
-	const payload = {generated: new Date().toISOString(), sites: result.sites};
+	const generated = new Date().toISOString();
+	const payload = {generated, sites: result.sites};
 	await writeFile(
 		join(ctx.dashboardDir, 'status.json'),
 		JSON.stringify(payload, null, 2),
+	);
+	await writeFile(
+		join(ctx.dashboardDir, 'index.html'),
+		renderStatusHtml({peerId: result.peerId, generated, sites: result.sites}),
 	);
 }
 

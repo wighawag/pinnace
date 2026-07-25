@@ -144,3 +144,10 @@ export {
 	type ProvidersResponse,
 	type GatewayProbe,
 } from './status/status-report.js';
+export {
+	renderStatusHtml,
+	DEFAULT_STATUS_REFRESH_SECONDS,
+	type StatusPageReport,
+	type StatusPageSite,
+	type RenderStatusHtmlOptions,
+} from './status/status-html.js';

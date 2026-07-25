@@ -395,4 +395,68 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 			await rm(dir, {recursive: true, force: true});
 		}
 	});
+
+	it('renders index.html NEXT TO status.json, and nowhere else', async () => {
+		const mock = mockWithTwoSites();
+		const statusOp: NodeCommandOps['status'] = async () => ({
+			peerId: '12D3KooWpeerself',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					ipns: 'k51alice',
+					announced: true,
+					gatewayServes: true,
+				},
+				{
+					id: 'bob',
+					cid: 'bafybob',
+					ipns: '',
+					announced: false,
+					gatewayServes: false,
+				},
+			],
+		});
+		const {ctx, dir} = await baseContext(mock, {ops: {status: statusOp}});
+		try {
+			await runNodeCommand('status', ctx);
+			// BOTH outputs, in the dashboard dir: status.json (machine) + index.html
+			// (human). Nothing else is written there, and nothing outside it.
+			const written = (await readdir(ctx.dashboardDir!)).sort();
+			expect(written).toEqual(['index.html', 'status.json']);
+			expect(await readdir(dir)).toEqual(['dash']);
+
+			const html = await readFile(
+				join(ctx.dashboardDir!, 'index.html'),
+				'utf8',
+			);
+			expect(html.startsWith('<!doctype html>')).toBe(true);
+			expect(html).toContain('12D3KooWpeerself');
+			expect(html).toContain('href="https://bafyalice.ipfs.dweb.link/"');
+			expect(html).toContain('href="https://k51alice.ipns.dweb.link/"');
+			expect(html).toContain('<meta http-equiv="refresh"');
+
+			// The HTML shows the SAME `generated` stamp status.json carries (one view
+			// of one report, never two clocks).
+			const body = JSON.parse(
+				await readFile(join(ctx.dashboardDir!, 'status.json'), 'utf8'),
+			);
+			expect(html).toContain(body.generated);
+			// status.json stays the machine payload it was: generated + sites only.
+			expect(Object.keys(body).sort()).toEqual(['generated', 'sites']);
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
+	it('writes neither output when no dashboard dir is configured', async () => {
+		const mock = mockWithTwoSites();
+		const {ctx, dir} = await baseContext(mock, {dashboardDir: undefined});
+		try {
+			await runNodeCommand('status', ctx);
+			expect(await readdir(dir)).toEqual([]);
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
 });

@@ -224,7 +224,7 @@ const TIMERS: readonly TimerSpec[] = [
 	},
 	{
 		verb: 'status',
-		description: 'Regenerate the per-site status JSON for the dashboard',
+		description: 'Regenerate the per-site status page + JSON for the dashboard',
 		onBootSec: '6min',
 		onUnitActiveSec: '15min',
 	},
@@ -367,8 +367,10 @@ write_files:
 
       # On-box PATHS the \`pinnace node\` verbs read (they assemble their
       # NodeCommandContext from these keys):
-      #   DASHBOARD_DIR  - where \`node status\` writes status.json (the dashboard
-      #                    vhost \${DASH_DOMAIN} serves this dir).
+      #   DASHBOARD_DIR  - where \`node status\` writes status.json (machine) and
+      #                    index.html (the human status page served at the vhost
+      #                    ROOT); the dashboard vhost \${DASH_DOMAIN} serves this
+      #                    dir.
       #   RECORDS_DIR    - where \`node republish\` (publisher) EXPORTS the signed
       #                    record; UNDER the dashboard dir so it is served at
       #                    \${DASH_DOMAIN}/records/<id>.ipns-record, exactly where a

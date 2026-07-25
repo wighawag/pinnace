@@ -220,4 +220,23 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect(alice.announced).toBe(true);
 		expect(alice.gatewayServes).toBe(true);
 	});
+
+	it('carries this node PeerID through, so the dashboard header needs no re-fetch', async () => {
+		const mock = withDistinctCids(mockForStatus());
+		const client = clientWith(mock);
+		const op = makeStatusOp({
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => 504,
+		});
+
+		const sites = await discoverSites(client, '/sites');
+		const result = await op(
+			{client, role: 'publisher', sitesDir: '/sites'},
+			sites,
+		);
+
+		expect(result.peerId).toBe('peer-self');
+		// Read ONCE by the report itself; the command layer reuses it.
+		expect(mock.requestsFor('id').length).toBe(1);
+	});
 });

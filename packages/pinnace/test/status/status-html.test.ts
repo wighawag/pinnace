@@ -1,0 +1,164 @@
+import {describe, it, expect} from 'vitest';
+import {
+	renderStatusHtml,
+	DEFAULT_STATUS_REFRESH_SECONDS,
+	type StatusPageReport,
+} from '../../src/status/status-html.js';
+
+/**
+ * The renderer is a PURE `StatusPageReport -> html string` function: these tests
+ * touch NO filesystem, NO Kubo daemon and NO network. They assert the rendered
+ * page's fields, gateway links, indicators, escaping and self-containment. The
+ * command layer's WRITE of this string (index.html next to status.json, only
+ * under the dashboard dir) is asserted in test/node/node-commands.test.ts.
+ */
+
+/** A two-site report fixture: alice.eth has an IPNS id, bob is an ipfs-mode site. */
+function reportFixture(): StatusPageReport {
+	return {
+		peerId: '12D3KooWpeerself',
+		generated: '2026-07-25T10:11:12.000Z',
+		sites: [
+			{
+				id: 'alice.eth',
+				cid: 'bafyalice',
+				ipns: 'k51alice',
+				announced: true,
+				gatewayServes: true,
+			},
+			{
+				id: 'bob',
+				cid: 'bafybob',
+				announced: false,
+				gatewayServes: false,
+			},
+		],
+	};
+}
+
+describe('renderStatusHtml: header (peerId + generated freshness)', () => {
+	it('renders a complete standalone HTML document', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html.startsWith('<!doctype html>')).toBe(true);
+		expect(html).toContain('<html lang="en">');
+		expect(html.trimEnd().endsWith('</html>')).toBe(true);
+	});
+
+	it('shows the node PeerID and the generated timestamp', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html).toContain('12D3KooWpeerself');
+		expect(html).toContain('2026-07-25T10:11:12.000Z');
+		// The timestamp is machine-readable too, so freshness is unambiguous.
+		expect(html).toContain('<time datetime="2026-07-25T10:11:12.000Z">');
+	});
+
+	it('reports an unknown PeerID rather than an empty gap when it is absent', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [],
+		});
+		expect(html).toContain('unknown');
+	});
+});
+
+describe('renderStatusHtml: per-site row', () => {
+	it('links the CID to a public gateway and the IPNS id when present', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html).toContain('href="https://bafyalice.ipfs.dweb.link/"');
+		expect(html).toContain('href="https://k51alice.ipns.dweb.link/"');
+		expect(html).toContain('href="https://bafybob.ipfs.dweb.link/"');
+		// Every site id and cid is shown.
+		expect(html).toContain('alice.eth');
+		expect(html).toContain('>bob<');
+		expect(html).toContain('bafybob');
+	});
+
+	it('shows no IPNS link for an ipfs-mode site (no key)', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html).not.toContain('ipns.dweb.link/"</');
+		// bob has no ipns id at all, so only ONE ipns link exists (alice's).
+		expect(html.match(/ipns\.dweb\.link/g)?.length).toBe(1);
+		expect(html).toContain('none');
+	});
+
+	it('renders announced / gatewayServes as ok / no indicators', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html).toContain('>ok<');
+		expect(html).toContain('>no<');
+		// alice (both true) precedes bob (both false); alice's row carries two oks.
+		const aliceRow = html.slice(
+			html.indexOf('alice.eth'),
+			html.indexOf('>bob<'),
+		);
+		expect(aliceRow.match(/>ok</g)?.length).toBe(2);
+		const bobRow = html.slice(html.indexOf('>bob<'));
+		expect(bobRow.match(/>no</g)?.length).toBe(2);
+	});
+
+	it('says so plainly when the node has no sites yet (fresh box)', () => {
+		const html = renderStatusHtml({
+			peerId: '12D3KooWpeerself',
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [],
+		});
+		expect(html).toMatch(/no sites/i);
+	});
+});
+
+describe('renderStatusHtml: auto-reload via meta-refresh (no client JS)', () => {
+	it('defaults to the named ~300s constant aligned with the status timer', () => {
+		expect(DEFAULT_STATUS_REFRESH_SECONDS).toBe(300);
+		const html = renderStatusHtml(reportFixture());
+		expect(html).toContain(
+			`<meta http-equiv="refresh" content="${DEFAULT_STATUS_REFRESH_SECONDS}" />`,
+		);
+	});
+
+	it('accepts an explicit refresh interval', () => {
+		const html = renderStatusHtml(reportFixture(), {refreshSeconds: 60});
+		expect(html).toContain('<meta http-equiv="refresh" content="60" />');
+		expect(html).not.toContain('content="300"');
+	});
+});
+
+describe('renderStatusHtml: self-contained + escaped', () => {
+	it('has inline CSS and no external assets or client JS', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html).toContain('<style>');
+		expect(html).not.toMatch(/<script/i);
+		expect(html).not.toMatch(/<link\b/i);
+		expect(html).not.toMatch(/\ssrc=/i);
+		// The only outbound URLs are the per-site gateway links.
+		const urls = html.match(/https?:\/\/[^"\s]+/g) ?? [];
+		expect(urls.every((u) => u.includes('dweb.link'))).toBe(true);
+	});
+
+	it('HTML-escapes site-controlled strings (id, cid, ipns)', () => {
+		const html = renderStatusHtml({
+			peerId: 'peer<self>',
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: '<script>alert("x")</script>',
+					cid: 'bafy"&<evil>',
+					ipns: "k51'&<evil>",
+					announced: true,
+					gatewayServes: false,
+				},
+			],
+		});
+		expect(html).not.toMatch(/<script/i);
+		expect(html).not.toContain('<evil>');
+		expect(html).toContain('&lt;script&gt;');
+		expect(html).toContain('&amp;');
+		expect(html).toContain('peer&lt;self&gt;');
+		// A quote inside a site string must never break out of an attribute.
+		expect(html).not.toContain('href="https://bafy"');
+	});
+
+	it('is deterministic for the same report (pure: no clock, no filesystem)', () => {
+		expect(renderStatusHtml(reportFixture())).toBe(
+			renderStatusHtml(reportFixture()),
+		);
+	});
+});

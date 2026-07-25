@@ -162,7 +162,8 @@ export async function statusReport(
  * the on-box `status` verb can inject it (its `ops.status` seam). The command
  * layer discovers sites and passes them in; this adapter runs the four-field
  * checks over them and flattens the result into a {@link NodeOpResult} (its
- * per-site outcomes carry the announce + gateway outcomes too).
+ * per-site outcomes carry the announce + gateway outcomes too, and the result
+ * carries this node's `peerId` for the dashboard page's header).
  */
 export function makeStatusOp(
 	checks: {providersLookup?: ProvidersLookup; gatewayProbe?: GatewayProbe} = {},
@@ -176,6 +177,10 @@ export function makeStatusOp(
 			gatewayProbe: checks.gatewayProbe,
 		});
 		return {
+			// The PeerID this report already read for the announce check, carried
+			// through so the command layer's dashboard page can name the node without
+			// a second `id` call. It is NOT part of the `status.json` payload.
+			peerId: report.peerId,
 			sites: report.sites.map((s) => ({
 				id: s.id,
 				cid: s.cid,
