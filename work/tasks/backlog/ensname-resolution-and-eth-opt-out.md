@@ -3,6 +3,7 @@ title: Resolve the eth.limo warming from ensName (explicit > .eth-suffix inferen
 slug: ensname-resolution-and-eth-opt-out
 spec: pinnace
 covers: [15]
+needsAnswers: true
 ---
 
 ## What to build
