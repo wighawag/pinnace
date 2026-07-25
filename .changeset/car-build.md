@@ -1,5 +1,0 @@
----
-'pinnace': minor
----
-
-Add the in-process CAR builder (`buildCar` / `writeCar`): given a site source directory it builds a Content Addressable aRchive whose root is a real UnixFS directory preserving the site structure (`index.html`, `assets/...`), using the `ipfs-car` (`createDirectoryEncoderStream`, `CAREncoderStream`) and `files-from-path` (`filesFromPaths`) libraries entirely in-process — no external CLI, no output scraping. The root CID is captured authoritatively as the LAST block the directory encoder emits and re-encoded into the CAR header, so `dag/import?pin-roots=true` pins the site root. Honors the prototype bug-fix: `filesFromPaths([sourceDir])` already yields site-relative paths, so no leading segment is stripped (the CAR root IS the site dir). Tests decode the built CAR's bytes (never trusting stdout) to assert the root is a UnixFS directory, the structure is preserved with `index.html` at the root, the header root matches the decoded root block, and identical input yields an identical CID. This is the default and primary deploy artifact (spec user stories 4-6).

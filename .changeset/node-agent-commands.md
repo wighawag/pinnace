@@ -1,5 +1,0 @@
----
-'pinnace': minor
----
-
-Add the on-box `pinnace node <verb>` command surface (`republish`, `mirror`, `warm`, `status`): the recurring loop the same `pinnace` binary runs ON a Kubo node under cloud-init systemd timers, each a thin wrapper over core logic against the LOCAL Kubo RPC. Sites auto-discover from MFS `/sites/*`; `republish` (publisher) and `mirror` (replica) self-gate on `NODE_ROLE` (a wrong-role verb is a clean no-op that touches no Kubo RPC, so scheduling all timers on every box is safe); `warm` re-fetches each CID through the configured gateways and `.eth` names via eth.limo; `status` reuses the `status-report` core logic and writes the dashboard JSON. The record sequence (`publisher-replica-model`) and the per-site status checks (`status-report`) are injectable core ops behind the same seam; this task ships the command surface, role-gating, `warm`, and thin defaults. ADR-0002 records the boundary: Kubo owns pinning (`dag/import --pin-roots`) + provider-record freshness (`Reprovider.Interval`); pinnace's on-box loop owns only IPNS republish/export + mirror/fallback + warm + status; the client CLI and the on-box agent are ONE binary.
