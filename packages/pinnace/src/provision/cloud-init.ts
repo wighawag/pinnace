@@ -164,7 +164,7 @@ const DEFAULT_KUBO_VERSION = 'v0.38.1';
  * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
  * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
  */
-const DEFAULT_PINNACE_VERSION = '0.1.0';
+const DEFAULT_PINNACE_VERSION = '0.2.0';
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
