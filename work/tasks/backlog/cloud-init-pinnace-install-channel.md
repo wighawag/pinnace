@@ -6,19 +6,40 @@ blockedBy: []
 covers: [1, 2]
 ---
 
+## Update 2026-07-25 (premise reconciled): `pinnace` IS now published
+
+`pinnace@0.1.0` is published to npm (public, OIDC provenance). The original
+"unpublished package" premise is resolved: the box CAN `npm install -g pinnace`.
+What remains is making that install PINNED + REPRODUCIBLE and hardening the boot,
+not deciding whether a channel exists. Build to the reconciled scope below.
+
 ## What to build
 
-Resolve a real boot-time gap surfaced by the Gate-2 review of `cloud-init-generation`: the emitted cloud-init installs the on-box agent via `npm install -g pinnace`, but the `pinnace` package is `version: 0.0.0` and NOT published to npm. So a freshly provisioned box would fail `pinnace-setup.sh` (the install step) until the package is published, which means provisioning is broken end-to-end today even though the generator's snapshot tests pass.
+Make the on-box `pinnace` install pinned, reproducible, and boot-safe.
 
-Decide and implement the install channel the emitted cloud-init should use, at least one of:
-- publish `pinnace` to npm and PIN a version in the emitted install (`npm install -g pinnace@<version>`) so a box gets a known-good build;
-- and/or support an alternate channel (a tarball URL, a git ref, or a built artifact shipped by `provision`) for the pre-publish / private case.
+1. **Pin the version.** The emitted `pinnace-setup.sh` runs a bare
+   `npm install -g pinnace` (floating `latest`). PIN it to a specific version
+   exposed as a named `DEFAULT_PINNACE_VERSION` value (mirror `DEFAULT_KUBO_VERSION`),
+   defaulting to the current published version, overridable via a `provision`
+   input. So a box boot is reproducible: `npm install -g pinnace@<pinned>`.
+   (Keep it a NAMED knob, not a literal, so the release bump is one obvious edit.)
+2. **Current Node LTS, as a named knob.** Replace the hardcoded `setup_20.x`
+   NodeSource line (Node 20 is the oldest LTS, EOL ~2026-04, incoherent with the
+   repo's Node 24) with a current LTS (Node 22) exposed as `DEFAULT_NODE_MAJOR`
+   (mirror `DEFAULT_KUBO_VERSION`). See
+   `work/notes/observations/cloud-init-node-major-hardcoded-and-stale.md`.
+3. **The install must NOT abort the boot** (see the first-boot bug below): even if
+   the `pinnace` install fails transiently, Kubo + firewall + Caddy must come up,
+   and the `ipfs` service user must exist before any step uses it.
 
-Whatever is chosen, the emitted cloud-init must reference a resolvable install source, the version must be PINNED (not floating `latest`), and the generator's snapshot tests must assert the pinned/known install form. This is provisioning correctness, not a new feature: without it, story 1/2 provisioning cannot actually stand up a working node.
+The generator's snapshot/invariant tests must assert the pinned pinnace version,
+the chosen Node major, and the boot-safe ordering. This is provisioning
+correctness: story 1/2 must stand up a WORKING node with the on-box timers able
+to run the installed binary.
 
 ## Acceptance criteria
 
-- [ ] The emitted cloud-init installs `pinnace` from a RESOLVABLE source (published+pinned npm version, or an explicit tarball/git/artifact channel), not a bare `npm install -g pinnace` against an unpublished package.
+- [ ] The emitted cloud-init installs a PINNED `pinnace` version (`npm install -g pinnace@<pinned>`), the pin exposed as a named `DEFAULT_PINNACE_VERSION` (defaulting to the current published version) and overridable via a `provision` input — not a bare floating `npm install -g pinnace`.
 - [ ] The installed version is PINNED (no floating `latest`), so a box boot is reproducible.
 - [ ] Snapshot/invariant tests assert the emitted install line references the pinned/known source.
 - [ ] The choice (publish vs alternate channel, and the pinning scheme) is recorded (a `## Decisions` note or an ADR if it meets the bar) and linked from the done record.
@@ -36,4 +57,6 @@ A real Debian 13 provision (2026-07-24) showed this install block is not merely 
 
 > Goal: make the on-box `pinnace` install in the emitted cloud-init actually resolvable + reproducible. Read CONTEXT.md (`host provider seam`, `core vs cli`), ADR-0002 (the on-box agent boundary — the box runs the SAME `pinnace` binary), and the done task `cloud-init-generation`.
 >
-> The gap (from `work/notes/observations/review-nits-cloud-init-generation-2026-07-24.md`): the emitted `pinnace-setup.sh` runs `npm install -g pinnace`, but the package is `0.0.0` and unpublished, so a fresh box fails to install the agent. Decide the install channel (publish + pin a version, or an explicit tarball/git/artifact channel) and pin it (never floating `latest`). In the SAME install block, replace the stale hardcoded `setup_20.x` NodeSource line with a current LTS (Node 22 as of mid-2026) exposed as a named `DEFAULT_NODE_MAJOR` value (mirror `DEFAULT_KUBO_VERSION`) so it is one obvious knob to bump. Update the generator + its snapshot tests to assert the pinned/known install form and the chosen Node major. Record the decision durably and link it from the done record. Done means a provisioned box can actually install the pinned `pinnace` agent on a current Node LTS, proven by the generator's snapshot tests.
+> RECONCILED PREMISE (2026-07-25): `pinnace@0.1.0` IS now published to npm. So this is no longer "decide if a channel exists" — it is: PIN the version, use a current Node LTS, and make the install boot-safe. Read CONTEXT.md (`host provider seam`, `core vs cli`), ADR-0002, the done task `cloud-init-generation`, and the two observations `cloud-init-node-major-hardcoded-and-stale.md` + `cloud-init-first-boot-ipfs-user-race-and-set-e-abort.md`.
+>
+> The emitted `pinnace-setup.sh` runs a bare `npm install -g pinnace` (floating latest) and `setup_20.x` (stale Node). (1) Pin pinnace to a named `DEFAULT_PINNACE_VERSION` (default the current published version, overridable via a provision input): `npm install -g pinnace@<pinned>`. (2) Replace `setup_20.x` with a current LTS (Node 22) as a named `DEFAULT_NODE_MAJOR`. (3) Make the install boot-safe: it must not abort the boot (the `ipfs` user, Kubo, firewall, Caddy must all come up even if the pinnace install has a transient failure), and the `ipfs` service user must be created before any step uses it (prefer cloud-init `users:`, which runs before `runcmd`). Update the generator + snapshot/invariant tests to assert the pinned pinnace version, the Node major, and the boot-safe ordering. Record the decisions durably and link them from the done record. Done means a provisioned box installs the pinned `pinnace` agent on a current Node LTS and boots cleanly even if the install hiccups, proven by the generator's tests.
