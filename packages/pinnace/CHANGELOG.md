@@ -1,5 +1,12 @@
 # pinnace
 
+## 0.3.5
+
+### Patch Changes
+
+- ea0d850: Fix the on-box `pinnace node` systemd timers failing with `203/EXEC`: they hardcoded `/usr/local/bin/pinnace`, but a nodesource `npm install -g` puts the bin at `/usr/bin/pinnace` (npm global prefix `/usr`). The units now resolve the bin via PATH (`ExecStart=/usr/bin/env pinnace node <verb>` with an explicit `Environment=PATH=/usr/local/bin:/usr/bin:/bin`), so they work regardless of the npm prefix.
+- ea0d850: Bump the emitted cloud-init's default on-box pinnace version (`DEFAULT_PINNACE_VERSION`) to `0.3.5`, the release that resolves the on-box `pinnace` bin via PATH so the node timers do not 203/EXEC on a nodesource npm prefix.
+
 ## 0.3.4
 
 ### Patch Changes
