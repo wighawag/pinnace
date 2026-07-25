@@ -1,12 +1,20 @@
 ---
-title: Refresh status after deploy/pin so the dashboard is not stale (client feedback + on-box render)
+title: Refresh status after deploy/pin so the dashboard is not stale (client feedback + shorter timer)
 slug: status-refresh-after-mutations
 spec: pinnace
-needsAnswers: true
 covers: [15, 18]
 ---
 
-## Open questions (a human must decide the approach)
+## Decision (RESOLVED 2026-07-25) — build option 1 + 2; node keeps owning status
+
+The direction is decided (see "Recommended resolution" below): the NODE owns its
+status (ADR-0002), so the client does NOT author the dashboard. Build the split:
+(1) `deploy`/`pin` PRINT resulting per-site status to the operator's terminal
+(client reporting what it did), and (2) shorten the on-box `status` timer so the
+passive dashboard converges promptly. Options 3 (on-box trigger) and 4
+(client-authored MFS dashboard) are rejected — see below.
+
+## Design record (the options weighed)
 
 The core tension: a mutating client command (`deploy` / `pin`) runs on the OPERATOR'S laptop and speaks ONLY Kubo RPC; the on-box dashboard (`/var/www/ipfs-dash/index.html`) is written to the BOX's local filesystem by the on-box `pinnace node status` systemd timer (default every 15 min). So a client mutation cannot re-render the on-box dashboard over RPC (RPC exposes no web-root write), and there is a stale window between "I deployed/pinned" and "the dashboard shows it". pinnace deliberately does NOT SSH (it is RPC-only, host-agnostic). Decide how far to close this:
 
@@ -14,15 +22,36 @@ The core tension: a mutating client command (`deploy` / `pin`) runs on the OPERA
 2. **Shorten the on-box `status` timer** (e.g. 15min -> 3-5min) so the dashboard converges faster. Cheap; still a poll; more load. Combine with (1)?
 3. **On-box render trigger without SSH:** is there an acceptable RPC-only or on-box mechanism to kick `pinnace node status` right after a client mutation? (e.g. a tiny bearer-guarded on-box HTTP hook Caddy proxies, or a Kubo pubsub message the box subscribes to, or accept that there is none and rely on 1+2). This is the load-bearing design call — do NOT invent a new network surface without ratifying it against the RPC-only / no-SSH principle.
 
-4. **PREFERRED CANDIDATE (from the operator, 2026-07-25) — serve the dashboard from MFS so the CLIENT can write it over RPC.** The reason the client cannot refresh the dashboard is that it lives on the box FS (`/var/www/ipfs-dash/index.html`), unreachable over Kubo RPC. But Kubo's RPC DOES expose MFS writes (`files/write`), and `statusReport` + `renderStatusHtml` are PURE functions the client already imports. So: move the dashboard OUT of the box FS and INTO MFS (e.g. `/dashboard/index.html`), served by Caddy via the local gateway. Then ANY client op (`deploy`/`pin`/`status`) can gather status, render the HTML client-side, and `files/write` it into MFS over RPC — refreshing the dashboard with NO SSH, NO on-box timer needed for freshness (the timer becomes an optional backup). Kubo's RPC is Kubo's IPFS API, NOT a shell — it can never run `pinnace` on the box — so this MFS-served-dashboard is the RPC-only-honest way to make the client able to refresh it. This is likely the RIGHT design (it dissolves the client/on-box split for the dashboard), but it is a bigger reshape: add `filesWrite` to the client, relocate the dashboard to MFS, point Caddy at the gateway path, and keep/retire the on-box `status` render accordingly. Decide whether to adopt this (preferred) vs the lighter 1+2.
+4. **MFS-served dashboard written by the CLIENT — CONSIDERED AND REJECTED (operator, 2026-07-25).** It IS technically possible: Kubo's RPC exposes MFS writes (`files/write`) and `statusReport`/`renderStatusHtml` are pure functions the client imports, so a client could render + `files/write` the dashboard into MFS over RPC (no SSH). BUT this INVERTS the node-autonomy principle (ADR-0002: the box runs the same binary and OWNS its recurring loop, incl. status). If the CLIENT authors the node's self-report, the dashboard is only as fresh as the last time someone ran a command (stale for a week if untouched, even though the node ran fine the whole time), two clients could write conflicting status, and the status reflects what a client could see over RPC at a moment rather than the node's own continuous view. The clean line: the CLIENT may place CONTENT into MFS (that is doing an operation — deploy/pin put sites at /sites/*), but the NODE'S SELF-REPORT (status) must be authored by the NODE. So the node keeps owning status; do NOT move dashboard authorship to the client. (Kubo RPC is IPFS ops, never a shell — it can never run `pinnace` on the box — which is WHY the node, not the client, must own the on-box render.)
 
 Resolve which of 1 / 2 / 3 (or a combination) is wanted, clear `needsAnswers`, then build. Do NOT build option 3's new surface without an explicit decision — it touches the host boundary.
 
-## What to build (pending the decision above)
+## Recommended resolution (2026-07-25)
 
-At minimum (option 1, almost certainly wanted regardless): make `deploy` and `pin` report the resulting per-site status so the operator gets immediate feedback (the "only one site on the dashboard" confusion came from the dashboard lagging a `pin`; the command itself should have shown the new site). Whether to also shorten the timer (2) and/or add an on-box render trigger (3) depends on the answers.
+The operator's own principle settles it: the NODE owns its status (ADR-0002), so
+do NOT make the client author the dashboard (option 4 rejected above). The
+tension splits into two things with two DIFFERENT owners, neither of which needs
+the client to write the node's dashboard:
 
-Keep the client/on-box boundary honest: the client does not write the box's web root; it either shows status itself (1) or triggers the on-box renderer through a sanctioned mechanism (3), never SSH.
+- **"What just happened?" (instant, per-operation) = the CLIENT's job** ->
+  option 1: `deploy`/`pin` PRINT the resulting per-site status to the operator's
+  terminal (they already hold the data). This is the client reporting what it
+  just did, NOT authoring the node's dashboard.
+- **"What is this node's current state?" (continuous, passive) = the NODE's job**
+  -> the on-box `status` timer renders the dashboard. Its only real problem is
+  CADENCE -> option 2: shorten `onUnitActiveSec` for `status` (15min -> ~3-5min)
+  so the passive view converges promptly while the node stays autonomous.
+
+So build **1 + 2**: client-side per-op feedback + a shorter status timer. This
+keeps the node the sole author of its own status, gives the operator immediate
+feedback at the command, and makes the dashboard converge in minutes. Option 3
+(an on-box trigger) is unnecessary given 1+2 and is not worth a new network
+surface; option 4 (client-authored dashboard) is rejected on the autonomy
+principle. (This resolves `needsAnswers`.)
+
+Keep the boundary honest: the client PLACES CONTENT in MFS (deploy/pin) and
+REPORTS what it did to the terminal; it never authors the node's self-report or
+writes the box web root.
 
 ## Acceptance criteria
 
