@@ -26,6 +26,9 @@ importers:
       ipfs-car:
         specifier: ^3.1.0
         version: 3.1.0
+      ldenv:
+        specifier: ^0.3.16
+        version: 0.3.16
     devDependencies:
       '@ipld/car':
         specifier: ^5.4.6
