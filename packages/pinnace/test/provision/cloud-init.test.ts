@@ -141,7 +141,7 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
 		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.2.0"');
+		expect(contents).toContain('PINNACE_VERSION="0.3.0"');
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {
