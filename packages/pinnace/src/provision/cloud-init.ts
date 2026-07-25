@@ -28,7 +28,7 @@
  * operator's client and as the box's periodic agent, so the record/warm/mirror/
  * status logic has a single implementation (no bash/TS drift). Kubo still owns
  * pinning (`dag/import --pin-roots`) + provider-record freshness
- * (`Provide.Interval`); the pinnace timers own ONLY IPNS republish/export,
+ * (`Provide.Strategy`); the pinnace timers own ONLY IPNS republish/export,
  * replica mirror/fallback, gateway warm, and status. The reference bash is used
  * here as the BEHAVIOURAL SPEC of what each timer must do, not as code to emit.
  *
@@ -164,7 +164,7 @@ const DEFAULT_KUBO_VERSION = 'v0.38.1';
  * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
  * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
  */
-const DEFAULT_PINNACE_VERSION = '0.3.1';
+const DEFAULT_PINNACE_VERSION = '0.3.2';
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
@@ -430,12 +430,12 @@ write_files:
       # --- Discoverability: keep provider records fresh so gateways find us ---
       cfg --json Routing.AcceleratedDHTClient true
       cfg Routing.Type "auto"
-      # Re-announce everything we serve; interval well under the record expiry.
-      # (Kubo 0.38 uses Provide.*; the pre-0.38 keys FATAL the daemon at boot.)
-      # Provide.Interval is a DURATION value Kubo requires as JSON. Without --json,
-      # setting it errors (not found / maybe use --json) and, under set -e, aborts
-      # this whole setup script (leaving the box half-provisioned).
-      cfg --json Provide.Interval '"12h"'
+      # Re-announce everything we serve via the Kubo 0.38 Provide.* config (the
+      # pre-0.38 keys FATAL the daemon at boot). Only Provide.Strategy is set: on
+      # Kubo 0.38.1 the interval sub-key is not a settable config path (ipfs
+      # config errors "not found / maybe use --json" even WITH --json), and under
+      # set -e that aborts this whole setup script. It is optional with a sane
+      # built-in default, so we leave it unset.
       cfg Provide.Strategy "all"
 
       # --- Resource hygiene for a small box ---
@@ -471,6 +471,12 @@ write_files:
       User=ipfs
       Group=ipfs
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # HOME must point at the ipfs user's home (inside ReadWritePaths). Kubo's
+      # nopfs plugin resolves \$HOME/.config/ipfs/denylists; with HOME unset it
+      # falls back under /home/ipfs, which ProtectHome=true HIDES, so the daemon
+      # dies at startup with "denylists: permission denied". Setting HOME here
+      # keeps that lookup inside the writable datadir.
+      Environment=HOME=/var/lib/ipfs
       # Guarantee the datadir exists (owned by ipfs) BEFORE the sandboxed daemon
       # starts: ReadWritePaths=/var/lib/ipfs requires the path to exist at unit
       # start, so a missing datadir otherwise fails namespace setup with

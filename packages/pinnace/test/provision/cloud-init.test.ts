@@ -95,17 +95,22 @@ describe('provision: security invariants', () => {
 		expect(contents).toContain('Routing.AcceleratedDHTClient');
 		expect(contents).toContain('Routing.Type');
 		expect(contents).toMatch(/Routing\.Type[^\n]*auto/);
-		expect(contents).toContain('Provide.Interval');
 		expect(contents).toContain('Provide.Strategy');
-		// Provide.Interval is a DURATION value Kubo requires as JSON: without
-		// --json the `ipfs config` call errors and, under set -e, aborts the setup
-		// script (box left half-provisioned, daemon never inits). Guard the --json.
-		expect(contents).toMatch(/cfg --json Provide\.Interval/);
+		// Provide.Interval is NOT settable on Kubo 0.38.1 (ipfs config errors even
+		// with --json) and, under set -e, would abort the setup script. It is
+		// optional with a built-in default, so the generator must NOT run a
+		// `cfg ... Provide.Interval` command (a comment mentioning it is fine).
+		expect(contents).not.toMatch(/cfg[^\n]*Provide\.Interval/);
 		// The datadir must be guaranteed before the sandboxed daemon starts, or
 		// ReadWritePaths=/var/lib/ipfs fails namespace setup (226/NAMESPACE).
 		expect(contents).toMatch(
 			/ExecStartPre=\+\/usr\/bin\/install -d -o ipfs -g ipfs \/var\/lib\/ipfs/,
 		);
+		// HOME must be set in the daemon unit: Kubo's nopfs plugin reads
+		// $HOME/.config/ipfs/denylists, and with HOME unset it falls back under
+		// /home/ipfs which ProtectHome=true hides -> "denylists: permission denied"
+		// crash. HOME=/var/lib/ipfs keeps it inside the writable datadir.
+		expect(contents).toMatch(/Environment=HOME=\/var\/lib\/ipfs/);
 	});
 
 	// Kubo 0.38 (the pinned DEFAULT_KUBO_VERSION) renamed `Reprovider.*` ->
@@ -113,9 +118,8 @@ describe('provision: security invariants', () => {
 	// present. The emitted config MUST use the new keys and MUST NOT contain any
 	// `Reprovider` key at all, otherwise the provisioned daemon crash-loops. See
 	// work/notes/observations/cloud-init-deprecated-reprovider-fatal-on-kubo-0-38.md.
-	it('emits Provide.* (Kubo 0.38 keys) and NEVER any deprecated Reprovider key', () => {
+	it('emits Provide.Strategy (Kubo 0.38 key) and NEVER any deprecated Reprovider key', () => {
 		const {contents} = provision(baseInput()).cloudInit;
-		expect(contents).toContain('Provide.Interval');
 		expect(contents).toContain('Provide.Strategy');
 		expect(contents).not.toMatch(/Reprovider/);
 	});
@@ -150,7 +154,7 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
 		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.3.1"');
+		expect(contents).toContain('PINNACE_VERSION="0.3.2"');
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {
