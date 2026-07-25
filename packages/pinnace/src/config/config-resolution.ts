@@ -24,6 +24,17 @@
  * A host with no resolvable token is a LOUD, specific error naming the missing
  * env var (never a silent `""` that turns into a downstream 401).
  *
+ * INFRA-ONLY, AND OPTIONAL. The config file describes the operator's NODES
+ * (`hosts`) and the gateways to warm — nothing about their SITES. A site and its
+ * per-site metadata (`mode`, `ensName`) live in the node's MFS wrapper
+ * `/sites/<id>/{content,metadata.json}` (spec `sites-metadata-in-mfs`), which is
+ * the single source of truth the on-box loop can actually see, so there is no
+ * `sites` array here to keep in sync by hand: a stray `sites` key in a file is
+ * ignored exactly as a stray `master`/`token` is. And because the file carries
+ * only infrastructure, it is OPTIONAL: {@link CliOverrides.endpoint} (the CLI's
+ * `--endpoint <url>`) supplies ONE publisher node directly, so trivial setups
+ * need no `pinnace.json` at all.
+ *
  * EAGER-VS-LAZY (decided): the token failure is LAZY, not eager. `resolveConfig`
  * does NOT demand a token for every configured host up front (a host no
  * operation touches must not block unrelated work); instead a caller resolves a
@@ -58,45 +69,14 @@ export interface HostConfig {
 }
 
 /**
- * A site entry as it appears in `pinnace.json`.
- *
- * A site is identified by ONE value: {@link SiteConfig.id}. It is BOTH the MFS
- * entry (`/sites/<id>`) AND the KDF input fed to the frozen derivation (see
- * `../derive/ipns-key-derivation.ts` / ADR-0001). There is no separate `name`
- * and no separate `keyId` — one `id` is the whole identity surface.
- */
-export interface SiteConfig {
-	/**
-	 * The site's SINGLE identifier: both its MFS entry (`/sites/<id>`) and the KDF
-	 * input for its per-site IPNS key. Frozen once a name is live (changing it
-	 * moves the derived id, per ADR-0001). NOT the ENS name.
-	 */
-	id: string;
-	/** ipfs (land+pin+MFS) or ipns (also publish/refresh). */
-	mode: SiteMode;
-	/** The site source directory to build a CAR from. */
-	sourceDir: string;
-	/**
-	 * OPTIONAL eth.limo-warming hint: when set, the site is ALSO warmed via
-	 * `https://<ensName>.limo`. It is NOT part of identity and NEVER an input to
-	 * the key derivation — purely an opt-in warming lever.
-	 */
-	ensName?: string;
-	/**
-	 * An optional externally-owned key (the escape hatch): when set, this site's
-	 * IPNS key is NOT derived from the master but supplied here.
-	 */
-	externalKey?: string;
-}
-
-/**
- * The typed `pinnace.json` shape. Note there is DELIBERATELY no `master` field
- * in the resolved config — see the module doc. If a raw file object carries a
- * stray `master`, it is ignored (never copied into the resolved config).
+ * The typed `pinnace.json` shape: INFRASTRUCTURE only (see the module doc).
+ * There is DELIBERATELY no `master` field and no `sites` array — the master is
+ * env-only, and a site's identity + metadata live in the node's MFS wrapper. A
+ * raw file object carrying a stray `master`/`sites` is ignored (never copied
+ * into the resolved config).
  */
 export interface PinnaceConfigFile {
 	hosts?: HostConfig[];
-	sites?: SiteConfig[];
 	/** Public gateways to warm (dweb.link, eth.limo, ...). */
 	gateways?: string[];
 }
@@ -104,9 +84,19 @@ export interface PinnaceConfigFile {
 /** The fully resolved config the rest of pinnace consumes. */
 export interface ResolvedConfig {
 	hosts: HostConfig[];
-	sites: SiteConfig[];
 	gateways: string[];
 }
+
+/**
+ * The host name given to the single node supplied by the CLI's `--endpoint`
+ * ({@link CliOverrides.endpoint}) when there is no `pinnace.json`.
+ *
+ * It is `publisher` because that node holds the key and signs its own names (a
+ * lone replica could publish nothing), and because a NAME is what the env-only
+ * token convention keys off: the CLI node's token is read from
+ * `PINNACE_HOST_PUBLISHER_TOKEN` ({@link hostTokenEnvVar}), no special case.
+ */
+export const CLI_ENDPOINT_HOST_NAME = 'publisher';
 
 /** An env record (name → value). In production these come from `ldenv`. */
 export type EnvRecord = Record<string, string | undefined>;
@@ -117,6 +107,17 @@ export interface CliOverrides {
 	hostToken?: Record<string, string>;
 	/** hostName → endpoint override. */
 	hostEndpoint?: Record<string, string>;
+	/**
+	 * ONE node's endpoint, supplied directly on the CLI (`--endpoint <url>`),
+	 * making the config file OPTIONAL: it resolves to a single publisher host
+	 * named {@link CLI_ENDPOINT_HOST_NAME} whose token is still env-only.
+	 *
+	 * Being the ARG tier it REPLACES the file's hosts (arg > env > file), so it
+	 * also narrows an existing multi-node config to that one node for a run.
+	 * Distinct from {@link CliOverrides.hostEndpoint}, which overrides the
+	 * endpoint OF a host the file already declares (by name).
+	 */
+	endpoint?: string;
 	/** Gateways override (replaces the file/env list). */
 	gateways?: string[];
 }
@@ -147,30 +148,39 @@ function envKey(...parts: string[]): string {
 export function resolveConfig(input: ResolveConfigInput): ResolvedConfig {
 	const {file, env, cli} = input;
 
-	const hosts: HostConfig[] = (file.hosts ?? []).map((h) => {
-		const endpoint =
-			cli.hostEndpoint?.[h.name] ??
-			env[envKey('PINNACE_HOST', h.name, 'ENDPOINT')] ??
-			h.endpoint;
-		// The token is NOT resolved here — it is env-only and resolved lazily, per
-		// host, at the moment an operation builds that host's client (see
-		// resolveHostToken + the module doc). Copy only the non-secret fields.
-		return {
-			name: h.name,
-			endpoint,
-			role: h.role,
-			...(h.publisherEndpoint !== undefined
-				? {publisherEndpoint: h.publisherEndpoint}
-				: {}),
-		};
-	});
+	// A CLI endpoint IS the host list (arg > env > file): one publisher node,
+	// no config file required. Its token stays env-only, like every host's.
+	const hosts: HostConfig[] = cli.endpoint
+		? [
+				{
+					name: CLI_ENDPOINT_HOST_NAME,
+					endpoint: cli.endpoint,
+					role: 'publisher',
+				},
+			]
+		: (file.hosts ?? []).map((h) => {
+				const endpoint =
+					cli.hostEndpoint?.[h.name] ??
+					env[envKey('PINNACE_HOST', h.name, 'ENDPOINT')] ??
+					h.endpoint;
+				// The token is NOT resolved here — it is env-only and resolved lazily,
+				// per host, at the moment an operation builds that host's client (see
+				// resolveHostToken + the module doc). Copy only the non-secret fields.
+				return {
+					name: h.name,
+					endpoint,
+					role: h.role,
+					...(h.publisherEndpoint !== undefined
+						? {publisherEndpoint: h.publisherEndpoint}
+						: {}),
+				};
+			});
 
 	const gateways =
 		cli.gateways ?? splitList(env['PINNACE_GATEWAYS']) ?? file.gateways ?? [];
 
 	return {
 		hosts,
-		sites: file.sites ?? [],
 		gateways,
 	};
 }

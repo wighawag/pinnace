@@ -96,14 +96,12 @@ const fileConfig: PinnaceConfigFile = {
 			publisherEndpoint: 'https://a.example/records',
 		},
 	],
-	sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
 	gateways: ['https://dweb.link'],
 };
 
 /** A single-host config (so `--host` may be omitted). */
 const singleHostConfig: PinnaceConfigFile = {
 	hosts: [{name: 'a', endpoint: 'https://a.example', role: 'replica'}],
-	sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
 };
 
 const hostTokenEnv = {
@@ -339,6 +337,73 @@ describe('promote <id> — derives the key from master + invokes promoteReplicaT
 		expect(code).not.toBe(0);
 		expect(calls.promoteReplicaToPublisher.length).toBe(0);
 		expect(err.join('\n')).toContain('PINNACE_HOST_B_TOKEN');
+	});
+
+	it('takes the site `id` from the ARG alone (no config site entry to normalise it)', async () => {
+		// A stale `sites` array in the file is inert: the KDF input and the key name
+		// are the positional id verbatim.
+		const {deps, calls} = recordingDeps();
+		const staleFile = {
+			...fileConfig,
+			sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
+		} as unknown as PinnaceConfigFile;
+		const {context} = ctx({
+			deps,
+			env: {...hostTokenEnv, PINNACE_MASTER: 'm'},
+			loadConfigFile: () => staleFile,
+		});
+		const code = await run(['promote', 'ad-hoc-id', '--host', 'b'], context);
+		expect(code).toBe(0);
+		expect(calls.deriveIpnsKey[0]).toMatchObject({keyId: 'ad-hoc-id'});
+		expect(
+			(calls.promoteReplicaToPublisher[0] as {keyName: string}).keyName,
+		).toBe('ad-hoc-id');
+	});
+});
+
+/**
+ * The config file is OPTIONAL: `--endpoint <url>` supplies the single node for
+ * the `site` + `promote` namespaces too (token still env-only), so these verbs
+ * work with NO `pinnace.json` — and with exactly one host, `--host` may be
+ * omitted as usual.
+ */
+describe('no pinnace.json — --endpoint supplies the single node (site + promote)', () => {
+	const soloTokenEnv = {
+		PINNACE_HOST_PUBLISHER_TOKEN: 'env-token-solo',
+	} as const;
+
+	it('site list operates against the CLI-supplied node with no config file', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({
+			deps,
+			env: {...soloTokenEnv},
+			loadConfigFile: () => ({}),
+		});
+		const code = await run(
+			['site', 'list', '--endpoint', 'https://solo.example'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(calls.listSites.length).toBe(1);
+	});
+
+	it('promote operates against the CLI-supplied node with no config file', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({
+			deps,
+			env: {...soloTokenEnv, PINNACE_MASTER: 'm'},
+			loadConfigFile: () => ({}),
+		});
+		const code = await run(
+			['promote', 'mysite', '--endpoint', 'https://solo.example'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(calls.promoteReplicaToPublisher.length).toBe(1);
+		// The CLI node is a publisher (a single-node target signs its own name).
+		expect(
+			(calls.promoteReplicaToPublisher[0] as {currentRole: string}).currentRole,
+		).toBe('publisher');
 	});
 });
 

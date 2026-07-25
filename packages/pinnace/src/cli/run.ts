@@ -485,10 +485,15 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
  * `deploy [--mode <m>] [--set-ens-name [<name>] | --unset-ens-name] <dir> <id>`
  * -> core {@link ClientDeps.deploy}. Resolves every configured host into a
  * {@link DeployTarget} (each host's OWN token resolved env-only, LAZILY, via
- * {@link resolveHostToken} — CLI > env, no file), and the site's `mode` from
- * the matching `pinnace.json` site entry (overridable with `--mode`). A host
- * with no resolvable token FAILS LOUD naming its exact env var. Prints the
- * resulting CID / per-node breakdown.
+ * {@link resolveHostToken} — CLI > env, no file). A host with no resolvable
+ * token FAILS LOUD naming its exact env var. Prints the resulting CID /
+ * per-node breakdown.
+ *
+ * MODE SOURCE (the whole order): `--mode` > {@link DEFAULT_DEPLOY_MODE}. There
+ * is no config source any more — `pinnace.json` is infra-only, and the durable
+ * per-site home of `mode` is the site's MFS `metadata.json`, which THIS deploy
+ * (re)writes from the mode it ran in. A `--mode` that is neither `ipfs` nor
+ * `ipns` is an unresolved mode: a loud refusal naming the site, never a guess.
  *
  * The two ensName verb-flags ({@link ensNameIntentFromFlags}) decide what the
  * deploy writes into the site's MFS `metadata.json`; omitting them leaves the
@@ -513,17 +518,20 @@ async function runDeploy(
 	const cli = cliOverridesFromFlags(flags);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 
-	// The site's mode: --mode arg > matching site entry (config precedence).
-	const siteEntry = cfg.sites.find((s) => s.id === siteId);
-	const mode = (flags['mode'] as SiteMode | undefined) ?? siteEntry?.mode;
+	// The site's mode: --mode arg > the default. NO config source (sites are not
+	// a config surface any more); the mode this deploy runs in is what gets
+	// written into the site's MFS metadata.
+	const mode = (flags['mode'] ?? DEFAULT_DEPLOY_MODE) as SiteMode;
 	if (mode !== 'ipfs' && mode !== 'ipns') {
 		rc.err(
-			`pinnace deploy: mode for '${siteId}' is unset or invalid; pass --mode ipfs|ipns or add the site to pinnace.json`,
+			`pinnace deploy: mode for '${siteId}' is unresolved ('${flags['mode']}'); ` +
+				`pass --mode ipfs|ipns (mode comes from --mode alone, defaulting to ` +
+				`'${DEFAULT_DEPLOY_MODE}')`,
 		);
 		return 1;
 	}
 	if (cfg.hosts.length === 0) {
-		rc.err('pinnace deploy: no hosts configured (add hosts to pinnace.json)');
+		rc.err(`pinnace deploy: ${NO_HOSTS_HINT}`);
 		return 1;
 	}
 
@@ -621,7 +629,7 @@ async function runStatus(
 	const cli = cliOverridesFromFlags(flags);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
-		rc.err('pinnace status: no hosts configured (add hosts to pinnace.json)');
+		rc.err(`pinnace status: ${NO_HOSTS_HINT}`);
 		return 1;
 	}
 
@@ -653,9 +661,10 @@ async function runStatus(
  * `derive <id>` (a.k.a. `ipns-id`) -> core {@link ClientDeps.deriveIpnsId}.
  * Prints the site's `k51...` IPNS id from the master + the site's single `id`
  * (the KDF input), with NO deploy (user story 22). The master is env-ONLY (via
- * {@link resolveMasterSecret}); the `id` is either the positional argument
- * verbatim or, if it names a `pinnace.json` site entry, that entry's `id` (they
- * are the same value — one identifier). Fails loudly if the master is unset.
+ * {@link resolveMasterSecret}); the `id` is the positional argument VERBATIM —
+ * there is nothing to look it up in (sites are not a config surface) and
+ * nothing to look up (the id IS the KDF input). Needs no config file at all.
+ * Fails loudly if the master is unset.
  */
 function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {positionals} = parseArgs(argv);
@@ -673,12 +682,8 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 		return 1;
 	}
 
-	// The single `id` IS the KDF input. The positional is the id directly; a
-	// matching site entry carries the same value (no separate keyId to look up).
-	const cfg = resolveConfig({file: rc.file, env: rc.env, cli: {}});
-	const id = cfg.sites.find((s) => s.id === siteId)?.id ?? siteId;
-
-	const printed = rc.deps.deriveIpnsId({master, keyId: id});
+	// The single `id` IS the KDF input: the positional is fed straight in.
+	const printed = rc.deps.deriveIpnsId({master, keyId: siteId});
 	rc.out(printed);
 	return 0;
 }
@@ -777,7 +782,7 @@ async function runPin(
 	const cli = cliOverridesFromFlags(flags);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
-		rc.err('pinnace pin: no hosts configured (add hosts to pinnace.json)');
+		rc.err(`pinnace pin: ${NO_HOSTS_HINT}`);
 		return 1;
 	}
 
@@ -894,6 +899,30 @@ async function runPin(
 // ---------------------------------------------------------------------------
 
 /**
+ * `deploy`'s mode when `--mode` is omitted. `ipfs` (land + pin + MFS only) is
+ * the conservative half of the pair — it mints no name and signs nothing — and
+ * it matches `pin`'s existing default, so the two carriers of the ONE `mode`
+ * concept default alike. The config site entry that used to supply this is
+ * gone (sites live in MFS); `--mode` is now the only source.
+ *
+ * CONSEQUENCE to know: re-deploying an `ipns` site WITHOUT `--mode ipns` runs
+ * it as `ipfs` — this deploy signs no record and writes `mode: 'ipfs'` into the
+ * site's metadata, which the on-box republish loop then honours. Pass `--mode
+ * ipns` for a published site (as the emitted CI workflow already does). See
+ * `work/notes/observations/config-drop-sites-decisions.md`.
+ */
+const DEFAULT_DEPLOY_MODE: SiteMode = 'ipfs';
+
+/**
+ * The shared no-hosts refusal. Names BOTH ways to supply a node, because the
+ * config file is OPTIONAL: `--endpoint <url>` (one node, token from env) or a
+ * `hosts` entry in `pinnace.json` (multi-node / durable setups).
+ */
+const NO_HOSTS_HINT =
+	'no node to act on; pass --endpoint <url> for a single node ' +
+	'(its token from PINNACE_HOST_PUBLISHER_TOKEN), or add hosts to pinnace.json';
+
+/**
  * The ensName flags that take NO value, for {@link parseArgs}. Only
  * `--unset-ens-name` is here: `--set-ens-name` takes an OPTIONAL value, so it
  * stays value-taking and its BARE form is the parser's existing no-value case
@@ -973,6 +1002,12 @@ function missingFlags(required: Record<string, string | undefined>): string[] {
  * Build the {@link CliOverrides} the config resolver understands from parsed
  * flags. `--gateways a,b` overrides the gateway list; per-host token/endpoint
  * overrides use the `--host-token.<name>` / `--host-endpoint.<name>` form.
+ *
+ * `--endpoint <url>` is the CONFIG-LESS path: it supplies ONE publisher node
+ * directly (its token still env-only, from `PINNACE_HOST_PUBLISHER_TOKEN`), so
+ * every node-touching verb works with no `pinnace.json`. Being the arg tier it
+ * REPLACES the file's hosts — unlike `--host-endpoint.<name>`, which overrides
+ * the endpoint OF a host the file declares.
  */
 function cliOverridesFromFlags(flags: Record<string, string>): CliOverrides {
 	const cli: CliOverrides = {};
@@ -986,6 +1021,7 @@ function cliOverridesFromFlags(flags: Record<string, string>): CliOverrides {
 	}
 	if (Object.keys(hostToken).length > 0) cli.hostToken = hostToken;
 	if (Object.keys(hostEndpoint).length > 0) cli.hostEndpoint = hostEndpoint;
+	if (flags['endpoint']) cli.endpoint = flags['endpoint'];
 	if (flags['gateways'])
 		cli.gateways = flags['gateways']
 			.split(',')
@@ -1184,13 +1220,13 @@ async function runPromote(
 	const client = clientForHost('pinnace promote', host, rc, cli);
 	if (!client) return 1;
 
-	// The single `id` IS the KDF input (no separate keyId), matching `derive`.
-	const id = cfg.sites.find((s) => s.id === siteId)?.id ?? siteId;
-	const derived = rc.deps.deriveIpnsKey({master, keyId: id});
+	// The single `id` IS the KDF input (no separate keyId), matching `derive`:
+	// the positional arg verbatim, with no config lookup to normalise it.
+	const derived = rc.deps.deriveIpnsKey({master, keyId: siteId});
 	const result = await rc.deps.promoteReplicaToPublisher({
 		client,
 		currentRole: host.role,
-		keyName: id,
+		keyName: siteId,
 		derived,
 	});
 	rc.out(
@@ -1216,7 +1252,7 @@ function pickHost(
 	rc: ResolvedRunContext,
 ): {name: string; endpoint: string; role: HostRole} | undefined {
 	if (cfg.hosts.length === 0) {
-		rc.err(`${prefix}: no hosts configured (add hosts to pinnace.json)`);
+		rc.err(`${prefix}: ${NO_HOSTS_HINT}`);
 		return undefined;
 	}
 	if (hostName) {

@@ -121,14 +121,6 @@ const fileConfig: PinnaceConfigFile = {
 			publisherEndpoint: 'https://a.example/records',
 		},
 	],
-	sites: [
-		{
-			id: 'mysite',
-			mode: 'ipns',
-			ensName: 'mysite.eth',
-			sourceDir: './dist',
-		},
-	],
 	gateways: ['https://dweb.link'],
 };
 
@@ -206,7 +198,7 @@ describe('provision — dispatches to core provision with resolved args', () => 
 });
 
 describe('deploy <dir> <id> — dispatches to core deploy with resolved targets', () => {
-	it('resolves nodes/mode from config and calls core deploy with them', async () => {
+	it('resolves nodes from config and calls core deploy with them', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({deps, env: {...hostTokenEnv}});
 		const code = await run(['deploy', './dist', 'mysite'], context);
@@ -221,8 +213,9 @@ describe('deploy <dir> <id> — dispatches to core deploy with resolved targets'
 		expect(input.sourceDir).toBe('./dist');
 		// The single `id` positional flows straight through to the core.
 		expect(input.id).toBe('mysite');
-		// mode comes from the matching site entry in pinnace.json.
-		expect(input.mode).toBe('ipns');
+		// mode comes from --mode ALONE; omitted, it is the `ipfs` default (the
+		// config site entry is gone — sites live in MFS).
+		expect(input.mode).toBe('ipfs');
 		// One target per configured host, each with its OWN env-only token, publisher first.
 		expect(input.targets.map((t) => t.baseUrl)).toEqual([
 			'https://a.example',
@@ -235,11 +228,46 @@ describe('deploy <dir> <id> — dispatches to core deploy with resolved targets'
 		expect(input.targets.map((t) => t.role)).toEqual(['publisher', 'replica']);
 	});
 
-	it('a --mode arg OVERRIDES the site mode (arg > file)', async () => {
+	it('a --mode arg selects the mode (arg > the ipfs default)', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({deps, env: {...hostTokenEnv}});
-		await run(['deploy', '--mode', 'ipfs', './dist', 'mysite'], context);
+		await run(['deploy', '--mode', 'ipns', './dist', 'mysite'], context);
+		expect((calls.deploy[0] as {mode: string}).mode).toBe('ipns');
+	});
+
+	it('a stale `sites` entry in pinnace.json NO LONGER supplies the mode', async () => {
+		// The config-based mode fallback is REMOVED: an old config carrying
+		// sites: [{id: 'mysite', mode: 'ipns'}] is inert, so the deploy runs in the
+		// `ipfs` default rather than silently publishing an IPNS record.
+		const {deps, calls} = recordingDeps();
+		const staleFile = {
+			...fileConfig,
+			sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
+		} as unknown as PinnaceConfigFile;
+		const {context} = ctx({
+			deps,
+			env: {...hostTokenEnv},
+			loadConfigFile: () => staleFile,
+		});
+		const code = await run(['deploy', './dist', 'mysite'], context);
+		expect(code).toBe(0);
 		expect((calls.deploy[0] as {mode: string}).mode).toBe('ipfs');
+	});
+
+	it('an UNRESOLVED (invalid) --mode fails loud naming the site + the two values', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', '--mode', 'sideways', './dist', 'mysite'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.deploy.length).toBe(0);
+		const message = err.join('\n');
+		expect(message).toContain('mysite');
+		expect(message).toContain('--mode');
+		// The removed config fallback is not suggested any more.
+		expect(message).not.toMatch(/add the site to pinnace\.json/i);
 	});
 
 	it('a CLI host-token OVERRIDES the env token (CLI > env)', async () => {
@@ -441,6 +469,106 @@ describe('--set-ens-name / --unset-ens-name — the ensName write intent', () =>
 		expect(code).not.toBe(0);
 		expect(calls.pinExternal.length).toBe(0);
 		expect(err.join('\n')).toContain('--unset-ens-name');
+	});
+});
+
+/**
+ * The config file is OPTIONAL (spec `sites-metadata-in-mfs`, story 2): a
+ * publisher endpoint typed on the CLI plus the usual env-only token is a
+ * complete single-node target, with NO `pinnace.json` at all. These tests load
+ * an EMPTY config (the benign no-file case) and prove the verbs still operate.
+ */
+describe('no pinnace.json — --endpoint + env token is a working single-node target', () => {
+	/** The env-only token of the CLI-supplied node (the same naming convention). */
+	const soloTokenEnv = {
+		PINNACE_HOST_PUBLISHER_TOKEN: 'env-token-solo',
+	} as const;
+
+	/** A context with NO config file (an empty one, as the default loader yields). */
+	function noFileCtx(deps: ClientDeps, env: Record<string, string> = {}) {
+		return ctx({deps, env, loadConfigFile: () => ({})});
+	}
+
+	it('deploy works with no config file: one target from --endpoint, token from env', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = noFileCtx(deps, {...soloTokenEnv});
+		const code = await run(
+			['deploy', '--endpoint', 'https://solo.example', './dist', 'mysite'],
+			context,
+		);
+		expect(code).toBe(0);
+		const input = calls.deploy[0] as {
+			targets: Array<{baseUrl: string; token: string; role: string}>;
+		};
+		expect(input.targets).toEqual([
+			{
+				baseUrl: 'https://solo.example',
+				token: 'env-token-solo',
+				role: 'publisher',
+			},
+		]);
+	});
+
+	it('status works with no config file (one report for the CLI-supplied node)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = noFileCtx(deps, {...soloTokenEnv});
+		const code = await run(
+			['status', '--endpoint', 'https://solo.example'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(calls.statusReport.length).toBe(1);
+	});
+
+	it('pin works with no config file (the CLI node is the only target)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = noFileCtx(deps, {...soloTokenEnv});
+		const code = await run(
+			[
+				'pin',
+				'bafyexternal',
+				'--as',
+				'archive',
+				'--endpoint',
+				'https://solo.example',
+			],
+			context,
+		);
+		expect(code).toBe(0);
+		const input = calls.pinExternal[0] as {targets: Array<{baseUrl: string}>};
+		expect(input.targets.map((t) => t.baseUrl)).toEqual([
+			'https://solo.example',
+		]);
+	});
+
+	it('derive needs NO config file at all (master + the id arg)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = noFileCtx(deps, {PINNACE_MASTER: 'the-master'});
+		const code = await run(['derive', 'mysite'], context);
+		expect(code).toBe(0);
+		expect(calls.deriveIpnsId[0]).toMatchObject({keyId: 'mysite'});
+		expect(out.join('\n')).toContain('k51stubid');
+	});
+
+	it('the CLI node token stays env-only: absent => LOUD, named failure', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = noFileCtx(deps);
+		const code = await run(
+			['deploy', '--endpoint', 'https://solo.example', './dist', 'mysite'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toContain('PINNACE_HOST_PUBLISHER_TOKEN');
+	});
+
+	it('with NO config file and NO --endpoint, the no-hosts refusal names --endpoint', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = noFileCtx(deps, {...soloTokenEnv});
+		const code = await run(['deploy', './dist', 'mysite'], context);
+		expect(code).not.toBe(0);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toContain('--endpoint');
 	});
 });
 

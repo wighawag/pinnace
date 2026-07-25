@@ -5,6 +5,7 @@ import {
 	resolveHostToken,
 	hostTokenEnvVar,
 	MissingHostTokenError,
+	CLI_ENDPOINT_HOST_NAME,
 	type PinnaceConfigFile,
 } from '../../src/config/config-resolution.js';
 import {deriveIpnsId} from '../../src/derive/ipns-key-derivation.js';
@@ -26,14 +27,6 @@ const fileConfig: PinnaceConfigFile = {
 			endpoint: 'https://a.example',
 			role: 'publisher',
 			publisherEndpoint: 'https://a.example/records',
-		},
-	],
-	sites: [
-		{
-			id: 'mysite',
-			mode: 'ipns',
-			ensName: 'mysite.eth',
-			sourceDir: './dist',
 		},
 	],
 	gateways: ['https://dweb.link'],
@@ -63,18 +56,69 @@ describe('config resolution precedence: CLI arg > env > pinnace.json', () => {
 		expect(cfg.hosts[0].endpoint).toBe('https://cli.example');
 	});
 
-	it('parses a typed pinnace.json schema for hosts and sites (single site `id`)', () => {
+	it('parses a typed pinnace.json schema for hosts + gateways (INFRA only)', () => {
 		const cfg = resolveConfig({file: fileConfig, env: {}, cli: {}});
 		expect(cfg.hosts[0].role).toBe('publisher');
 		expect(cfg.hosts[0].publisherEndpoint).toBe('https://a.example/records');
-		expect(cfg.sites[0].id).toBe('mysite');
-		expect(cfg.sites[0].mode).toBe('ipns');
-		expect(cfg.sites[0].ensName).toBe('mysite.eth');
 		expect(cfg.gateways).toEqual(['https://dweb.link']);
-		// A site has NO `name`/`keyId` surface: the identity is one `id`.
-		const site0 = cfg.sites[0] as unknown as Record<string, unknown>;
-		expect(site0.name).toBeUndefined();
-		expect(site0.keyId).toBeUndefined();
+	});
+});
+
+describe('pinnace.json is INFRA only — sites live in MFS, not in the config', () => {
+	it('IGNORES a `sites` array in the file (it never surfaces on the resolved config)', () => {
+		// A stale config from the old model: the sites array must be inert, exactly
+		// as a stray `master`/`token` field is (the site + its per-site metadata are
+		// the node's MFS wrapper, not a config surface).
+		const staleFile = {
+			...fileConfig,
+			sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
+		} as unknown as PinnaceConfigFile;
+		const cfg = resolveConfig({file: staleFile, env: {}, cli: {}});
+		expect((cfg as unknown as {sites?: unknown}).sites).toBeUndefined();
+		// hosts/gateways are unchanged by the stale key.
+		expect(cfg.hosts.map((h) => h.name)).toEqual(['a']);
+		expect(cfg.gateways).toEqual(['https://dweb.link']);
+	});
+});
+
+describe('the config file is OPTIONAL — a CLI endpoint yields a single-node target', () => {
+	it('with NO file at all, a CLI endpoint resolves ONE publisher host', () => {
+		const cfg = resolveConfig({
+			file: {},
+			env: {},
+			cli: {endpoint: 'https://solo.example'},
+		});
+		expect(cfg.hosts.length).toBe(1);
+		expect(cfg.hosts[0]).toMatchObject({
+			name: CLI_ENDPOINT_HOST_NAME,
+			endpoint: 'https://solo.example',
+			role: 'publisher',
+		});
+	});
+
+	it('its token stays env-only, under the SAME PINNACE_HOST_<NAME>_TOKEN convention', () => {
+		const envVar = hostTokenEnvVar(CLI_ENDPOINT_HOST_NAME);
+		expect(envVar).toBe('PINNACE_HOST_PUBLISHER_TOKEN');
+		const token = resolveHostToken({
+			hostName: CLI_ENDPOINT_HOST_NAME,
+			env: {[envVar]: 'solo-token'},
+		});
+		expect(token).toBe('solo-token');
+		// And with no env token it is the same LOUD, named failure as any host.
+		expect(() =>
+			resolveHostToken({hostName: CLI_ENDPOINT_HOST_NAME, env: {}}),
+		).toThrow(MissingHostTokenError);
+	});
+
+	it('a CLI endpoint WINS over the file hosts (arg > file), narrowing to that node', () => {
+		const cfg = resolveConfig({
+			file: fileConfig,
+			env: {PINNACE_HOST_A_ENDPOINT: 'https://env.example'},
+			cli: {endpoint: 'https://solo.example'},
+		});
+		expect(cfg.hosts.map((h) => h.endpoint)).toEqual(['https://solo.example']);
+		// The rest of the file layer still applies (only hosts are replaced).
+		expect(cfg.gateways).toEqual(['https://dweb.link']);
 	});
 });
 
@@ -140,11 +184,12 @@ describe('bearer token is env-only (never a pinnace.json field, like the master)
 });
 
 describe('single site `id` is BOTH the MFS entry and the frozen KDF input', () => {
-	it('an `id`-declared site derives the pinned golden-vector id (frozen KDF unchanged)', () => {
+	it('the `id` ARG derives the pinned golden-vector id (frozen KDF unchanged)', () => {
 		// The golden vector: (master, id) = (test-master-secret, mysite) -> k51...
-		// The config surface passes the single `id` straight into the derivation.
-		const site = {id: 'mysite', mode: 'ipns', sourceDir: './dist'} as const;
-		const id = deriveIpnsId({master: 'test-master-secret', keyId: site.id});
+		// The id now comes from the command line (there is no config site entry to
+		// look it up in); it feeds the frozen derivation unchanged.
+		const siteId = 'mysite';
+		const id = deriveIpnsId({master: 'test-master-secret', keyId: siteId});
 		expect(id).toBe(
 			'k51qzi5uqu5dkkob0ou1d9xbkr1yskaj07trqc5czn58kvkos6n7y2yid3u4n5',
 		);

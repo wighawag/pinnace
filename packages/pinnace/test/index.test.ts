@@ -14,7 +14,6 @@ import type {PinnaceConfigFile} from '../src/config/config-resolution.js';
 function seamContext(): RunContext {
 	const file: PinnaceConfigFile = {
 		hosts: [{name: 'a', endpoint: 'https://a.example', role: 'publisher'}],
-		sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
 	};
 	const deps: Partial<ClientDeps> = {
 		runNodeCommand: async (verb) => ({verb, sites: []}),

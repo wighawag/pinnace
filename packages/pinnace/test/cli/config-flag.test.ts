@@ -43,7 +43,6 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 /** A representative in-memory pinnace.json the loader can return. */
 const fileConfig: PinnaceConfigFile = {
 	hosts: [{name: 'a', endpoint: 'https://a.example', role: 'publisher'}],
-	sites: [{id: 'mysite', mode: 'ipns', sourceDir: './dist'}],
 };
 
 /** A loader that RECORDS the path it was called with (undefined ⇒ default). */
