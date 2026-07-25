@@ -1,9 +1,0 @@
----
-'pinnace': minor
----
-
-`pinnace pin` can now MIGRATE from an existing IPNS name: `pinnace pin --from-ipns <source-ipns-name> --as <name> [--mode ipfs|ipns]`. A pin takes EXACTLY ONE source, the positional `<cid>` XOR `--from-ipns <name>` (both, or neither, is a loud usage error). With `--from-ipns`, pinnace resolves that SOURCE name (`name/resolve`, on the first reachable target) to the cid it points at right now, prints `resolved ipns <source> -> <cid> (via <node>)`, and then runs the UNCHANGED pin flow on that cid: the redundant `pin/add` on every node, the MFS placement at `/sites/<name>`, and, with `--mode ipns`, the publish under the operator's OWN master-derived key.
-
-That makes ENS migration one command: `pinnace pin --from-ipns <src> --as ronan --mode ipns` pins the source's current content on your nodes and prints `ipns://<your-id>` to point `ronan.eth` at. What you get is YOUR OWN name over a SNAPSHOT of someone else's content: no key changes hands, and nothing follows the source afterwards. Pulling a newer snapshot is re-running the same command (it re-resolves and re-publishes; your name stays stable, only the cid it points at moves), and the CLI says so on every migrate. A source name that resolves on no node is a loud `PinSourceResolveError` (exit 1) carrying Kubo's own message, never a silent success.
-
-Under it: `KuboRpcClient.nameResolve(name)` issues `name/resolve?arg=/ipns/<name>&recursive=true` with the node's bearer and parses the returned `/ipfs/<cid>` (a bare `k51...`, an `/ipns/<id>` path and an `ipns://<id>` address all normalise; a non-2xx raises the usual loud `KuboRpcError`). `pinExternal`'s `cid` became optional next to the new `fromIpns`, exactly one of which is required, and its result reports `fromIpns` + `resolvedBy` alongside the resolved `cid`.

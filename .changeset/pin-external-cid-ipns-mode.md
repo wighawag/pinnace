@@ -1,9 +1,0 @@
----
-'pinnace': minor
----
-
-`pinnace pin <cid> --as <name>` gains `--mode ipfs|ipns`. The default `ipfs` is unchanged (fetch + pin on every node, tracked in MFS at `/sites/<name>`, addressed by the immutable `ipfs://<cid>`). `--mode ipns` ADDS your OWN stable name for content you mirror: the per-site key derived from the env-only master + the `--as <name>` id is imported onto the PUBLISHER node (the same `key/import` `promote` makes, skipped when the publisher already holds it), which then signs `name/publish arg=/ipfs/<cid> key=<name>`. The CLI prints the resulting `ipns://<id>` — the same `k51...` `pinnace derive <name>` prints, so you can set a contenthash before ever pinning. Re-pinning a NEWER CID under the same `--as <name>` re-publishes, so the name follows the new snapshot while staying stable.
-
-The pin still fans out to EVERY node; only the publisher signs (a replica is keyless and never signs — it re-announces via the on-box `mirror` timer, and because the pin sits at `/sites/<name>` with a same-named key on the publisher, an ipns-mode pin inherits the deployed-site failover machinery for free). `--mode ipns` with no publisher among the targets (a publisher-less config, or `--host` pointing at a replica) is a LOUD refusal before any node is touched, as is an unset `PINNACE_MASTER`.
-
-Under it: `pinExternal` takes `mode` + the `derived` key and its targets carry an optional `role`; per-node results now report `published`/`ipns`, and a failed publish is its own `PinStageError` stage (`publish`, the content IS pinned). The `key/list` + `name/publish` call shape moved into one shared home (`lookupIpnsKeyId` + `publishSiteRecord`, exported), now used by deploy's ipns mode, `pin --mode ipns` and the on-box republish timer alike, so the record lifetime/ttl cannot drift between them.
