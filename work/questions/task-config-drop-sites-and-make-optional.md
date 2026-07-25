@@ -39,3 +39,13 @@
 <!-- q4 fields: id=q4 kind=stuck -->
 
 **Your answer** (write below this line):
+
+## Q5
+
+**'task:config-drop-sites-and-make-optional' was bounced — how should we proceed?**
+
+> PR/code review (Gate 2) ran but its verdict could not be parsed: review agent launch failed
+
+<!-- q5 fields: id=q5 kind=stuck -->
+
+**Your answer** (write below this line):
