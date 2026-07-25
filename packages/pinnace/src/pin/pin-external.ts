@@ -470,7 +470,7 @@ function canSign(target: PinTarget): boolean {
  * node does not hold.
  */
 async function pinOnNode(target: PinTarget, plan: PinPlan): Promise<PinNodeOk> {
-	const {cid, name, recursive, sitesDir} = plan;
+	const {cid, name, recursive, sitesDir, mode} = plan;
 	const client = clientFor(target);
 
 	// 1. Fetch + pin. This is the step that needs the content to be RETRIEVABLE.
@@ -484,9 +484,12 @@ async function pinOnNode(target: PinTarget, plan: PinPlan): Promise<PinNodeOk> {
 		);
 	}
 
-	// 2. Track it like a site: /sites/<name> is what warm/republish/status read.
+	// 2. Track it like a site: the /sites/<name> wrapper (content +
+	//    metadata.json) is what warm/republish/status read. The metadata records
+	//    the `mode` this pin ran in; the `ensName` lever is the
+	//    `deploy-pin-write-site-metadata` task's job.
 	try {
-		await placeInMfs(client, sitesDir, name, cid);
+		await placeInMfs(client, sitesDir, name, cid, {mode});
 	} catch (cause) {
 		throw new PinStageError(
 			'place',

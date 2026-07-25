@@ -54,7 +54,9 @@ function withDistinctCids(mock: MockKuboApi): MockKuboApi {
 			if (url.pathname.endsWith('/files/stat')) {
 				const arg = url.searchParams.get('arg') ?? '';
 				await base(input, init); // record the call
-				const cid = arg.endsWith('/alice.eth') ? 'bafyalice' : 'bafybob';
+				// The stat targets the wrapper's CONTENT subpath
+				// (`/sites/<id>/content`), so match on the id INSIDE the path.
+				const cid = arg.includes('/alice.eth/') ? 'bafyalice' : 'bafybob';
 				return new Response(JSON.stringify({Hash: cid, Type: 'directory'}), {
 					status: 200,
 					headers: {'content-type': 'application/json'},

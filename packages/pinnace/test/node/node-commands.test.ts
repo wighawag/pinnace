@@ -48,6 +48,8 @@ function mockWithTwoSites(): MockKuboApi {
 	// files/stat is single-path; the mock returns the same canned hash for any
 	// path, which is fine — the test asserts the CALLS, not distinct CIDs.
 	mock.on('files/stat', {json: {Hash: 'bafysite', Type: 'directory'}});
+	// No metadata.json seeded by default: an unregistered path answers `{}`,
+	// which is exactly the empty metadata a site without one discovers as.
 	return mock;
 }
 
@@ -201,18 +203,54 @@ describe('pinnace node — role gating (scheduling all timers on every box is sa
 	});
 });
 
-describe('site auto-discovery from MFS /sites/*', () => {
-	it('lists /sites and stats each entry for its current CID', async () => {
+describe('site auto-discovery from MFS /sites/* (wrapper layout)', () => {
+	it('lists /sites and stats each entry CONTENT subpath for its current CID', async () => {
 		const mock = mockWithTwoSites();
 		const client = clientWith(mock);
 		const sites = await discoverSites(client, '/sites');
 		expect(sites.map((s) => s.id)).toEqual(['alice.eth', 'bob']);
 		expect(sites.every((s) => s.cid === 'bafysite')).toBe(true);
-		// It hit files/ls once on /sites, then files/stat per entry.
+		// It hit files/ls once on /sites, then files/stat of each entry's CONTENT
+		// subpath — an entry is now a WRAPPER dir, whose own hash is NOT the site's
+		// content cid.
 		const ls = mock.requestsFor('files/ls');
 		expect(ls.length).toBe(1);
 		expect(ls[0].query.get('arg')).toBe('/sites');
-		expect(mock.requestsFor('files/stat').length).toBe(2);
+		expect(
+			mock.requestsFor('files/stat').map((r) => r.query.get('arg')),
+		).toEqual(['/sites/alice.eth/content', '/sites/bob/content']);
+	});
+
+	it('reads each site metadata.json and carries it on the discovered site', async () => {
+		const mock = mockWithTwoSites();
+		mock.on('files/read', {text: '{"ensName":"warmed.eth","mode":"ipns"}'});
+		const sites = await discoverSites(clientWith(mock), '/sites');
+		expect(sites.map((s) => s.metadata)).toEqual([
+			{ensName: 'warmed.eth', mode: 'ipns'},
+			{ensName: 'warmed.eth', mode: 'ipns'},
+		]);
+		expect(
+			mock.requestsFor('files/read').map((r) => r.query.get('arg')),
+		).toEqual(['/sites/alice.eth/metadata.json', '/sites/bob/metadata.json']);
+	});
+
+	it('tolerates ABSENT metadata: empty metadata, never a discovery failure', async () => {
+		const mock = mockWithTwoSites();
+		// A site placed before metadata existed (or by an older pinnace): files/read
+		// is a loud 500 from Kubo, which discovery must absorb.
+		mock.on('files/read', {status: 500, text: 'file does not exist'});
+		const sites = await discoverSites(clientWith(mock), '/sites');
+		expect(sites.map((s) => s.id)).toEqual(['alice.eth', 'bob']);
+		expect(sites.every((s) => s.cid === 'bafysite')).toBe(true);
+		expect(sites.map((s) => s.metadata)).toEqual([{}, {}]);
+	});
+
+	it('tolerates MALFORMED metadata: empty metadata, never a discovery failure', async () => {
+		const mock = mockWithTwoSites();
+		mock.on('files/read', {text: 'not json at all'});
+		const sites = await discoverSites(clientWith(mock), '/sites');
+		expect(sites.map((s) => s.id)).toEqual(['alice.eth', 'bob']);
+		expect(sites.map((s) => s.metadata)).toEqual([{}, {}]);
 	});
 });
 

@@ -8,13 +8,18 @@
  *
  *   - **list**   — enumerate `/sites/*` with each site's current CID and, when a
  *                  same-`id` keystore key exists, its IPNS id.
- *   - **remove** — `files/rm /sites/<id>` (the entry drops out of
- *                  warm/republish/status auto-discovery) AND `pin/rm <cid>` so
- *                  the content stops being served/announced and its storage is
- *                  reclaimed.
+ *   - **remove** — `files/rm /sites/<id>` (the whole wrapper, so the entry drops
+ *                  out of warm/republish/status auto-discovery) AND `pin/rm
+ *                  <cid>` so the content stops being served/announced and its
+ *                  storage is reclaimed.
  *   - **add**    — place an already-imported `/ipfs/<cid>` into MFS
- *                  `/sites/<id>` (mkdir parents / rm old / cp). See the
- *                  DESIGN NOTE below on its relationship to `deploy`.
+ *                  `/sites/<id>/content` (mkdir parents / rm old / cp) plus the
+ *                  wrapper's `metadata.json`. See the DESIGN NOTE below on its
+ *                  relationship to `deploy`.
+ *
+ * A site in MFS is a WRAPPER dir — `/sites/<id>/{content, metadata.json}` (see
+ * `./site-wrapper.ts`, which owns those paths). So every content-cid read here
+ * targets the `content` SUBPATH, never the wrapper dir itself.
  *
  * Every verb speaks ONLY the Kubo RPC seam (MFS + pin endpoints), so the same
  * core is usable both as a TypeScript API and behind the thin `pinnace site
@@ -36,6 +41,13 @@
  * client verbs and reuses the existing `/sites/<name>` MFS convention.
  */
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
+import {
+	encodeSiteMetadata,
+	siteContentPath,
+	siteMetadataPath,
+	siteWrapperPath,
+	type SiteMetadata,
+} from './site-wrapper.js';
 
 /** The three site-management verbs, under the `site` namespace. */
 export type SiteVerb = 'list' | 'remove' | 'add';
@@ -48,9 +60,9 @@ const DEFAULT_SITES_DIR = '/sites';
 
 /** One site as listed: its MFS `id`, current CID, and IPNS id if a key exists. */
 export interface SiteListing {
-	/** The site's single `id` (its MFS entry under `/sites/`). */
+	/** The site's single `id` (its MFS wrapper dir under `/sites/`). */
 	id: string;
-	/** The current content root CID (`files/stat --hash`). */
+	/** The current content root CID (`files/stat --hash` of `<wrapper>/content`). */
 	cid: string;
 	/** The IPNS id, if a same-`id` keystore key exists (ipfs-mode sites lack one). */
 	ipns?: string;
@@ -113,7 +125,8 @@ export async function listSites(input: ListSitesInput): Promise<SiteListing[]> {
 	const keys = await listKeys(input.client);
 	const sites: SiteListing[] = [];
 	for (const id of entries) {
-		const cid = await statCid(input.client, `${sitesDir}/${id}`);
+		// The CONTENT subpath: the wrapper dir's own hash is not the site's cid.
+		const cid = await statCid(input.client, siteContentPath(sitesDir, id));
 		if (!cid) continue; // an entry with no resolvable CID is skipped, not fatal.
 		sites.push({id, cid, ipns: keys.get(id)});
 	}
@@ -121,11 +134,12 @@ export async function listSites(input: ListSitesInput): Promise<SiteListing[]> {
 }
 
 /**
- * **remove** — delete a site: `files/rm /sites/<name>` FIRST (so it immediately
- * drops out of MFS auto-discovery and stops being served/announced/warmed),
- * THEN `pin/rm <cid>` to unpin the content so its storage is reclaimed. The CID
- * is resolved up-front with `files/stat` so we know what to unpin after the
- * entry is gone.
+ * **remove** — delete a site: `files/rm /sites/<name>` FIRST (the whole WRAPPER,
+ * recursively — content AND metadata — so it immediately drops out of MFS
+ * auto-discovery and stops being served/announced/warmed), THEN `pin/rm <cid>`
+ * to unpin the content so its storage is reclaimed. The CID is resolved up-front
+ * with `files/stat` of the wrapper's CONTENT subpath (the site's cid, not the
+ * wrapper's own hash) so we know what to unpin after the entry is gone.
  *
  * The MFS removal is the load-bearing step and is always attempted. The unpin
  * is best-effort: if the content was never pinned (or is pinned indirectly),
@@ -136,13 +150,17 @@ export async function removeSite(
 	input: RemoveSiteInput,
 ): Promise<RemoveSiteResult> {
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
-	const path = `${sitesDir}/${input.id}`;
 
-	// Resolve the CID before we remove the entry (afterwards it is gone).
-	const cid = await statCid(input.client, path);
+	// Resolve the CONTENT cid before we remove the wrapper (afterwards it is
+	// gone) — unpinning the wrapper's own hash would leave the site's content
+	// pinned forever.
+	const cid = await statCid(input.client, siteContentPath(sitesDir, input.id));
 
-	// Remove the MFS entry first: it stops being discovered/served/announced.
-	await input.client.filesRm(path, {recursive: true, force: true});
+	// Remove the whole wrapper first: it stops being discovered/served/announced.
+	await input.client.filesRm(siteWrapperPath(sitesDir, input.id), {
+		recursive: true,
+		force: true,
+	});
 
 	// Then reclaim storage by unpinning the content. Best-effort: a site that
 	// was never pinned (or pinned indirectly) must not fail the removal.
@@ -160,34 +178,70 @@ export async function removeSite(
 }
 
 /**
- * **add** — expose an existing CID as a served site by placing it into MFS at
- * `/sites/<name>` (the discoverable location warm/republish/status read). This
- * is deploy's MFS-placement step in isolation (see the module DESIGN NOTE): it
- * does NOT build or import a CAR and does NOT pin (the CID is assumed already
- * imported/pinned on the node).
+ * **add** — expose an existing CID as a served site by placing it into the MFS
+ * wrapper `/sites/<name>/` (the discoverable location warm/republish/status
+ * read). This is deploy's MFS-placement step in isolation (see the module
+ * DESIGN NOTE): it does NOT build or import a CAR and does NOT pin (the CID is
+ * assumed already imported/pinned on the node).
+ *
+ * DECISION (`site add` writes `{mode: 'ipfs'}`) — recorded because it sets a
+ * USER-VISIBLE default that a sibling task's field (`metadata`) carries.
+ * `placeInMfs` always writes the wrapper's `metadata.json`, so `add` must say
+ * something; it writes the mode it actually performed. `add` places an existing
+ * CID and NEVER touches a key or `name/publish`, which is exactly what `ipfs`
+ * mode means (CONTEXT.md `mode`), and it matches `pin`'s own `ipfs` default.
+ * Alternatives considered: (a) an `metadata`/`mode` input on `add` — a
+ * half-feature with no CLI flag behind it, and `add` has no mode surface today;
+ * (b) leaving `metadata.json` untouched when the caller has nothing to say — it
+ * would make `placeInMfs` two-behaviour at the seam every writer shares. What it
+ * touches: re-`add`ing over an EXISTING ipns-mode site rewrites its metadata to
+ * `{mode: 'ipfs'}` (an `ensName` set there is dropped); the site is restored by
+ * a `deploy`/`pin` with the intended mode, which is where per-site metadata is
+ * authored (task `deploy-pin-write-site-metadata`, whose read-modify-write
+ * preserve semantics could later be extended to `add`).
  */
 export async function addSite(input: AddSiteInput): Promise<AddSiteResult> {
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
-	await placeInMfs(input.client, sitesDir, input.id, input.cid);
+	await placeInMfs(input.client, sitesDir, input.id, input.cid, {mode: 'ipfs'});
 	return {id: input.id, cid: input.cid};
 }
 
 /**
- * The MFS-placement step: `files/mkdir /sites --parents`, `files/rm
- * /sites/<id> --recursive --force` (clear any prior content), then `files/cp
- * /ipfs/<cid> /sites/<id>`. Ported from the reference prototype's deploy MFS
- * placement (`~/searches/ipfs-hetzner/deploy-car.mjs`). Exported so `deploy`
- * can REUSE this exact sequence rather than forking it.
+ * The MFS-placement step, writing the site's WRAPPER: `files/mkdir
+ * /sites/<id> --parents` (the sites dir AND the wrapper), `files/rm
+ * /sites/<id>/content --recursive --force` (clear any prior content, leaving
+ * the wrapper), `files/cp /ipfs/<cid> /sites/<id>/content`, then `files/write
+ * /sites/<id>/metadata.json` with the per-site {@link SiteMetadata}. Ported
+ * from the reference prototype's deploy MFS placement
+ * (`~/searches/ipfs-hetzner/deploy-car.mjs`), extended with the wrapper +
+ * metadata. Exported so `deploy` and `pin` REUSE this exact sequence rather
+ * than forking it.
+ *
+ * IDEMPOTENT: re-placing a site REPLACES both parts — the content (rm + cp) and
+ * the metadata (`files/write` truncates, so a re-write never leaves a tail of
+ * the previous JSON). Re-running `deploy` for the same `id` is therefore how a
+ * site's metadata is changed; there is no separate `update` verb.
+ *
+ * `metadata` is REQUIRED, not defaulted here: what a site's metadata says is the
+ * CALLER's knowledge (deploy/pin know the mode they ran in), and a default
+ * buried at this shared seam would silently author per-site state on everyone's
+ * behalf.
  */
 export async function placeInMfs(
 	client: KuboRpcClient,
 	sitesDir: string,
 	id: string,
 	cid: string,
+	metadata: SiteMetadata,
 ): Promise<void> {
-	await client.filesMkdir(sitesDir, {parents: true});
-	await client.filesRm(`${sitesDir}/${id}`, {recursive: true, force: true});
-	await client.filesCp(`/ipfs/${cid}`, `${sitesDir}/${id}`);
+	const content = siteContentPath(sitesDir, id);
+	await client.filesMkdir(siteWrapperPath(sitesDir, id), {parents: true});
+	await client.filesRm(content, {recursive: true, force: true});
+	await client.filesCp(`/ipfs/${cid}`, content);
+	await client.filesWrite(
+		siteMetadataPath(sitesDir, id),
+		encodeSiteMetadata(metadata),
+	);
 }
 
 // ---------------------------------------------------------------------------

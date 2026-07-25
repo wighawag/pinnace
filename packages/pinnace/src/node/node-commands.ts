@@ -45,6 +45,11 @@ import {
 	republishAndExport,
 	mirrorAndReannounce,
 } from '../publisher/record-sequence.js';
+import {
+	readSiteMetadata,
+	siteContentPath,
+	type SiteMetadata,
+} from '../site/site-wrapper.js';
 
 /** The four on-box verbs, under the `node` namespace. */
 export type NodeVerb = 'republish' | 'mirror' | 'warm' | 'status';
@@ -63,12 +68,22 @@ const VERB_ROLE_GATE: Partial<Record<NodeVerb, HostRole>> = {
 	mirror: 'replica',
 };
 
-/** One site as auto-discovered from MFS `/sites/*`: its `id` and current CID. */
+/**
+ * One site as auto-discovered from MFS `/sites/*`: its `id`, current content
+ * CID, and the per-site metadata stored beside the content in the wrapper.
+ */
 export interface DiscoveredSite {
-	/** The MFS entry `id` under `/sites/` (the site's single identifier). */
+	/** The MFS wrapper `id` under `/sites/` (the site's single identifier). */
 	id: string;
-	/** The current content root CID (`files/stat --hash`). */
+	/** The current content root CID (`files/stat --hash` of `<wrapper>/content`). */
 	cid: string;
+	/**
+	 * The site's metadata from `<wrapper>/metadata.json` — the channel per-site
+	 * config reaches the box on (it reads what it can SEE, ADR-0002). ALWAYS an
+	 * object: a site with no (or unreadable) metadata discovers as `{}`, never
+	 * undefined and never a discovery failure.
+	 */
+	metadata: SiteMetadata;
 }
 
 /** Per-site outcome line a verb reports (shape is verb-specific but uniform). */
@@ -190,8 +205,12 @@ export interface NodeCommandContext {
 }
 
 /**
- * Auto-discover sites from MFS `/sites/*`: list the directory, then stat each
- * entry for its current CID. Entries without a resolvable CID are skipped.
+ * Auto-discover sites from MFS `/sites/*`: list the directory, then for each
+ * entry — a site WRAPPER dir (`./site-wrapper.ts`) — stat its `content` subpath
+ * for the current CID and read its `metadata.json`. Entries without a
+ * resolvable CONTENT cid are skipped (a wrapper that holds no content is not a
+ * servable site); metadata that is absent or unreadable is simply empty, since
+ * a site without metadata is normal, not a failure.
  * Shared by every verb (the reference scripts all begin with this same walk).
  */
 export async function discoverSites(
@@ -213,8 +232,12 @@ export async function discoverSites(
 		const id = entry?.Name;
 		if (!id) continue;
 		try {
-			const stat = await client.filesStat<{Hash?: string}>(`${sitesDir}/${id}`);
-			if (stat?.Hash) sites.push({id, cid: stat.Hash});
+			const stat = await client.filesStat<{Hash?: string}>(
+				siteContentPath(sitesDir, id),
+			);
+			if (!stat?.Hash) continue;
+			const metadata = await readSiteMetadata(client, sitesDir, id);
+			sites.push({id, cid: stat.Hash, metadata});
 		} catch {
 			// A site whose stat fails is skipped, not fatal for the others.
 		}

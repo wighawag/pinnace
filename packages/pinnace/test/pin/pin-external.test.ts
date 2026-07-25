@@ -9,6 +9,10 @@ import {
 	type PinTarget,
 } from '../../src/pin/pin-external.js';
 import {removeSite} from '../../src/site/site-management.js';
+import {
+	parseSiteMetadata,
+	type SiteMetadata,
+} from '../../src/site/site-wrapper.js';
 import {discoverSites} from '../../src/node/node-commands.js';
 import {deriveIpnsKey} from '../../src/derive/ipns-key-derivation.js';
 import {serializeIpnsKeyForImport} from '../../src/publisher/key-import.js';
@@ -21,8 +25,9 @@ import {serializeIpnsKeyForImport} from '../../src/publisher/key-import.js';
  * We assert:
  *  - the `pin/add?arg=<cid>&recursive=true` call shape + each node's OWN bearer
  *    token, on EVERY configured node (redundant by default),
- *  - the MFS placement (`files/mkdir` / `files/rm` / `files/cp`) at
- *    `/sites/<name>` so status/warm/republish auto-discover the pin,
+ *  - the MFS placement (`files/mkdir` / `files/rm` / `files/cp` / `files/write`)
+ *    into the wrapper `/sites/<name>/{content, metadata.json}` so
+ *    status/warm/republish auto-discover the pin,
  *  - the deploy-style `allSettled` partial-failure semantics (a non-empty
  *    success subset is still an overall success), including which STAGE failed,
  *  - that `site remove <name>` (the EXISTING verb) unpins a pin-added site, so
@@ -39,6 +44,15 @@ function mockNode(baseUrl: string, cid = EXTERNAL_CID): MockKuboApi {
 	const mock = new MockKuboApi(baseUrl);
 	mock.on('files/stat', {json: {Hash: cid, Type: 'directory'}});
 	return mock;
+}
+
+/** The site metadata a recorded `files/write` carried (Kubo's `file` part). */
+function metadataOf(mock: MockKuboApi): SiteMetadata {
+	const part = mock
+		.requestsFor('files/write')[0]
+		.fileParts?.find((p) => p.field === 'file');
+	if (!part) throw new Error('files/write carried no `file` part');
+	return parseSiteMetadata(part.bytes);
 }
 
 /** A pin target backed by its own recording mock (distinct baseUrl + token). */
@@ -125,7 +139,7 @@ describe('pinExternal — pin/add an arbitrary CID on EVERY node (redundant)', (
 });
 
 describe('pinExternal — MFS placement so the pin is tracked like a site', () => {
-	it('places the pinned CID at /sites/<name> (mkdir / rm / cp) AFTER pinning', async () => {
+	it('places the pinned CID at /sites/<name>/content (mkdir / rm / cp / write) AFTER pinning', async () => {
 		const a = mockNode('https://node-a.test');
 		await pinExternal({
 			targets: [targetWith(a, 'token-a')],
@@ -140,17 +154,24 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
+			'files/write',
 		]);
 
 		const mkdir = a.requestsFor('files/mkdir')[0];
-		expect(mkdir.query.get('arg')).toBe('/sites');
+		expect(mkdir.query.get('arg')).toBe('/sites/archive');
 		expect(mkdir.query.get('parents')).toBe('true');
 
 		const cp = a.requestsFor('files/cp')[0];
 		expect(cp.query.getAll('arg')).toEqual([
 			`/ipfs/${EXTERNAL_CID}`,
-			'/sites/archive',
+			'/sites/archive/content',
 		]);
+
+		// The wrapper's metadata.json records the mode the pin ran in (`ipfs` by
+		// default); the ensName lever is the sibling metadata-write task's job.
+		const write = a.requestsFor('files/write')[0];
+		expect(write.query.get('arg')).toBe('/sites/archive/metadata.json');
+		expect(metadataOf(a)).toEqual({mode: 'ipfs'});
 	});
 
 	it('lands the pin where the on-box auto-discovery (warm/status) reads sites', async () => {
@@ -166,7 +187,9 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 		// discovery (used by warm / republish / status / the dashboard) reads.
 		const placed = a
 			.requestsFor('files/cp')
-			.map((r) => r.query.getAll('arg')[1].replace('/sites/', ''));
+			.map((r) =>
+				r.query.getAll('arg')[1].replace('/sites/', '').replace('/content', ''),
+			);
 		a.on('files/ls', {json: {Entries: placed.map((Name) => ({Name}))}});
 
 		const discovered = await discoverSites(
@@ -176,7 +199,9 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 				fetchImpl: a.fetchImpl,
 			}),
 		);
-		expect(discovered).toEqual([{id: 'archive', cid: EXTERNAL_CID}]);
+		expect(discovered).toEqual([
+			{id: 'archive', cid: EXTERNAL_CID, metadata: {}},
+		]);
 	});
 
 	it('honours an explicit sitesDir', async () => {
@@ -189,7 +214,7 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 		});
 		expect(a.requestsFor('files/cp')[0].query.getAll('arg')).toEqual([
 			`/ipfs/${EXTERNAL_CID}`,
-			'/custom/archive',
+			'/custom/archive/content',
 		]);
 	});
 });
@@ -337,6 +362,7 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
+			'files/write',
 		]);
 		expect(result.mode).toBe('ipfs');
 		expect(result.ipns).toBeUndefined();
@@ -379,10 +405,14 @@ describe('pinExternal — mode ipns ADDS the publish path (publisher only)', () 
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
+			'files/write',
 			'key/list',
 			'key/import',
 			'name/publish',
 		]);
+
+		// The wrapper metadata records the ipns mode this pin ran in.
+		expect(metadataOf(a)).toEqual({mode: 'ipns'});
 
 		// The key was imported under the site name (the `--as <name>` id) as the
 		// MATERIAL Kubo signs with — the exact bytes the key-import seam produces.
@@ -570,6 +600,7 @@ describe('pinExternal: fromIpns resolves the SOURCE name, then pins that cid', (
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
+			'files/write',
 		]);
 		for (const mock of [a, b]) {
 			const pin = mock.requestsFor('pin/add');
@@ -577,7 +608,7 @@ describe('pinExternal: fromIpns resolves the SOURCE name, then pins that cid', (
 			expect(pin[0].query.get('arg')).toBe(RESOLVED_CID);
 			expect(mock.requestsFor('files/cp')[0].query.getAll('arg')).toEqual([
 				`/ipfs/${RESOLVED_CID}`,
-				'/sites/archive',
+				'/sites/archive/content',
 			]);
 		}
 

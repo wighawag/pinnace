@@ -117,6 +117,17 @@ export {
 	type GatewayFetch,
 } from './node/node-commands.js';
 export {
+	siteWrapperPath,
+	siteContentPath,
+	siteMetadataPath,
+	encodeSiteMetadata,
+	parseSiteMetadata,
+	readSiteMetadata,
+	SITE_CONTENT_ENTRY,
+	SITE_METADATA_ENTRY,
+	type SiteMetadata,
+} from './site/site-wrapper.js';
+export {
 	listSites,
 	removeSite,
 	addSite,

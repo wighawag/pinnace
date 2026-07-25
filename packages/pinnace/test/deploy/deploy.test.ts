@@ -2,8 +2,12 @@ import {describe, it, expect, beforeAll, afterAll} from 'vitest';
 import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
+import {MockKuboApi, type RecordedRequest} from '../../src/rpc/mock-kubo.js';
 import {deploy, type DeployTarget} from '../../src/deploy/deploy.js';
+import {
+	parseSiteMetadata,
+	type SiteMetadata,
+} from '../../src/site/site-wrapper.js';
 
 /**
  * Deploy tests (task `deploy-multi-target`, ACs 1-7).
@@ -12,7 +16,8 @@ import {deploy, type DeployTarget} from '../../src/deploy/deploy.js';
  * {@link MockKuboApi} (spec Testing Decisions: no live daemon). We assert:
  *  - the SAME CAR is imported (dag/import?pin-roots=true) into EVERY node, each
  *    with its OWN bearer token, all yielding the identical CID (AC 1),
- *  - each node gets the site placed in MFS /sites/<id> (mkdir/rm/cp) (AC 2),
+ *  - each node gets the site placed in the MFS wrapper /sites/<id>/ (mkdir/rm/cp
+ *    of `content` + a metadata.json write) (AC 2),
  *  - the EXACT per-mode call SEQUENCE: `ipfs` = import + MFS ONLY; `ipns` = ADDS
  *    key/list + name/publish (AC 3),
  *  - a replica / publish-disabled target does import + MFS but NEVER name/publish
@@ -44,6 +49,13 @@ beforeAll(async () => {
 afterAll(async () => {
 	await rm(tmpRoot, {recursive: true, force: true});
 });
+
+/** The site metadata a recorded `files/write` carried (Kubo's `file` part). */
+function metadataOf(req: RecordedRequest): SiteMetadata {
+	const part = req.fileParts?.find((p) => p.field === 'file');
+	if (!part) throw new Error('files/write carried no `file` part');
+	return parseSiteMetadata(part.bytes);
+}
 
 /** A target backed by its own recording mock (distinct baseUrl + token). */
 function targetWith(
@@ -124,7 +136,7 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 		expect(result.cid.length).toBeGreaterThan(0);
 	});
 
-	it('places the site in MFS /sites/<id> on every node (mkdir / rm / cp)', async () => {
+	it('places the site in the MFS wrapper /sites/<id>/{content,metadata.json} on every node', async () => {
 		const a = mockNode('https://node-a.test');
 		const b = mockNode('https://node-b.test');
 		const result = await deploy({
@@ -137,12 +149,12 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 		for (const mock of [a, b]) {
 			const mkdir = mock.requestsFor('files/mkdir');
 			expect(mkdir.length).toBe(1);
-			expect(mkdir[0].query.get('arg')).toBe('/sites');
+			expect(mkdir[0].query.get('arg')).toBe('/sites/mysite.eth');
 			expect(mkdir[0].query.get('parents')).toBe('true');
 
 			const rmReq = mock.requestsFor('files/rm');
 			expect(rmReq.length).toBe(1);
-			expect(rmReq[0].query.get('arg')).toBe('/sites/mysite.eth');
+			expect(rmReq[0].query.get('arg')).toBe('/sites/mysite.eth/content');
 			expect(rmReq[0].query.get('recursive')).toBe('true');
 			expect(rmReq[0].query.get('force')).toBe('true');
 
@@ -150,8 +162,16 @@ describe('deploy — same CAR to every node, pinned, identical CID', () => {
 			expect(cp.length).toBe(1);
 			expect(cp[0].query.getAll('arg')).toEqual([
 				`/ipfs/${result.cid}`,
-				'/sites/mysite.eth',
+				'/sites/mysite.eth/content',
 			]);
+
+			// The wrapper's metadata.json is written alongside the content; deploy
+			// records the mode it deployed under (the ensName lever is the sibling
+			// `deploy-pin-write-site-metadata` task's job).
+			const write = mock.requestsFor('files/write');
+			expect(write.length).toBe(1);
+			expect(write[0].query.get('arg')).toBe('/sites/mysite.eth/metadata.json');
+			expect(metadataOf(write[0])).toEqual({mode: 'ipfs'});
 		}
 	});
 });
@@ -172,6 +192,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
+			'files/write',
 		]);
 		expect(a.requestsFor('key/list').length).toBe(0);
 		expect(a.requestsFor('name/publish').length).toBe(0);
@@ -192,9 +213,13 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
+			'files/write',
 			'key/list',
 			'name/publish',
 		]);
+
+		// ...and the wrapper metadata records the ipns mode it deployed under.
+		expect(metadataOf(a.requestsFor('files/write')[0])).toEqual({mode: 'ipns'});
 
 		// name/publish signed /ipfs/<cid> with the site key.
 		const pub = a.requestsFor('name/publish');

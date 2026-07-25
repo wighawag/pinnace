@@ -58,8 +58,8 @@ function clientWith(mock: MockKuboApi, token = 'on-box-token') {
 }
 
 const SITES: DiscoveredSite[] = [
-	{id: 'alice.eth', cid: 'bafyalice'},
-	{id: 'bob', cid: 'bafybob'},
+	{id: 'alice.eth', cid: 'bafyalice', metadata: {mode: 'ipns'}},
+	{id: 'bob', cid: 'bafybob', metadata: {}},
 ];
 
 /** A publisher mock that resolves keys, publish, and a routing/get export. */

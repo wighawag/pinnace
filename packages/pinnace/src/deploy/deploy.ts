@@ -5,8 +5,8 @@
  * **CAR** ONCE (via the `car-build` seam), then fan out across every configured
  * **node** (each with its OWN bearer token) so all nodes serve the IDENTICAL
  * **CID** with no single point of failure. Per node the flow is: import + pin
- * the CAR (`dag/import?pin-roots=true`), then place it in MFS at `/sites/<id>`
- * (mkdir parents / rm old / cp `/ipfs/<cid>`) so `gateway warming`, IPNS
+ * the CAR (`dag/import?pin-roots=true`), then place it in the MFS wrapper
+ * `/sites/<id>/` (its `content` + `metadata.json`) so `gateway warming`, IPNS
  * republish, and `status` auto-discover it. Deploy speaks ONLY the Kubo RPC seam
  * ({@link KuboRpcClient}); it is not host-specific.
  *
@@ -187,9 +187,12 @@ async function deployToNode(
 	// 1. Import + pin the CAR (same CID as every other node).
 	await client.dagImport(built.carBytes);
 
-	// 2. Place it in MFS /sites/<id> (mkdir parents / rm old / cp /ipfs/<cid>).
+	// 2. Place it in the MFS wrapper /sites/<id>/ (content + metadata.json).
 	//    Reuses the single implementation of that sequence (site-management).
-	await placeInMfs(client, sitesDir, id, built.rootCid);
+	//    The metadata records the `mode` this deploy ran in; the `ensName` lever
+	//    (and preserving a prior one) is the `deploy-pin-write-site-metadata`
+	//    task's job, not this placement's.
+	await placeInMfs(client, sitesDir, id, built.rootCid, {mode});
 
 	// 3. Mode branch: ipns mode ADDS publish, and ONLY on a publishing publisher.
 	if (mode === 'ipns' && shouldPublish(target)) {

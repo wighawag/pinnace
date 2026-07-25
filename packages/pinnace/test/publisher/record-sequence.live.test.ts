@@ -8,6 +8,7 @@ import {
 	republishAndExport,
 	mirrorAndReannounce,
 } from '../../src/publisher/record-sequence.js';
+import {siteContentPath} from '../../src/site/site-wrapper.js';
 
 /**
  * LIVE failover smoke test (opt-in, self-skipping).
@@ -63,16 +64,18 @@ describe.skipIf(!haveLiveEnv)(
 					token: env.PINNACE_LIVE_REPLICA_TOKEN!,
 				});
 
-				// Discover the CID for the target site on the publisher.
+				// Discover the CID for the target site on the publisher: the CONTENT
+				// subpath of its MFS wrapper (`/sites/<id>/content`), never the wrapper
+				// dir, whose hash is not the site's cid.
 				const stat = await publisher.filesStat<{Hash?: string}>(
-					`/sites/${site}`,
+					siteContentPath('/sites', site),
 				);
 				const cid = stat?.Hash;
 				expect(
 					cid,
 					'publisher must serve the target site under /sites',
 				).toBeTruthy();
-				const sites = [{id: site, cid: cid!}];
+				const sites = [{id: site, cid: cid!, metadata: {}}];
 
 				// 1) Publisher signs + exports the raw record to an isolated records dir.
 				const pubCtx: NodeCommandContext = {
