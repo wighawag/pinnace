@@ -99,7 +99,7 @@ write_files:
       # pinnace version installed on the box. Both are reproducible: the same
       # cloud-init always installs the same agent on the same runtime.
       NODE_MAJOR="22"
-      PINNACE_VERSION="0.3.4"
+      PINNACE_VERSION="0.3.5"
 
   # -- Kubo installer / initializer -----------------------------------------
   - path: /usr/local/sbin/ipfs-setup.sh
@@ -305,7 +305,12 @@ write_files:
       Group=ipfs
       EnvironmentFile=/etc/pinnace-node.env
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
-      ExecStart=/usr/local/bin/pinnace node republish
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node republish
 
   - path: /etc/systemd/system/pinnace-republish.timer
     permissions: "0644"
@@ -336,7 +341,12 @@ write_files:
       Group=ipfs
       EnvironmentFile=/etc/pinnace-node.env
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
-      ExecStart=/usr/local/bin/pinnace node mirror
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node mirror
 
   - path: /etc/systemd/system/pinnace-mirror.timer
     permissions: "0644"
@@ -367,7 +377,12 @@ write_files:
       Group=ipfs
       EnvironmentFile=/etc/pinnace-node.env
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
-      ExecStart=/usr/local/bin/pinnace node warm
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node warm
 
   - path: /etc/systemd/system/pinnace-warm.timer
     permissions: "0644"
@@ -398,7 +413,12 @@ write_files:
       Group=ipfs
       EnvironmentFile=/etc/pinnace-node.env
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
-      ExecStart=/usr/local/bin/pinnace node status
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node status
 
   - path: /etc/systemd/system/pinnace-status.timer
     permissions: "0644"

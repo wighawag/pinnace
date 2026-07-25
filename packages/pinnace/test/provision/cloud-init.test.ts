@@ -170,7 +170,7 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
 		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.3.4"');
+		expect(contents).toContain('PINNACE_VERSION="0.3.5"');
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {
@@ -207,6 +207,11 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 		expect(contents).toContain('pinnace node mirror');
 		expect(contents).toContain('pinnace node warm');
 		expect(contents).toContain('pinnace node status');
+		// The unit must resolve the bin via PATH (/usr/bin/env pinnace), NOT a
+		// hardcoded prefix: nodesource npm installs to /usr/bin/pinnace, so a
+		// hardcoded /usr/local/bin/pinnace 203/EXECs the timer.
+		expect(contents).toMatch(/ExecStart=\/usr\/bin\/env pinnace node/);
+		expect(contents).not.toMatch(/\/usr\/local\/bin\/pinnace/);
 		// Each has a .timer enabled at boot.
 		expect(contents).toContain('pinnace-republish.timer');
 		expect(contents).toContain('pinnace-mirror.timer');

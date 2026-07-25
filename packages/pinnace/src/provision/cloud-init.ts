@@ -164,7 +164,7 @@ const DEFAULT_KUBO_VERSION = 'v0.38.1';
  * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
  * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
  */
-const DEFAULT_PINNACE_VERSION = '0.3.4';
+const DEFAULT_PINNACE_VERSION = '0.3.5';
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
@@ -246,7 +246,12 @@ function renderTimerUnits(t: TimerSpec): string {
       Group=ipfs
       EnvironmentFile=/etc/pinnace-node.env
       Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
-      ExecStart=/usr/local/bin/pinnace node ${t.verb}
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node ${t.verb}
 
   - path: /etc/systemd/system/pinnace-${t.verb}.timer
     permissions: "0644"
