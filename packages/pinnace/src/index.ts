@@ -23,6 +23,7 @@ export {
 	type FetchLike,
 	type FilesMkdirOptions,
 	type FilesRmOptions,
+	type PinAddOptions,
 	type NamePublishOptions,
 } from './rpc/kubo-rpc-client.js';
 export {
@@ -132,6 +133,16 @@ export {
 	type DeployNodeOk,
 	type DeployNodeFailure,
 } from './deploy/deploy.js';
+export {
+	pinExternal,
+	PinStageError,
+	type PinExternalInput,
+	type PinExternalResult,
+	type PinTarget,
+	type PinStage,
+	type PinNodeOk,
+	type PinNodeFailure,
+} from './pin/pin-external.js';
 export {
 	statusReport,
 	makeStatusOp,

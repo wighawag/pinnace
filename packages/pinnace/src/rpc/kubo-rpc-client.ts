@@ -47,6 +47,15 @@ export class KuboRpcError extends Error {
 	}
 }
 
+/** Flags accepted by `pin/add`. */
+export interface PinAddOptions {
+	/**
+	 * Pin the whole DAG (`recursive=true`, the default and normal case) rather
+	 * than the root block alone (`recursive=false`).
+	 */
+	recursive?: boolean;
+}
+
 /** Flags accepted by `files/mkdir`. */
 export interface FilesMkdirOptions {
 	/** Create parent directories as needed (`parents=true`). */
@@ -153,6 +162,29 @@ export class KuboRpcClient {
 	 */
 	pinRm<T = unknown>(cid: string): Promise<T> {
 		return this.requestJson<T>('pin/rm', new URLSearchParams({arg: cid}));
+	}
+
+	/**
+	 * `pin/add?arg=<cid>&recursive=true` — PIN an arbitrary CID, FETCHING it over
+	 * the network first if the node does not already hold the blocks. This is what
+	 * lets the operator's nodes pin external content they only have the CID for
+	 * (the `pin` verb), as opposed to `dag/import` which uploads local bytes.
+	 *
+	 * BLOCKING: Kubo resolves + fetches the whole DAG before responding, so this
+	 * call can take a long time for a large DAG, and if NOTHING on the network
+	 * serves the content it does not return until Kubo gives up (IPFS physics, not
+	 * a pinnace gap). Callers that need a bound must impose it themselves — this
+	 * client sets no timeout, because a default one would abort legitimately slow
+	 * large-DAG pins.
+	 *
+	 * `arg` takes a bare CID (or an `/ipfs/<cid>` path). `recursive` is sent
+	 * EXPLICITLY (rather than relying on Kubo's default) so the request shape
+	 * always states the intent.
+	 */
+	pinAdd<T = unknown>(cid: string, options: PinAddOptions = {}): Promise<T> {
+		const recursive = options.recursive ?? true;
+		const q = new URLSearchParams({arg: cid, recursive: String(recursive)});
+		return this.requestJson<T>('pin/add', q);
 	}
 
 	/** `files/mkdir?arg=<path>[&parents=true]`. */

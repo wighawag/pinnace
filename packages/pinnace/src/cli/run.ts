@@ -5,8 +5,8 @@
  * the core, and formats the result. ALL behaviour lives in the core (CONTEXT.md
  * `core vs cli`); nothing here re-implements domain logic.
  *
- * The client-facing verbs (provision, deploy, install-ci, status, derive) and
- * the config/env layer dispatch through an injectable {@link RunContext} seam:
+ * The client-facing verbs (provision, deploy, pin, install-ci, status, derive)
+ * and the config/env layer dispatch through an injectable {@link RunContext} seam:
  *  - {@link RunContext.deps} are the core functions each verb calls (defaults to
  *    the real core; tests inject stubs to assert dispatch + resolved args),
  *  - {@link RunContext.env} + {@link RunContext.loadConfigFile} are the env and
@@ -71,6 +71,12 @@ import {
 	type DeployTarget,
 } from '../deploy/deploy.js';
 import {
+	pinExternal as corePinExternal,
+	type PinExternalInput,
+	type PinExternalResult,
+	type PinTarget,
+} from '../pin/pin-external.js';
+import {
 	emitCi as coreEmitCi,
 	type EmitCiInput,
 	type EmittedCi,
@@ -115,6 +121,8 @@ export interface ClientDeps {
 	statusReport(input: StatusReportInput): Promise<StatusReport>;
 	/** `derive` -> the master + site `id` -> IPNS id derivation (no deploy). */
 	deriveIpnsId(input: DeriveIpnsInput): string;
+	/** `pin` -> fetch + pin an EXTERNAL CID across nodes and track it in MFS. */
+	pinExternal(input: PinExternalInput): Promise<PinExternalResult>;
 	/** `node <verb>` -> the on-box command runner (context assembled by the CLI). */
 	runNodeCommand(
 		verb: NodeVerb,
@@ -141,6 +149,7 @@ const DEFAULT_DEPS: ClientDeps = {
 	emitCi: coreEmitCi,
 	statusReport: coreStatusReport,
 	deriveIpnsId: coreDeriveIpnsId,
+	pinExternal: corePinExternal,
 	runNodeCommand: coreRunNodeCommand,
 	listSites: coreListSites,
 	removeSite: coreRemoveSite,
@@ -259,7 +268,7 @@ function resolveContext(
 /**
  * Dispatch a pinnace CLI invocation. Returns the process exit code.
  *
- * Routes the client verbs (provision/deploy/install-ci/status/derive), the
+ * Routes the client verbs (provision/deploy/pin/install-ci/status/derive), the
  * on-box `node` namespace, and the `site` namespace. A missing command is a
  * benign no-op (exit 0); an UNKNOWN command is loud (exit 1) so the surface is
  * an explicit allow-list, not a silent catch-all.
@@ -320,6 +329,9 @@ export async function run(
 	if (command === 'derive' || command === 'ipns-id') {
 		return runDerive(rest, rc);
 	}
+	if (command === 'pin') {
+		return runPin(rest, rc);
+	}
 	if (command === 'promote') {
 		return runPromote(rest, rc);
 	}
@@ -372,14 +384,26 @@ interface ParsedArgs {
  * Parse `--flag value` pairs and positionals. Flags are long-form only
  * (`--host hetzner`); a `--flag` at the end with no value is treated as `''`.
  * Positionals are everything that is not a flag or a flag value.
+ *
+ * `booleanFlags` names the flags that take NO value (`--no-recursive`): without
+ * that list a value-taking parser would swallow the following positional as the
+ * flag's value (`pin --no-recursive <cid>` would lose the CID). Omitted =>
+ * every flag is value-taking, so the other verbs are unaffected.
  */
-function parseArgs(argv: readonly string[]): ParsedArgs {
+function parseArgs(
+	argv: readonly string[],
+	booleanFlags: readonly string[] = [],
+): ParsedArgs {
 	const flags: Record<string, string> = {};
 	const positionals: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i];
 		if (token.startsWith('--')) {
 			const key = token.slice(2);
+			if (booleanFlags.includes(key)) {
+				flags[key] = 'true';
+				continue;
+			}
 			const next = argv[i + 1];
 			if (next !== undefined && !next.startsWith('--')) {
 				flags[key] = next;
@@ -637,6 +661,90 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 	const printed = rc.deps.deriveIpnsId({master, keyId: id});
 	rc.out(printed);
 	return 0;
+}
+
+/**
+ * `pin <cid> --as <name> [--host <name>] [--no-recursive]` -> core
+ * {@link ClientDeps.pinExternal}. Pins an EXTERNAL network CID (content the
+ * operator has only the CID for) on EVERY configured node by default — the same
+ * redundancy `deploy` gives — and tracks it in MFS at `/sites/<name>` so it
+ * shows on the dashboard and gets gateway-warmed.
+ *
+ * `--host <name>` NARROWS the fan-out to that one node (note this differs from
+ * `site`/`promote`, where `--host` SELECTS the single node it acts on and is
+ * required with several hosts; here omitting it means ALL nodes, matching
+ * `deploy`). Each host's token is resolved env-only and LAZILY, so a host with
+ * no resolvable token fails loud naming its exact env var. `--no-recursive`
+ * pins the root block only. Exit code follows the core's `success` (a non-empty
+ * success subset is still success).
+ */
+async function runPin(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
+	const {flags, positionals} = parseArgs(argv, ['no-recursive']);
+	const [cid] = positionals;
+	const pinName = flags['as'];
+	if (!cid || !pinName) {
+		rc.err(
+			'pinnace pin: usage: pinnace pin <cid> --as <name> [--host <name>] [--no-recursive]',
+		);
+		return 1;
+	}
+
+	const cli = cliOverridesFromFlags(flags);
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
+	if (cfg.hosts.length === 0) {
+		rc.err('pinnace pin: no hosts configured (add hosts to pinnace.json)');
+		return 1;
+	}
+
+	// Default: every configured node (redundant). --host narrows to one.
+	let hosts = cfg.hosts;
+	const hostName = flags['host'];
+	if (hostName) {
+		const match = cfg.hosts.find((h) => h.name === hostName);
+		if (!match) {
+			rc.err(
+				`pinnace pin: unknown host '${hostName}'; configured hosts: ${cfg.hosts
+					.map((h) => h.name)
+					.join(', ')}`,
+			);
+			return 1;
+		}
+		hosts = [match];
+	}
+
+	let targets: PinTarget[];
+	try {
+		targets = hosts.map((h) => ({
+			baseUrl: h.endpoint,
+			token: resolveHostToken({hostName: h.name, env: rc.env, cli}),
+		}));
+	} catch (error) {
+		if (error instanceof MissingHostTokenError) {
+			rc.err(`pinnace pin: ${error.message}`);
+			return 1;
+		}
+		throw error;
+	}
+
+	const result = await rc.deps.pinExternal({
+		targets,
+		cid,
+		name: pinName,
+		recursive: flags['no-recursive'] === undefined,
+	});
+	rc.out(
+		`pinned ${result.cid} as ${result.name}${result.recursive ? '' : ' (root block only)'}`,
+	);
+	for (const ok of result.ok) rc.out(`  ok  ${ok.baseUrl}`);
+	for (const failure of result.failed) {
+		rc.err(
+			`  FAIL ${failure.baseUrl} (${failure.stage}): ${failure.error.message}`,
+		);
+	}
+	return result.success ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------

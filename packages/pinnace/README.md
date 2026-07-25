@@ -140,6 +140,7 @@ curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the export
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
 | `pinnace deploy [--mode ipfs\|ipns] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place in MFS; in `ipns` mode publish on the publisher. |
+| `pinnace pin <cid> --as <name> [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in MFS at `/sites/<name>` so it is warmed and shows in `status`. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace promote <id> [--host <name>]` | Derive the per-site key from the master and import it onto the host, making it the publisher (also the replica-promotion path). |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, network-announce, gateway-serves. |

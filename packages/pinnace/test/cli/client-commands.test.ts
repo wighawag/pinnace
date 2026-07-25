@@ -25,6 +25,7 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 		emitCi: [],
 		statusReport: [],
 		deriveIpnsId: [],
+		pinExternal: [],
 	};
 	const deps: Partial<ClientDeps> = {
 		provision: (input) => {
@@ -60,6 +61,22 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 		deriveIpnsId: (input) => {
 			calls.deriveIpnsId.push(input);
 			return 'k51stubid';
+		},
+		pinExternal: async (input) => {
+			calls.pinExternal.push(input);
+			return {
+				cid: input.cid,
+				name: input.name,
+				recursive: input.recursive ?? true,
+				ok: input.targets.map((t) => ({
+					baseUrl: t.baseUrl,
+					cid: input.cid,
+					name: input.name,
+					recursive: input.recursive ?? true,
+				})),
+				failed: [],
+				success: true,
+			};
 		},
 	};
 	return {deps: deps as ClientDeps, calls};
@@ -311,6 +328,123 @@ describe('derive — prints a site IPNS id from master + single `id`, NO deploy'
 		expect(code).not.toBe(0);
 		expect(calls.deriveIpnsId.length).toBe(0);
 		expect(err.join('\n')).toMatch(/master/i);
+	});
+});
+
+describe('pin <cid> --as <name> — dispatches to core pinExternal (all nodes)', () => {
+	it('resolves EVERY configured host as a target (redundant by default)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(['pin', 'bafyexternal', '--as', 'archive'], context);
+		expect(code).toBe(0);
+		expect(calls.pinExternal.length).toBe(1);
+		const input = calls.pinExternal[0] as {
+			cid: string;
+			name: string;
+			recursive: boolean;
+			targets: Array<{baseUrl: string; token: string}>;
+		};
+		expect(input.cid).toBe('bafyexternal');
+		expect(input.name).toBe('archive');
+		// Recursive is the normal case (the whole DAG).
+		expect(input.recursive).toBe(true);
+		// One target per configured host, each with its OWN env-only token.
+		expect(input.targets.map((t) => t.baseUrl)).toEqual([
+			'https://a.example',
+			'https://b.example',
+		]);
+		expect(input.targets.map((t) => t.token)).toEqual([
+			'env-token-a',
+			'env-token-b',
+		]);
+		// It reports the per-node outcome.
+		expect(out.join('\n')).toContain('https://a.example');
+		expect(out.join('\n')).toContain('https://b.example');
+	});
+
+	it('--host <name> NARROWS the fan-out to that single node', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--host', 'b'],
+			context,
+		);
+		expect(code).toBe(0);
+		const input = calls.pinExternal[0] as {
+			targets: Array<{baseUrl: string; token: string}>;
+		};
+		expect(input.targets.map((t) => t.baseUrl)).toEqual(['https://b.example']);
+		expect(input.targets[0].token).toBe('env-token-b');
+	});
+
+	it('--no-recursive pins the root block only (and does not eat the CID)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		await run(
+			['pin', '--no-recursive', 'bafyexternal', '--as', 'archive'],
+			context,
+		);
+		expect(calls.pinExternal[0]).toMatchObject({
+			cid: 'bafyexternal',
+			name: 'archive',
+			recursive: false,
+		});
+	});
+
+	it('requires the <cid> and --as <name> (usage error, never dispatches)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['pin'], context)).not.toBe(0);
+		expect(await run(['pin', 'bafyexternal'], context)).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('--as');
+	});
+
+	it('rejects an unknown --host loudly, naming the configured hosts', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--host', 'nope'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('nope');
+	});
+
+	it('FAILS LOUD naming the missing env var when a host has no token', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({
+			deps,
+			env: {PINNACE_HOST_A_TOKEN: 'env-token-a'},
+		});
+		const code = await run(['pin', 'bafyexternal', '--as', 'archive'], context);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('PINNACE_HOST_B_TOKEN');
+	});
+
+	it('exits non-zero when NO node pinned the content', async () => {
+		const {deps} = recordingDeps();
+		const failing: ClientDeps = {
+			...deps,
+			pinExternal: async (input) => ({
+				cid: input.cid,
+				name: input.name,
+				recursive: true,
+				ok: [],
+				failed: input.targets.map((t) => ({
+					baseUrl: t.baseUrl,
+					stage: 'pin' as const,
+					error: new Error('merkledag: not found'),
+				})),
+				success: false,
+			}),
+		};
+		const {context, err} = ctx({deps: failing, env: {...hostTokenEnv}});
+		const code = await run(['pin', 'bafymissing', '--as', 'archive'], context);
+		expect(code).not.toBe(0);
+		expect(err.join('\n')).toContain('merkledag: not found');
 	});
 });
 

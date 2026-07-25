@@ -211,6 +211,34 @@ describe('KuboRpcClient — file-upload endpoints send multipart/form-data', () 
 		expect(mock.lastRequest!.path).toBe('pin/rm');
 		expect(mock.lastRequest!.query.get('arg')).toBe('bafysite');
 	});
+
+	it('pinAdd hits pin/add?arg=<cid>&recursive=true (recursive by default)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock, 'pin-token');
+		await client.pinAdd('bafyexternal');
+		const req = mock.lastRequest!;
+		expect(req.method).toBe('POST');
+		expect(req.path).toBe('pin/add');
+		expect(req.query.get('arg')).toBe('bafyexternal');
+		expect(req.query.get('recursive')).toBe('true');
+		expect(req.headers['authorization']).toBe('Bearer pin-token');
+	});
+
+	it('pinAdd sends recursive=false when recursion is disabled (root block only)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.pinAdd('bafyexternal', {recursive: false});
+		expect(mock.lastRequest!.query.get('recursive')).toBe('false');
+	});
+
+	it('pinAdd raises the loud KuboRpcError on a non-2xx (unretrievable content)', async () => {
+		const mock = new MockKuboApi().on('pin/add', {
+			status: 500,
+			text: 'merkledag: not found',
+		});
+		const client = clientWith(mock);
+		await expect(client.pinAdd('bafymissing')).rejects.toThrow(KuboRpcError);
+	});
 });
 
 describe('KuboRpcClient — error path', () => {
