@@ -14,10 +14,30 @@ Install `pinnace` as a **dev dependency** of the project whose site you deploy, 
 
 ```sh
 npm install --save-dev pinnace     # or: pnpm add -D pinnace
-npx pinnace --help                 # or: pnpm pinnace --help
+npx pinnace version                # or: pnpm pinnace version
 ```
 
 Requires Node >= 22. The docs write commands as `pinnace <...>`; run them as `npx pinnace <...>`, or wire a script into `package.json` (e.g. `"deploy": "pinnace deploy ./dist mysite"`).
+
+## Where things live
+
+`pinnace.json` is INFRASTRUCTURE only — your nodes — and it is OPTIONAL:
+
+```json
+{
+  "hosts": [
+    { "name": "publisher", "endpoint": "https://ipfs-publisher.example.com", "role": "publisher" }
+  ]
+}
+```
+
+For a single node you need no file at all: `--endpoint <url>` supplies that node on the command line, with its bearer token still env-only (`PINNACE_HOST_PUBLISHER_TOKEN`, alongside `PINNACE_MASTER`).
+
+```sh
+pinnace deploy --endpoint https://ipfs-publisher.example.com --set-mode ipns ./dist mysite
+```
+
+A site's own state lives with the site, on the node: MFS holds each one as a wrapper directory `/sites/<id>/{content, metadata.json}`, where `content` is the site's CID and `metadata.json` is its per-site metadata (`mode`, `ensName`), written by `deploy`/`pin` and read back by the node's own loop (it is how the `warm` timer learns a site's `ensName`) and by `status`. So per-site settings are flags at deploy/pin time (`--set-mode ipfs|ipns`, `--set-ens-name [<name>]`, `--unset-ens-name`), never config entries; omitting a flag preserves what the site already stores.
 
 The full setup guide (mental model, config + secrets, and the end-to-end provision -> deploy -> failover flow) is in the package README:
 
