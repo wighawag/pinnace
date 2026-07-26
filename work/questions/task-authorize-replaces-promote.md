@@ -59,3 +59,13 @@
 <!-- q6 fields: id=q6 kind=stuck -->
 
 **Your answer** (write below this line):
+
+## Q7
+
+**'task:authorize-replaces-promote' was bounced — how should we proceed?**
+
+> transient infra: {"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CdQWH9Judrxbwp7uSGhaP"}
+
+<!-- q7 fields: id=q7 kind=stuck -->
+
+**Your answer** (write below this line):
