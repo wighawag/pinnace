@@ -12,6 +12,8 @@ import {
 	resolveEnsNameToWarm,
 	assertEnsNameIntent,
 	EnsNameInferenceError,
+	DEFAULT_SITE_MODE,
+	siteModeIntent,
 	type EnsNameIntent,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
@@ -193,7 +195,7 @@ function resolveFor(
 		client: clientWith(mock),
 		sitesDir: '/sites',
 		id,
-		mode: 'ipfs',
+		mode: {kind: 'set', mode: 'ipfs'},
 		ensName,
 	});
 }
@@ -252,7 +254,7 @@ describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
 		const mock = mockHolding('{"ensName":"kept.eth","mode":"ipns"}');
 		expect(await resolveFor(mock, 'blog', {kind: 'preserve'})).toEqual({
 			ensName: 'kept.eth',
-			// The MODE is the one this operation runs in, never the stored one.
+			// A STATED mode wins over the stored one (here `ipfs` was stated).
 			mode: 'ipfs',
 		});
 		expect(mock.requestsFor('files/read')[0].query.get('arg')).toBe(
@@ -286,7 +288,7 @@ describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
 				client: clientWith(mock),
 				sitesDir: '/sites',
 				id: 'blog',
-				mode: 'ipns',
+				mode: {kind: 'set', mode: 'ipns'},
 			}),
 		).toEqual({ensName: 'kept.eth', mode: 'ipns'});
 	});
@@ -301,6 +303,84 @@ describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
 			await resolveFor(mock, 'a.eth', intent);
 			expect(mock.requestsFor('files/read').length).toBe(0);
 		}
+	});
+});
+
+/**
+ * The WRITE side of `mode`, which flows through the SAME resolver as `ensName`
+ * (the requeue decision on `config-drop-sites-and-make-optional`): a STATED
+ * mode (`--set-mode`) wins, an omitted one PRESERVES what the site already
+ * stores, and only a site that stores nothing falls back to `ipfs`. So a
+ * re-deploy/re-pin can never silently DEMOTE a live `ipns` site to `ipfs`.
+ *
+ * The load-bearing detail is that BOTH preserve branches are served by the ONE
+ * read the resolver already did for `ensName` — mode is not a second round trip.
+ */
+describe('resolveSiteMetadataToWrite — the two mode intents', () => {
+	/** Resolve the metadata a write would carry under a mode intent alone. */
+	function resolveModeFor(
+		mock: MockKuboApi,
+		mode?: 'ipfs' | 'ipns',
+	): Promise<SiteMetadata> {
+		return resolveSiteMetadataToWrite({
+			client: clientWith(mock),
+			sitesDir: '/sites',
+			id: 'blog',
+			mode: siteModeIntent(mode),
+		});
+	}
+
+	it('set: the STATED mode wins over whatever the site stores', async () => {
+		const stored = mockHolding('{"mode":"ipfs"}');
+		expect((await resolveModeFor(stored, 'ipns')).mode).toBe('ipns');
+		const other = mockHolding('{"mode":"ipns"}');
+		expect((await resolveModeFor(other, 'ipfs')).mode).toBe('ipfs');
+	});
+
+	it('preserve: carries the STORED mode forward (never a silent demotion)', async () => {
+		const mock = mockHolding('{"ensName":"kept.eth","mode":"ipns"}');
+		expect(await resolveModeFor(mock)).toEqual({
+			ensName: 'kept.eth',
+			mode: 'ipns',
+		});
+	});
+
+	it('preserve: falls back to `ipfs` when the site stores nothing (first write)', async () => {
+		expect(await resolveModeFor(mockWithoutMetadata())).toEqual({
+			mode: DEFAULT_SITE_MODE,
+		});
+		expect(DEFAULT_SITE_MODE).toBe('ipfs');
+	});
+
+	it('preserve: BOTH fields come from the ONE read (never a second round trip)', async () => {
+		const mock = mockHolding('{"ensName":"kept.eth","mode":"ipns"}');
+		expect(
+			await resolveSiteMetadataToWrite({
+				client: clientWith(mock),
+				sitesDir: '/sites',
+				id: 'blog',
+			}),
+		).toEqual({ensName: 'kept.eth', mode: 'ipns'});
+		expect(mock.requestsFor('files/read').length).toBe(1);
+	});
+
+	it('reads NOTHING when both intents are total (stated mode + stated name)', async () => {
+		const mock = mockHolding('{"ensName":"kept.eth","mode":"ipns"}');
+		expect(
+			await resolveSiteMetadataToWrite({
+				client: clientWith(mock),
+				sitesDir: '/sites',
+				id: 'blog',
+				mode: {kind: 'set', mode: 'ipfs'},
+				ensName: {kind: 'unset'},
+			}),
+		).toEqual({ensName: '', mode: 'ipfs'});
+		expect(mock.requestsFor('files/read').length).toBe(0);
+	});
+
+	it('siteModeIntent: a stated mode is `set`, an omitted one is `preserve`', () => {
+		expect(siteModeIntent('ipns')).toEqual({kind: 'set', mode: 'ipns'});
+		expect(siteModeIntent(undefined)).toEqual({kind: 'preserve'});
 	});
 });
 

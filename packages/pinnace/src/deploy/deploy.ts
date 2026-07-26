@@ -16,6 +16,12 @@
  * semantics (a non-empty subset of nodes succeeding is still an overall success:
  * "the site is up on the rest").
  *
+ * PER-SITE `mode` RESOLUTION (the site's durable mode home is its MFS metadata,
+ * not a config file): `--set-mode` > the mode STORED on the publisher > `ipfs`.
+ * Omitting the flag PRESERVES, so a re-deploy of a published site keeps signing
+ * its name; the resolved value is then written to EVERY node (see
+ * {@link resolveFanOutMode}).
+ *
  * PER-SITE `mode` BRANCH (CONTEXT.md `mode`; spec's "Per-site mode branch"):
  *  - `ipfs` mode: land + pin + MFS ONLY (no key, no publish). ENS uses
  *    `ipfs://<cid>`, updated per deploy.
@@ -29,7 +35,7 @@
  * SEAM BOUNDARY (see the sibling tasks): this module wires the per-mode call
  * SEQUENCE only. The full publisher/replica record export+mirror lives in
  * `publisher-replica-model`, the `key/list` + `name/publish` call shape lives in
- * `../publisher/ipns-publish.ts` (shared with `pin --mode ipns` and the on-box
+ * `../publisher/ipns-publish.ts` (shared with `pin --set-mode ipns` and the on-box
  * republish timer), and importing the derived key into the publisher's keystore
  * lives in `key-import-publisher`. So deploy here does NOT `key/gen` or
  * `key/import` — it assumes the publisher already holds the key (looked up via
@@ -43,8 +49,11 @@ import {placeInMfs} from '../site/site-management.js';
 import {
 	assertEnsNameIntent,
 	resolveSiteMetadataToWrite,
+	siteModeIntent,
+	DEFAULT_SITE_MODE,
 	PRESERVE_ENS_NAME,
 	type EnsNameIntent,
+	type ResolvedSiteMetadata,
 } from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
 import type {HostRole, SiteMode} from '../config/config-resolution.js';
@@ -82,8 +91,17 @@ export interface DeployInput {
 	car?: BuiltCar;
 	/** The site's single `id`: its MFS entry `/sites/<id>` and, in ipns mode, its key name. */
 	id: string;
-	/** ipfs (land+pin+MFS) or ipns (also key/list + name/publish on publishers). */
-	mode: SiteMode;
+	/**
+	 * The mode this deploy STATES (`--set-mode`): ipfs (land+pin+MFS) or ipns
+	 * (also key/list + name/publish on publishers).
+	 *
+	 * OMITTED = PRESERVE, exactly as omitting the ensName flags does: the deploy
+	 * runs in the mode the site is ALREADY stored under on the publisher, and
+	 * only a site that stores none falls back to {@link DEFAULT_SITE_MODE}. So a
+	 * plain re-deploy of a published site still signs its record instead of
+	 * silently demoting it (see {@link DeployResult.mode} for what it resolved to).
+	 */
+	mode?: SiteMode;
 	/**
 	 * What this deploy says about the site's `ensName` in the wrapper metadata
 	 * ({@link EnsNameIntent}). Omitted = PRESERVE: the deploy leaves whatever the
@@ -132,9 +150,9 @@ export interface DeployResult {
 }
 
 /**
- * Deploy a site: build the CAR ONCE, then import the SAME CAR into every target
- * (each with its own token), pin it, place it in MFS, and (in `ipns` mode, on
- * publisher targets) publish the IPNS record. Fans out with
+ * Deploy a site: RESOLVE the mode, build the CAR ONCE, then import the SAME CAR
+ * into every target (each with its own token), pin it, place it in MFS, and (in
+ * `ipns` mode, on publisher targets) publish the IPNS record. Fans out with
  * `Promise.allSettled`: a node that fails is reported in {@link DeployResult.failed}
  * and does not sink the others; a non-empty success subset is still an overall
  * success ({@link DeployResult.success}). Throws only if NO node succeeds is
@@ -147,7 +165,7 @@ export interface DeployResult {
  * touched, so a refusal leaves nothing half-done.
  */
 export async function deploy(input: DeployInput): Promise<DeployResult> {
-	const {sourceDir, car, id, mode, targets} = input;
+	const {sourceDir, car, id, targets} = input;
 	if ((sourceDir === undefined) === (car === undefined)) {
 		throw new Error('deploy requires exactly one of `sourceDir` or `car`');
 	}
@@ -155,14 +173,24 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 	assertEnsNameIntent(ensName, id);
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
 
+	// The ONE mode this whole fan-out runs in (see resolveFanOutMode): a stated
+	// mode, else the PUBLISHER's stored one, else the conservative default.
+	const resolved = await resolveFanOutMode(input, sitesDir, ensName);
+	const mode = resolved.mode;
+
 	// Build the CAR ONCE — the same bytes (and thus the same CID) land on every
 	// node (redundancy, no single point of failure).
 	const built: BuiltCar = car ?? (await buildCar(sourceDir as string));
 
+	const plan: DeployPlan = {built, id, mode, sitesDir, ensName};
 	// Fan out. allSettled so one node's failure never sinks the others.
 	const settled = await Promise.allSettled(
-		targets.map((target) =>
-			deployToNode(target, built, id, mode, sitesDir, ensName),
+		targets.map((target, i) =>
+			deployToNode(
+				target,
+				plan,
+				i === resolved.resolvedFrom ? resolved.metadata : undefined,
+			),
 		),
 	);
 
@@ -186,44 +214,103 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 	};
 }
 
+/** The resolved per-deploy plan every target is executed against (internal). */
+interface DeployPlan {
+	built: BuiltCar;
+	id: string;
+	/** The RESOLVED mode the WHOLE fan-out runs in (never the raw input). */
+	mode: SiteMode;
+	sitesDir: string;
+	ensName: EnsNameIntent;
+}
+
 /**
- * Deploy the (already-built) CAR to ONE node: import + pin, place in MFS, then
- * (in ipns mode on a publishing publisher) key/list + name/publish. Rejects on
- * any RPC failure so the caller's allSettled records it as a per-node failure.
+ * Resolve the ONE mode this deploy runs in, from the PUBLISHER target — the
+ * node that holds the key and actually signs.
+ *
+ * Metadata is stored PER NODE, but "does this deploy sign IPNS?" is a SINGLE
+ * decision for the whole fan-out, so it cannot be taken per node: it is taken
+ * once, here, and then STATED to every target (so no two nodes can disagree
+ * about how the site is addressed). A stated `mode` needs no node at all; only
+ * the `preserve` intent reads, and that read doubles as the publisher's own
+ * ensName read-modify-write (returned as `metadata`, so the publisher is not
+ * read twice). With NO publisher among the targets there is nothing to resolve
+ * from — and nothing that could sign — so the default applies.
  */
-async function deployToNode(
-	target: DeployTarget,
-	built: BuiltCar,
-	id: string,
-	mode: SiteMode,
+async function resolveFanOutMode(
+	input: DeployInput,
 	sitesDir: string,
 	ensName: EnsNameIntent,
-): Promise<DeployNodeOk> {
-	const client = new KuboRpcClient({
+): Promise<{
+	mode: SiteMode;
+	/** Index of the target the mode was resolved from, or -1. */
+	resolvedFrom: number;
+	/** That target's fully-resolved metadata (reused for its own write). */
+	metadata?: ResolvedSiteMetadata;
+}> {
+	const intent = siteModeIntent(input.mode);
+	if (intent.kind === 'set') return {mode: intent.mode, resolvedFrom: -1};
+	const resolvedFrom = input.targets.findIndex(
+		(target) => target.role === 'publisher',
+	);
+	if (resolvedFrom < 0) return {mode: DEFAULT_SITE_MODE, resolvedFrom};
+	const metadata = await resolveSiteMetadataToWrite({
+		client: clientFor(input.targets[resolvedFrom]),
+		sitesDir,
+		id: input.id,
+		mode: intent,
+		ensName,
+	});
+	return {mode: metadata.mode, resolvedFrom, metadata};
+}
+
+/** The per-node client every step of the deploy speaks through. */
+function clientFor(target: DeployTarget): KuboRpcClient {
+	return new KuboRpcClient({
 		baseUrl: target.baseUrl,
 		token: target.token,
 		fetchImpl: target.fetchImpl,
 	});
+}
+
+/**
+ * Deploy the (already-built) CAR to ONE node: import + pin, place in MFS, then
+ * (in ipns mode on a publishing publisher) key/list + name/publish. Rejects on
+ * any RPC failure so the caller's allSettled records it as a per-node failure.
+ *
+ * `metadata` is this node's ALREADY-resolved metadata when the fan-out's mode
+ * was read from it (the publisher); every other node resolves its own here.
+ */
+async function deployToNode(
+	target: DeployTarget,
+	plan: DeployPlan,
+	metadata?: ResolvedSiteMetadata,
+): Promise<DeployNodeOk> {
+	const {built, id, mode, sitesDir, ensName} = plan;
+	const client = clientFor(target);
 
 	// 1. Import + pin the CAR (same CID as every other node).
 	await client.dagImport(built.carBytes);
 
 	// 2. Place it in the MFS wrapper /sites/<id>/ (content + metadata.json).
 	//    Reuses the single implementation of that sequence (site-management).
-	//    The metadata records the `mode` this deploy ran in plus the `ensName`
-	//    state the operator asked for — resolved against THIS node's existing
-	//    metadata when the intent is `preserve` (the read-modify-write that makes
-	//    omitting the flags leave an existing name alone).
-	const metadata = await resolveSiteMetadataToWrite({
-		client,
-		sitesDir,
-		id,
-		mode,
-		ensName,
-	});
-	await placeInMfs(client, sitesDir, id, built.rootCid, metadata);
+	//    The metadata records the RESOLVED mode (the same one on every node) plus
+	//    the `ensName` state the operator asked for — resolved against THIS node's
+	//    existing metadata when the intent is `preserve` (the read-modify-write
+	//    that makes omitting the flags leave an existing name alone).
+	const resolved =
+		metadata ??
+		(await resolveSiteMetadataToWrite({
+			client,
+			sitesDir,
+			id,
+			mode: {kind: 'set', mode},
+			ensName,
+		}));
+	await placeInMfs(client, sitesDir, id, built.rootCid, resolved);
 
 	// 3. Mode branch: ipns mode ADDS publish, and ONLY on a publishing publisher.
+	//    It follows the RESOLVED mode, so a preserved `ipns` site is still signed.
 	if (mode === 'ipns' && shouldPublish(target)) {
 		const ipns = await publish(client, id, built.rootCid);
 		return {baseUrl: target.baseUrl, cid: built.rootCid, ipns, published: true};
@@ -245,14 +332,14 @@ function shouldPublish(target: DeployTarget): boolean {
  * The publish path (ipns mode, publisher only): `key/list` to resolve the site
  * key's IPNS id, then `name/publish` to sign+refresh the record for
  * `/ipfs/<cid>` — both through the shared `ipns-publish` seam, so deploy, `pin
- * --mode ipns` and the on-box republish timer issue the IDENTICAL calls. The
+ * --set-mode ipns` and the on-box republish timer issue the IDENTICAL calls. The
  * keystore key name is the site's single `id` (the same value key-import imports
  * under — one identifier, so the lookup cannot miss by a name/keyId split).
  *
  * Does NOT `key/gen`/`key/import`: the key is provisioned by the sibling
  * `key-import-publisher` task; here we assume it exists. If it does not yet, we
  * skip the publish (returning undefined) rather than silently generating a key
- * deploy has no business owning. (`pin --mode ipns` composes the same two calls
+ * deploy has no business owning. (`pin --set-mode ipns` composes the same two calls
  * with the OPPOSITE policy: it imports the derived key first, because the
  * operator just asked for that name.)
  */

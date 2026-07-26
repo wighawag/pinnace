@@ -49,7 +49,9 @@ import {
 import {
 	assertEnsNameIntent,
 	EnsNameInferenceError,
+	DEFAULT_SITE_MODE,
 	type EnsNameIntent,
+	type SiteModeIntent,
 } from '../site/site-wrapper.js';
 import {makeStatusOp} from '../status/status-report.js';
 import {
@@ -78,6 +80,7 @@ import {
 import {
 	pinExternal as corePinExternal,
 	PinSourceResolveError,
+	PinDerivedKeyRequiredError,
 	type PinExternalInput,
 	type PinExternalResult,
 	type PinTarget,
@@ -105,7 +108,6 @@ import {
 	type PinnaceConfigFile,
 	type EnvRecord,
 	type CliOverrides,
-	type SiteMode,
 	type HostRole,
 } from '../config/config-resolution.js';
 
@@ -482,18 +484,20 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 }
 
 /**
- * `deploy [--mode <m>] [--set-ens-name [<name>] | --unset-ens-name] <dir> <id>`
- * -> core {@link ClientDeps.deploy}. Resolves every configured host into a
+ * `deploy [--set-mode <m>] [--set-ens-name [<name>] | --unset-ens-name] <dir>
+ * <id>` -> core {@link ClientDeps.deploy}. Resolves every configured host into a
  * {@link DeployTarget} (each host's OWN token resolved env-only, LAZILY, via
  * {@link resolveHostToken} — CLI > env, no file). A host with no resolvable
  * token FAILS LOUD naming its exact env var. Prints the resulting CID /
  * per-node breakdown.
  *
- * MODE SOURCE (the whole order): `--mode` > {@link DEFAULT_DEPLOY_MODE}. There
- * is no config source any more — `pinnace.json` is infra-only, and the durable
- * per-site home of `mode` is the site's MFS `metadata.json`, which THIS deploy
- * (re)writes from the mode it ran in. A `--mode` that is neither `ipfs` nor
- * `ipns` is an unresolved mode: a loud refusal naming the site, never a guess.
+ * MODE SOURCE (the whole order): `--set-mode` > the site's STORED MFS
+ * `metadata.json` mode > `{@link DEFAULT_SITE_MODE}`. There is no config source:
+ * `pinnace.json` is infra-only, and the durable per-site home of `mode` is the
+ * site's metadata, which the core reads (from the publisher) and rewrites. So
+ * OMITTING `--set-mode` PRESERVES — exactly like omitting `--set-ens-name` —
+ * and the CLI simply states nothing; only an INVALID value is an unresolved
+ * mode: a loud refusal naming the site, never a guess.
  *
  * The two ensName verb-flags ({@link ensNameIntentFromFlags}) decide what the
  * deploy writes into the site's MFS `metadata.json`; omitting them leaves the
@@ -507,29 +511,21 @@ async function runDeploy(
 	const [dir, siteId] = positionals;
 	if (!dir || !siteId) {
 		rc.err(
-			'pinnace deploy: usage: pinnace deploy [--mode ipfs|ipns] ' +
+			'pinnace deploy: usage: pinnace deploy [--set-mode ipfs|ipns] ' +
 				'[--set-ens-name [<name>] | --unset-ens-name] <dir> <id>',
 		);
 		return 1;
 	}
 	const ensName = ensNameIntent('pinnace deploy', flags, siteId, rc);
 	if (!ensName) return 1; // ensNameIntent already emitted the loud error.
+	// The site's mode: --set-mode > the STORED mode > the default. Only the first
+	// tier is the CLI's business; stating nothing is the PRESERVE intent, which
+	// the core resolves against the site's MFS metadata.
+	const mode = siteModeIntentFromFlags('pinnace deploy', flags, siteId, rc);
+	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
 
 	const cli = cliOverridesFromFlags(flags);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
-
-	// The site's mode: --mode arg > the default. NO config source (sites are not
-	// a config surface any more); the mode this deploy runs in is what gets
-	// written into the site's MFS metadata.
-	const mode = (flags['mode'] ?? DEFAULT_DEPLOY_MODE) as SiteMode;
-	if (mode !== 'ipfs' && mode !== 'ipns') {
-		rc.err(
-			`pinnace deploy: mode for '${siteId}' is unresolved ('${flags['mode']}'); ` +
-				`pass --mode ipfs|ipns (mode comes from --mode alone, defaulting to ` +
-				`'${DEFAULT_DEPLOY_MODE}')`,
-		);
-		return 1;
-	}
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace deploy: ${NO_HOSTS_HINT}`);
 		return 1;
@@ -554,7 +550,7 @@ async function runDeploy(
 	const input: DeployInput = {
 		sourceDir: dir,
 		id: siteId,
-		mode,
+		...(mode.kind === 'set' ? {mode: mode.mode} : {}),
 		targets,
 		ensName,
 	};
@@ -690,11 +686,11 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 
 /** The two forms of the `pin` verb: one source each, never both, never neither. */
 const PIN_USAGE =
-	'usage: pinnace pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]\n' +
-	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]';
+	'usage: pinnace pin <cid> --as <name> [--set-mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]\n' +
+	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [--set-mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]';
 
 /**
- * `pin <cid> --as <name> [--mode ipfs|ipns] [--host <name>] [--no-recursive]` ->
+ * `pin <cid> --as <name> [--set-mode ipfs|ipns] [--host <name>] [--no-recursive]` ->
  * core {@link ClientDeps.pinExternal}. Pins an EXTERNAL network CID (content the
  * operator has only the CID for) on EVERY configured node by default — the same
  * redundancy `deploy` gives — and tracks it in MFS at `/sites/<name>` so it
@@ -704,27 +700,33 @@ const PIN_USAGE =
  * <name>`; giving both or neither is a usage error. `--from-ipns` MIGRATES from
  * an existing IPNS name: the core resolves that SOURCE name to the cid it points
  * at right now and pins THAT (reported as `resolved ipns <src> -> <cid>`), so
- * `pin --from-ipns <src> --as ronan --mode ipns` is the one-command ENS
+ * `pin --from-ipns <src> --as ronan --set-mode ipns` is the one-command ENS
  * migration: the source's current content on the operator's nodes, published
  * under the OPERATOR's own `ipns://<id>`. It is a SNAPSHOT, not a follow: the CLI
  * says so, and pulling a newer one is re-running the same command (the name is
  * stable; only the cid it points at moves). A source name that resolves nowhere
  * is a loud {@link PinSourceResolveError} (exit 1), never a silent success.
  *
- * `--mode` is the SAME per-site mode `deploy` takes (CONTEXT.md `mode`), here
- * defaulting to `ipfs` (pin + MFS only; the pin is addressed by the immutable
- * `ipfs://<cid>`). `--mode ipns` ADDS the operator's OWN stable name for the
+ * `--set-mode` is the SAME per-site mode `deploy` takes (CONTEXT.md `mode`),
+ * resolved the same way: stating nothing PRESERVES what the entry is already
+ * stored under, and only an entry storing none is `ipfs` (pin + MFS only; the
+ * pin is addressed by the immutable `ipfs://<cid>`). `--set-mode ipns` ADDS the
+ * operator's OWN stable name for the
  * mirrored content: the key derived from the env-ONLY master + the `--as <name>`
  * id (the same single-`id`-is-the-KDF-input rule as `derive`/`promote`) is
  * imported onto the PUBLISHER, which then signs `name/publish` for the pinned
  * cid. Re-pinning a newer cid under the same name moves that name.
  *
- * Two loud refusals guard the ipns path HERE, before the core is called, so the
- * message can name what the operator typed: an unset master (env-only, never
- * from `pinnace.json`), and a target set with no publisher in it (`--host` a
- * replica, or a publisher-less config) — a replica is keyless and never signs.
+ * Two loud refusals guard a STATED ipns path HERE, before the core is called,
+ * so the message can name what the operator typed: an unset master (env-only,
+ * never from `pinnace.json`), and a target set with no publisher in it (`--host`
+ * a replica, or a publisher-less config) — a replica is keyless and never signs.
  * The core repeats the second check for library callers
- * ({@link PinPublisherRequiredError}).
+ * ({@link PinPublisherRequiredError}). When the mode is PRESERVED instead, only
+ * the core (which reads the stored metadata) knows whether a key is needed, so
+ * the CLI derives it WHENEVER a master is available — a purely local KDF, no
+ * node contact — and the core refuses loudly
+ * ({@link PinDerivedKeyRequiredError}) if a preserved `ipns` entry has none.
  *
  * `--host <name>` NARROWS the fan-out to that one node (note this differs from
  * `site`/`promote`, where `--host` SELECTS the single node it acts on and is
@@ -770,14 +772,10 @@ async function runPin(
 		return 1;
 	}
 
-	// The mode surface is an explicit allow-list (same two values as a site's).
-	const mode = (flags['mode'] ?? 'ipfs') as SiteMode;
-	if (mode !== 'ipfs' && mode !== 'ipns') {
-		rc.err(
-			`pinnace pin: --mode must be 'ipfs' (pin + MFS only, the default) or 'ipns' (also publish the pin under your derived key)`,
-		);
-		return 1;
-	}
+	// The mode surface is an explicit allow-list (same two values as a site's),
+	// and stating nothing PRESERVES the entry's stored mode (the core resolves it).
+	const mode = siteModeIntentFromFlags('pinnace pin', flags, pinName, rc);
+	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
 
 	const cli = cliOverridesFromFlags(flags);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
@@ -804,26 +802,31 @@ async function runPin(
 
 	// ipns mode: the operator's own name for the mirrored content. The master is
 	// env-ONLY, and SOMETHING among the targets must be able to sign.
+	const statedIpns = mode.kind === 'set' && mode.mode === 'ipns';
 	let derived: DerivedIpnsKey | undefined;
-	if (mode === 'ipns') {
+	if (statedIpns && !hosts.some((h) => h.role === 'publisher')) {
+		rc.err(
+			`pinnace pin: --set-mode ipns needs a publisher to sign the name, but ` +
+				`${hosts.map((h) => `${h.name} (${h.role})`).join(', ')} cannot — a ` +
+				`replica is keyless and only re-announces the publisher's record. ` +
+				`Pin with --set-mode ipfs, or target the publisher.`,
+		);
+		return 1;
+	}
+	// The key material is needed for a STATED ipns pin, and MAY be needed for a
+	// PRESERVED one (only the core, which reads the stored metadata, knows). It is
+	// a local KDF over the env-ONLY master — no node contact — so it is derived
+	// whenever it could be used; a stated `ipfs` pin never derives at all.
+	if (statedIpns || mode.kind === 'preserve') {
 		const master = resolveMasterSecret({env: rc.env});
-		if (!master) {
+		if (!master && statedIpns) {
 			rc.err(
-				'pinnace pin: --mode ipns needs the master secret — export PINNACE_MASTER (env-only; never read from pinnace.json)',
-			);
-			return 1;
-		}
-		if (!hosts.some((h) => h.role === 'publisher')) {
-			rc.err(
-				`pinnace pin: --mode ipns needs a publisher to sign the name, but ` +
-					`${hosts.map((h) => `${h.name} (${h.role})`).join(', ')} cannot — a ` +
-					`replica is keyless and only re-announces the publisher's record. ` +
-					`Pin with --mode ipfs, or target the publisher.`,
+				'pinnace pin: --set-mode ipns needs the master secret — export PINNACE_MASTER (env-only; never read from pinnace.json)',
 			);
 			return 1;
 		}
 		// The `--as <name>` IS the site id AND the KDF input (one identifier).
-		derived = rc.deps.deriveIpnsKey({master, keyId: pinName});
+		if (master) derived = rc.deps.deriveIpnsKey({master, keyId: pinName});
 	}
 
 	let targets: PinTarget[];
@@ -848,14 +851,19 @@ async function runPin(
 			...(fromIpns ? {fromIpns} : {cid: cid as string}),
 			name: pinName,
 			recursive: flags['no-recursive'] === undefined,
-			mode,
+			...(mode.kind === 'set' ? {mode: mode.mode} : {}),
 			ensName,
 			...(derived ? {derived} : {}),
 		});
 	} catch (error) {
-		// The one failure the CLI cannot pre-check: the SOURCE name resolved on no
-		// node, so there is no cid to pin (Kubo's own words come through).
-		if (error instanceof PinSourceResolveError) {
+		// The two failures the CLI cannot pre-check, because both are answers only
+		// the NODES have: the SOURCE name resolved nowhere (no cid to pin, in Kubo's
+		// own words), and a PRESERVED `ipns` entry that needs key material the
+		// unset master could not supply.
+		if (
+			error instanceof PinSourceResolveError ||
+			error instanceof PinDerivedKeyRequiredError
+		) {
 			rc.err(`pinnace pin: ${error.message}`);
 			return 1;
 		}
@@ -899,19 +907,51 @@ async function runPin(
 // ---------------------------------------------------------------------------
 
 /**
- * `deploy`'s mode when `--mode` is omitted. `ipfs` (land + pin + MFS only) is
- * the conservative half of the pair — it mints no name and signs nothing — and
- * it matches `pin`'s existing default, so the two carriers of the ONE `mode`
- * concept default alike. The config site entry that used to supply this is
- * gone (sites live in MFS); `--mode` is now the only source.
+ * Turn the `--set-mode` verb-flag into ONE {@link SiteModeIntent} — the mode
+ * counterpart of {@link ensNameIntentFromFlags} — or emit the loud error and
+ * return undefined (so the verb can `return 1` without dispatching):
  *
- * CONSEQUENCE to know: re-deploying an `ipns` site WITHOUT `--mode ipns` runs
- * it as `ipfs` — this deploy signs no record and writes `mode: 'ipfs'` into the
- * site's metadata, which the on-box republish loop then honours. Pass `--mode
- * ipns` for a published site (as the emitted CI workflow already does). See
- * `work/notes/observations/config-drop-sites-decisions.md`.
+ *   `--set-mode ipfs|ipns` -> STATE that mode (it beats the stored one)
+ *   omitted                -> PRESERVE the site's stored mode
+ *   `--set-mode` (bare)    -> a USAGE ERROR naming the two values
+ *   any other value        -> the unresolved-mode refusal, naming the site
+ *
+ * There is deliberately NO `--unset-mode`: unlike `ensName`, `mode` has no
+ * three-valued opt-out to author (an absent stored mode simply means
+ * `{@link DEFAULT_SITE_MODE}`), so the flag has two states, stated or preserved.
+ * And unlike a bare `--set-ens-name` (which INFERS from a `.eth` id), a bare
+ * `--set-mode` has nothing to infer from — hence the loud refusal rather than a
+ * guess. BARE is the existing {@link parseArgs} no-value convention (end of
+ * argv, or immediately followed by another `--flag`).
+ *
+ * Decisions behind this resolution order (and its multi-node reading) are
+ * recorded in `work/notes/observations/config-drop-sites-decisions.md`.
  */
-const DEFAULT_DEPLOY_MODE: SiteMode = 'ipfs';
+function siteModeIntentFromFlags(
+	prefix: string,
+	flags: Record<string, string>,
+	siteId: string,
+	rc: ResolvedRunContext,
+): SiteModeIntent | undefined {
+	const stated = flags['set-mode'];
+	if (stated === undefined) return {kind: 'preserve'};
+	if (stated === '') {
+		rc.err(
+			`${prefix}: --set-mode needs a value: 'ipfs' or 'ipns' (omit the flag to ` +
+				`keep the mode '${siteId}' is already stored under)`,
+		);
+		return undefined;
+	}
+	if (stated !== 'ipfs' && stated !== 'ipns') {
+		rc.err(
+			`${prefix}: mode for '${siteId}' is unresolved ('${stated}'); pass ` +
+				`--set-mode ipfs|ipns, or omit it to keep the mode stored in the site's ` +
+				`metadata (--set-mode > the stored metadata > '${DEFAULT_SITE_MODE}')`,
+		);
+		return undefined;
+	}
+	return {kind: 'set', mode: stated};
+}
 
 /**
  * The shared no-hosts refusal. Names BOTH ways to supply a node, because the

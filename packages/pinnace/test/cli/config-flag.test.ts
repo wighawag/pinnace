@@ -30,7 +30,7 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			calls.deploy.push(input);
 			return {
 				cid: 'bafyStub',
-				mode: input.mode,
+				mode: input.mode ?? 'ipfs',
 				ok: [],
 				failed: [],
 				success: true,

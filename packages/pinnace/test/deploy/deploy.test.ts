@@ -408,6 +408,161 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 	});
 });
 
+/**
+ * The site's MODE is now RESOLVED, not merely stated (the requeue decision on
+ * `config-drop-sites-and-make-optional`): `--set-mode` > the site's STORED
+ * `metadata.json` mode > `ipfs`. The regression this closes: a re-deploy with
+ * no mode flag used to run as `ipfs`, so it neither signed the IPNS record nor
+ * kept `mode: "ipns"` in the metadata — the live name silently went stale.
+ *
+ * The resolution is ONE decision for the whole fan-out, taken from the
+ * PUBLISHER (the node that holds the key and actually signs), and the resolved
+ * value is then written into EVERY target's metadata so nodes cannot diverge.
+ */
+describe('deploy — the mode is RESOLVED (stated > stored > ipfs)', () => {
+	/** A node whose site already stores `metadata.json`. */
+	function nodeStoring(baseUrl: string, metadataJson: string): MockKuboApi {
+		const mock = mockNode(baseUrl, 'k51mysite');
+		mock.on('files/read', {text: metadataJson});
+		return mock;
+	}
+
+	/** A node with NO metadata for the site yet (the FIRST deploy). */
+	function bareNode(baseUrl: string): MockKuboApi {
+		const mock = mockNode(baseUrl, 'k51mysite');
+		mock.on('files/read', {status: 500, text: 'file does not exist'});
+		return mock;
+	}
+
+	it('RE-deploy with NO mode: keeps the stored `ipns` AND still publishes', async () => {
+		const a = nodeStoring('https://node-a.test', '{"mode":"ipns"}');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		// The metadata is not demoted...
+		expect(result.mode).toBe('ipns');
+		expect(metadataOf(a.requestsFor('files/write')[0])).toEqual({mode: 'ipns'});
+		// ...and the deploy's OWN publish decision follows the RESOLVED mode, so
+		// the live name is refreshed to this deploy's cid (the actual bug).
+		expect(a.requestsFor('name/publish').length).toBe(1);
+		expect(result.ok[0].published).toBe(true);
+	});
+
+	it('FIRST deploy with NO mode: `ipfs`, and nothing is signed', async () => {
+		const a = bareNode('https://node-a.test');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		expect(result.mode).toBe('ipfs');
+		expect(metadataOf(a.requestsFor('files/write')[0])).toEqual({mode: 'ipfs'});
+		expect(a.requestsFor('name/publish').length).toBe(0);
+		expect(a.requestsFor('key/list').length).toBe(0);
+	});
+
+	it('a STATED mode always wins over the stored one (both directions)', async () => {
+		const up = nodeStoring('https://node-a.test', '{"mode":"ipfs"}');
+		expect(
+			(
+				await deploy({
+					sourceDir: siteDir,
+					id: 'mysite.eth',
+					mode: 'ipns',
+					targets: [targetWith(up, 'token-a', {role: 'publisher'})],
+				})
+			).mode,
+		).toBe('ipns');
+		expect(up.requestsFor('name/publish').length).toBe(1);
+
+		const down = nodeStoring('https://node-b.test', '{"mode":"ipns"}');
+		expect(
+			(
+				await deploy({
+					sourceDir: siteDir,
+					id: 'mysite.eth',
+					mode: 'ipfs',
+					targets: [targetWith(down, 'token-b', {role: 'publisher'})],
+				})
+			).mode,
+		).toBe('ipfs');
+		expect(metadataOf(down.requestsFor('files/write')[0])).toEqual({
+			mode: 'ipfs',
+		});
+		expect(down.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('resolves from the PUBLISHER and writes that ONE mode to EVERY node', async () => {
+		// The publisher (the node that signs) stores `ipns`; the replica stores
+		// nothing. The fan-out takes ONE decision — the publisher's — so the two
+		// nodes cannot end up disagreeing about how the site is addressed.
+		const pub = nodeStoring('https://publisher.test', '{"mode":"ipns"}');
+		const rep = bareNode('https://replica.test');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [
+				targetWith(pub, 'token-pub', {role: 'publisher'}),
+				targetWith(rep, 'token-rep', {role: 'replica'}),
+			],
+		});
+		expect(result.mode).toBe('ipns');
+		for (const mock of [pub, rep]) {
+			expect(metadataOf(mock.requestsFor('files/write')[0])).toEqual({
+				mode: 'ipns',
+			});
+		}
+		// Only the publisher signs, as ever.
+		expect(pub.requestsFor('name/publish').length).toBe(1);
+		expect(rep.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('a REPLICA’s stored mode never decides the fan-out (only the publisher’s)', async () => {
+		// The replica stores a stale `ipns`; the publisher stores `ipfs`. The
+		// publisher wins — a keyless node must not talk the fan-out into signing.
+		const pub = nodeStoring('https://publisher.test', '{"mode":"ipfs"}');
+		const rep = nodeStoring('https://replica.test', '{"mode":"ipns"}');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [
+				targetWith(pub, 'token-pub', {role: 'publisher'}),
+				targetWith(rep, 'token-rep', {role: 'replica'}),
+			],
+		});
+		expect(result.mode).toBe('ipfs');
+		expect(metadataOf(rep.requestsFor('files/write')[0])).toEqual({
+			mode: 'ipfs',
+		});
+		expect(pub.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('resolving the mode costs ONE read per node (no extra round trip)', async () => {
+		const a = nodeStoring('https://node-a.test', '{"mode":"ipns"}');
+		await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		// The publisher's stored metadata answers BOTH the mode question and the
+		// ensName read-modify-write: one files/read, not two.
+		expect(a.requestsFor('files/read').length).toBe(1);
+	});
+
+	it('with NO publisher target there is nothing to resolve from: `ipfs`', async () => {
+		const rep = nodeStoring('https://replica.test', '{"mode":"ipns"}');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [targetWith(rep, 'token-rep', {role: 'replica'})],
+		});
+		expect(result.mode).toBe('ipfs');
+		expect(rep.requestsFor('name/publish').length).toBe(0);
+	});
+});
+
 describe('deploy — a replica / publish-disabled target NEVER publishes', () => {
 	it('a replica target does import + MFS but never name/publish (even in ipns mode)', async () => {
 		const pub = mockNode('https://publisher.test', 'k51pub');

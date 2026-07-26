@@ -6,7 +6,7 @@
  * WHY IT IS ITS OWN MODULE. Three callers need the identical two RPCs and must
  * not drift (ADR-0002's one-implementation rule):
  *  - `deploy` in `ipns` mode (publisher targets only) — `../deploy/deploy.ts`,
- *  - `pin --mode ipns` (the same publisher-only branch) — `../pin/pin-external.ts`,
+ *  - `pin --set-mode ipns` (the same publisher-only branch) — `../pin/pin-external.ts`,
  *  - the on-box `republish` timer, which refreshes every keyed MFS site —
  *    `./record-sequence.ts`.
  * Before this module the `name/publish` parameter set (lifetime / ttl /

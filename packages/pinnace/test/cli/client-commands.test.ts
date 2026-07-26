@@ -41,7 +41,9 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			calls.deploy.push(input);
 			return {
 				cid: 'bafyStub',
-				mode: input.mode,
+				// The CLI states a mode only when --set-mode was given; the real core
+				// resolves an unstated one against the site's stored metadata.
+				mode: input.mode ?? 'ipfs',
 				ok: [{baseUrl: 'https://a', cid: 'bafyStub', published: false}],
 				failed: [],
 				success: true,
@@ -207,15 +209,16 @@ describe('deploy <dir> <id> — dispatches to core deploy with resolved targets'
 		const input = calls.deploy[0] as {
 			sourceDir?: string;
 			id: string;
-			mode: string;
+			mode?: string;
 			targets: Array<{baseUrl: string; token: string; role: string}>;
 		};
 		expect(input.sourceDir).toBe('./dist');
 		// The single `id` positional flows straight through to the core.
 		expect(input.id).toBe('mysite');
-		// mode comes from --mode ALONE; omitted, it is the `ipfs` default (the
-		// config site entry is gone — sites live in MFS).
-		expect(input.mode).toBe('ipfs');
+		// No --set-mode: the CLI states NO mode, so the core PRESERVES the site's
+		// stored one (and only a site storing nothing runs as `ipfs`). The config
+		// site entry that used to supply this is gone — sites live in MFS.
+		expect(input.mode).toBeUndefined();
 		// One target per configured host, each with its OWN env-only token, publisher first.
 		expect(input.targets.map((t) => t.baseUrl)).toEqual([
 			'https://a.example',
@@ -228,11 +231,35 @@ describe('deploy <dir> <id> — dispatches to core deploy with resolved targets'
 		expect(input.targets.map((t) => t.role)).toEqual(['publisher', 'replica']);
 	});
 
-	it('a --mode arg selects the mode (arg > the ipfs default)', async () => {
+	it('a --set-mode arg STATES the mode (arg > the stored one)', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({deps, env: {...hostTokenEnv}});
-		await run(['deploy', '--mode', 'ipns', './dist', 'mysite'], context);
+		await run(['deploy', '--set-mode', 'ipns', './dist', 'mysite'], context);
 		expect((calls.deploy[0] as {mode: string}).mode).toBe('ipns');
+		const back = recordingDeps();
+		await run(
+			['deploy', '--set-mode', 'ipfs', './dist', 'mysite'],
+			ctx({deps: back.deps, env: {...hostTokenEnv}}).context,
+		);
+		expect((back.calls.deploy[0] as {mode: string}).mode).toBe('ipfs');
+	});
+
+	it('a BARE --set-mode is a loud usage error naming ipfs|ipns', async () => {
+		// Unlike a bare --set-ens-name (which INFERS from a `.eth` id), a mode has
+		// nothing to infer from: it is stated or it is preserved.
+		for (const argv of [
+			['deploy', './dist', 'mysite', '--set-mode'],
+			['deploy', '--set-mode', '--set-ens-name', 'a.eth', './dist', 'mysite'],
+		]) {
+			const {deps, calls} = recordingDeps();
+			const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+			expect(await run(argv, context)).not.toBe(0);
+			expect(calls.deploy.length).toBe(0);
+			const message = err.join('\n');
+			expect(message).toContain('--set-mode');
+			expect(message).toContain('ipfs');
+			expect(message).toContain('ipns');
+		}
 	});
 
 	it('a stale `sites` entry in pinnace.json NO LONGER supplies the mode', async () => {
@@ -251,21 +278,23 @@ describe('deploy <dir> <id> — dispatches to core deploy with resolved targets'
 		});
 		const code = await run(['deploy', './dist', 'mysite'], context);
 		expect(code).toBe(0);
-		expect((calls.deploy[0] as {mode: string}).mode).toBe('ipfs');
+		expect((calls.deploy[0] as {mode?: string}).mode).toBeUndefined();
 	});
 
-	it('an UNRESOLVED (invalid) --mode fails loud naming the site + the two values', async () => {
+	it('an UNRESOLVED (invalid) --set-mode fails loud naming the site + the two values', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
 		const code = await run(
-			['deploy', '--mode', 'sideways', './dist', 'mysite'],
+			['deploy', '--set-mode', 'sideways', './dist', 'mysite'],
 			context,
 		);
 		expect(code).not.toBe(0);
 		expect(calls.deploy.length).toBe(0);
 		const message = err.join('\n');
 		expect(message).toContain('mysite');
-		expect(message).toContain('--mode');
+		expect(message).toContain('--set-mode');
+		// It names the whole source order, so the operator knows what omitting it does.
+		expect(message).toContain('metadata');
 		// The removed config fallback is not suggested any more.
 		expect(message).not.toMatch(/add the site to pinnace\.json/i);
 	});
@@ -326,7 +355,14 @@ describe('--set-ens-name / --unset-ens-name — the ensName write intent', () =>
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({deps, env: {...hostTokenEnv}});
 		const code = await run(
-			['deploy', '--mode', 'ipfs', './dist', 'mysite.eth', '--set-ens-name'],
+			[
+				'deploy',
+				'--set-mode',
+				'ipfs',
+				'./dist',
+				'mysite.eth',
+				'--set-ens-name',
+			],
 			context,
 		);
 		expect(code).toBe(0);
@@ -337,7 +373,14 @@ describe('--set-ens-name / --unset-ens-name — the ensName write intent', () =>
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({deps, env: {...hostTokenEnv}});
 		const code = await run(
-			['deploy', '--set-ens-name', '--mode', 'ipfs', './dist', 'mysite.eth'],
+			[
+				'deploy',
+				'--set-ens-name',
+				'--set-mode',
+				'ipfs',
+				'./dist',
+				'mysite.eth',
+			],
 			context,
 		);
 		expect(code).toBe(0);
@@ -783,14 +826,30 @@ describe('pin <cid> --as <name> — dispatches to core pinExternal (all nodes)',
 	});
 });
 
-describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () => {
+describe('pin --set-mode ipns — ADDS the operator OWN stable name to a pin', () => {
 	/** The master is env-ONLY (never a pinnace.json field), exactly as promote. */
 	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
 
-	it('defaults to ipfs mode: no derivation, no publish, no ipns printed', async () => {
+	it('with NO --set-mode it states no mode (the core preserves the stored one)', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context, out} = ctx({deps, env: {...masterEnv}});
 		const code = await run(['pin', 'bafyexternal', '--as', 'archive'], context);
+		expect(code).toBe(0);
+		expect((calls.pinExternal[0] as {mode?: string}).mode).toBeUndefined();
+		// The key material is derived up front (a local KDF, no node contact) so a
+		// pin whose STORED mode turns out to be `ipns` can still sign; nothing is
+		// published unless the resolved mode says so.
+		expect(calls.deriveIpnsKey.length).toBe(1);
+		expect(out.join('\n')).not.toContain('ipns://');
+	});
+
+	it('with --set-mode ipfs (stated) it derives no key at all', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--set-mode', 'ipfs'],
+			context,
+		);
 		expect(code).toBe(0);
 		expect(calls.pinExternal[0]).toMatchObject({mode: 'ipfs'});
 		expect(calls.deriveIpnsKey.length).toBe(0);
@@ -801,7 +860,7 @@ describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () =>
 		const {deps, calls} = recordingDeps();
 		const {context, out} = ctx({deps, env: {...masterEnv}});
 		const code = await run(
-			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'ipns'],
+			['pin', 'bafyexternal', '--as', 'archive', '--set-mode', 'ipns'],
 			context,
 		);
 		expect(code).toBe(0);
@@ -835,7 +894,7 @@ describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () =>
 		const {deps, calls} = recordingDeps();
 		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
 		const code = await run(
-			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'ipns'],
+			['pin', 'bafyexternal', '--as', 'archive', '--set-mode', 'ipns'],
 			context,
 		);
 		expect(code).not.toBe(0);
@@ -852,7 +911,7 @@ describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () =>
 				'bafyexternal',
 				'--as',
 				'archive',
-				'--mode',
+				'--set-mode',
 				'ipns',
 				'--host',
 				'b',
@@ -877,7 +936,7 @@ describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () =>
 			}),
 		});
 		const code = await run(
-			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'ipns'],
+			['pin', 'bafyexternal', '--as', 'archive', '--set-mode', 'ipns'],
 			context,
 		);
 		expect(code).not.toBe(0);
@@ -885,16 +944,31 @@ describe('pin --mode ipns — ADDS the operator OWN stable name to a pin', () =>
 		expect(err.join('\n')).toMatch(/publisher/i);
 	});
 
-	it('rejects an invalid --mode value (the surface is an allow-list)', async () => {
+	it('rejects an invalid --set-mode value (the surface is an allow-list)', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context, err} = ctx({deps, env: {...masterEnv}});
 		const code = await run(
-			['pin', 'bafyexternal', '--as', 'archive', '--mode', 'sideways'],
+			['pin', 'bafyexternal', '--as', 'archive', '--set-mode', 'sideways'],
 			context,
 		);
 		expect(code).not.toBe(0);
 		expect(calls.pinExternal.length).toBe(0);
-		expect(err.join('\n')).toContain('--mode');
+		expect(err.join('\n')).toContain('--set-mode');
+	});
+
+	it('rejects a BARE --set-mode loudly, naming the two values', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			['pin', 'bafyexternal', '--as', 'archive', '--set-mode'],
+			context,
+		);
+		expect(code).not.toBe(0);
+		expect(calls.pinExternal.length).toBe(0);
+		const message = err.join('\n');
+		expect(message).toContain('--set-mode');
+		expect(message).toContain('ipfs');
+		expect(message).toContain('ipns');
 	});
 });
 
@@ -933,11 +1007,19 @@ describe('pin --from-ipns <source>: MIGRATE from an existing IPNS name', () => {
 		expect(out.join('\n')).toMatch(/snapshot/i);
 	});
 
-	it('one command migrates onto the operator OWN name: --mode ipns prints ipns://<their id>', async () => {
+	it('one command migrates onto the operator OWN name: --set-mode ipns prints ipns://<their id>', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context, out} = ctx({deps, env: {...masterEnv}});
 		const code = await run(
-			['pin', '--from-ipns', 'k51source', '--as', 'ronan', '--mode', 'ipns'],
+			[
+				'pin',
+				'--from-ipns',
+				'k51source',
+				'--as',
+				'ronan',
+				'--set-mode',
+				'ipns',
+			],
 			context,
 		);
 		expect(code).toBe(0);

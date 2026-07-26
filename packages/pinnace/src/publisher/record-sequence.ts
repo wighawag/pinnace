@@ -64,7 +64,7 @@ import type {
  * Records are ~72h valid, refreshed with a ~1h ttl (the reference values). The
  * republish timer fires well within 72h so the record never lapses. Re-exported
  * from their single home `./ipns-publish.ts` (which owns the `name/publish` call
- * shape shared with deploy + `pin --mode ipns`), so this module's public API is
+ * shape shared with deploy + `pin --set-mode ipns`), so this module's public API is
  * unchanged and there is only ONE copy of the validity contract.
  */
 export {RECORD_LIFETIME, RECORD_TTL};

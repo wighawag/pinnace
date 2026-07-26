@@ -118,7 +118,7 @@ describe('emitCi — CIProvider seam', () => {
 			          SITE_NAME: \${{ vars.SITE_NAME }}
 			          SITE_MODE: \${{ vars.SITE_MODE || 'ipns' }}
 			        run: |
-			          npx pinnace deploy --mode "$SITE_MODE" "dist" "$SITE_NAME"
+			          npx pinnace deploy --set-mode "$SITE_MODE" "dist" "$SITE_NAME"
 
 			      - name: Summary
 			        if: always()

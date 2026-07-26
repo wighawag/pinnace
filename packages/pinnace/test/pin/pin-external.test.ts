@@ -5,6 +5,7 @@ import {
 	pinExternal,
 	PinStageError,
 	PinPublisherRequiredError,
+	PinDerivedKeyRequiredError,
 	PinSourceResolveError,
 	type PinTarget,
 } from '../../src/pin/pin-external.js';
@@ -323,7 +324,7 @@ describe('site remove — the EXISTING verb unpins a pin-added site', () => {
 });
 
 // ---------------------------------------------------------------------------
-// `--mode ipns`: the pin ALSO gets the operator's OWN stable IPNS name
+// `--set-mode ipns`: the pin ALSO gets the operator's OWN stable IPNS name
 // (task `pin-external-cid-ipns-mode`). The mode branch MIRRORS deploy's:
 // `ipfs` = pin + MFS only; `ipns` ADDS key import + key/list + name/publish, on
 // the PUBLISHER target only (a replica never signs).
@@ -371,9 +372,12 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 			name: GOLDEN_NAME,
 		});
 
+		// With no STATED mode the publisher's stored metadata is read FIRST (it is
+		// what decides the mode this pin runs in); that same read then serves the
+		// node's own metadata write, so it is one read, not two.
 		expect(a.requests.map((r) => r.path)).toEqual([
-			'pin/add',
 			'files/read',
+			'pin/add',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -398,6 +402,126 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 		expect(a.requestsFor('key/list').length).toBe(0);
 		expect(a.requestsFor('key/import').length).toBe(0);
 		expect(a.requestsFor('name/publish').length).toBe(0);
+	});
+});
+
+/**
+ * A pin's mode is RESOLVED exactly like a deploy's (the requeue decision on
+ * `config-drop-sites-and-make-optional`): a STATED mode > the site's STORED
+ * `metadata.json` mode > `ipfs`, decided ONCE from the publisher and written to
+ * every node. So re-pinning a newer cid under a name the operator publishes
+ * keeps publishing it, instead of silently demoting the entry to `ipfs`.
+ */
+describe('pinExternal — the mode is RESOLVED (stated > stored > ipfs)', () => {
+	/** A publisher holding the site key whose stored metadata is `metadataJson`. */
+	function storing(baseUrl: string, metadataJson: string): MockKuboApi {
+		const mock = keyedPublisher(baseUrl);
+		mock.on('files/read', {text: metadataJson});
+		return mock;
+	}
+
+	it('RE-pin with NO mode on a stored-`ipns` site: publishes, stays ipns', async () => {
+		const a = storing('https://publisher.test', '{"mode":"ipns"}');
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		});
+		expect(result.mode).toBe('ipns');
+		expect(metadataOf(a)).toEqual({mode: 'ipns'});
+		expect(a.requestsFor('name/publish').length).toBe(1);
+		expect(result.ipns).toBe(GOLDEN_IPNS_ID);
+	});
+
+	it('FIRST pin with NO mode: `ipfs`, nothing signed', async () => {
+		const a = keylessPublisher('https://publisher.test');
+		a.on('files/read', {status: 500, text: 'file does not exist'});
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		});
+		expect(result.mode).toBe('ipfs');
+		expect(metadataOf(a)).toEqual({mode: 'ipfs'});
+		expect(a.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('a STATED `ipfs` wins over a stored `ipns` (an explicit flag always wins)', async () => {
+		const a = storing('https://publisher.test', '{"mode":"ipns"}');
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			mode: 'ipfs',
+		});
+		expect(result.mode).toBe('ipfs');
+		expect(metadataOf(a)).toEqual({mode: 'ipfs'});
+		expect(a.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('--from-ipns honours the SAME resolution (both pin entry points)', async () => {
+		const a = resolvingNode('https://publisher.test');
+		a.on('key/list', {json: {Keys: [{Name: GOLDEN_NAME, Id: GOLDEN_IPNS_ID}]}});
+		a.on('files/read', {text: '{"mode":"ipns"}'});
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			fromIpns: SOURCE_NAME,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		});
+		expect(result.mode).toBe('ipns');
+		expect(metadataOf(a)).toEqual({mode: 'ipns'});
+		expect(a.requestsFor('name/publish')[0].query.get('arg')).toBe(
+			`/ipfs/${RESOLVED_CID}`,
+		);
+	});
+
+	it('writes the ONE resolved mode to EVERY node of the fan-out', async () => {
+		const pub = storing('https://publisher.test', '{"mode":"ipns"}');
+		const rep = mockNode('https://replica.test');
+		rep.on('files/read', {status: 500, text: 'file does not exist'});
+		const result = await pinExternal({
+			targets: [
+				targetWith(pub, 'token-pub', {role: 'publisher'}),
+				targetWith(rep, 'token-rep', {role: 'replica'}),
+			],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		});
+		expect(result.mode).toBe('ipns');
+		expect(metadataOf(pub)).toEqual({mode: 'ipns'});
+		expect(metadataOf(rep)).toEqual({mode: 'ipns'});
+		expect(rep.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('with no publisher among the targets there is nothing to resolve from: `ipfs`', async () => {
+		const rep = mockNode('https://replica.test');
+		rep.on('files/read', {text: '{"mode":"ipns"}'});
+		const result = await pinExternal({
+			targets: [targetWith(rep, 'token-rep', {role: 'replica'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+		});
+		expect(result.mode).toBe('ipfs');
+		expect(rep.requestsFor('name/publish').length).toBe(0);
+	});
+
+	it('a resolved `ipns` with NO derived key REFUSES before pinning anything', async () => {
+		// The stored mode says this entry is published, but the caller supplied no
+		// key material (the master is env-only, upstream): a loud refusal, never a
+		// quiet pin that leaves the name pointing at the old cid.
+		const a = storing('https://publisher.test', '{"mode":"ipns"}');
+		await expect(
+			pinExternal({
+				targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+				cid: EXTERNAL_CID,
+				name: GOLDEN_NAME,
+			}),
+		).rejects.toBeInstanceOf(PinDerivedKeyRequiredError);
+		expect(a.requestsFor('pin/add').length).toBe(0);
 	});
 });
 

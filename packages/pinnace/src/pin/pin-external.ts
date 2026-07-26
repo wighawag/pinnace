@@ -61,7 +61,7 @@
  * {@link KuboRpcClient.nameResolve} on the first target that answers). Once
  * resolved, NOTHING downstream differs: the same redundant `pin/add`, the same
  * MFS placement, the same `ipns`-mode publish. That is the one-command ENS
- * migration: `pin --from-ipns <src> --as ronan --mode ipns` resolves the source,
+ * migration: `pin --from-ipns <src> --as ronan --set-mode ipns` resolves the source,
  * pins its current content on every node, and publishes it under the OPERATOR's
  * derived key so they have an `ipns://<their-id>` to point ENS at.
  *
@@ -97,8 +97,11 @@ import {placeInMfs} from '../site/site-management.js';
 import {
 	assertEnsNameIntent,
 	resolveSiteMetadataToWrite,
+	siteModeIntent,
+	DEFAULT_SITE_MODE,
 	PRESERVE_ENS_NAME,
 	type EnsNameIntent,
+	type ResolvedSiteMetadata,
 } from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
 import {importIpnsKeyIntoPublisher} from '../publisher/key-import.js';
@@ -117,7 +120,7 @@ const DEFAULT_SITES_DIR = '/sites';
  * decides who signs, and a target with NO role is treated as unable to sign (the
  * safe reading: never put a key on a box whose role the caller did not state).
  * Still deliberately NOT {@link import('../deploy/deploy.js').DeployTarget}: a
- * pin has no CAR and no per-target publish switch (`--mode ipfs` is how an
+ * pin has no CAR and no per-target publish switch (`--set-mode ipfs` is how an
  * operator pins without publishing).
  */
 export interface PinTarget {
@@ -160,9 +163,16 @@ export interface PinExternalInput {
 	/** The MFS directory sites live under (default `/sites`). */
 	sitesDir?: string;
 	/**
-	 * `ipfs` (default: pin + MFS only, addressed `ipfs://<cid>`) or `ipns` (ALSO
-	 * publish the pinned cid under the operator's own derived key on the
-	 * publisher, addressed `ipns://<id>`). Same two values as a site's `mode`.
+	 * The mode this pin STATES (`--set-mode`): `ipfs` (pin + MFS only, addressed
+	 * `ipfs://<cid>`) or `ipns` (ALSO publish the pinned cid under the operator's
+	 * own derived key on the publisher, addressed `ipns://<id>`). Same two values
+	 * as a site's `mode`.
+	 *
+	 * OMITTED = PRESERVE: the pin runs in the mode the entry is ALREADY stored
+	 * under on the publisher, and only an entry that stores none falls back to
+	 * {@link DEFAULT_SITE_MODE} (`ipfs`). So re-pinning a newer cid under a name
+	 * the operator publishes keeps publishing it (the name follows the snapshot),
+	 * instead of silently demoting the entry.
 	 */
 	mode?: SiteMode;
 	/**
@@ -237,7 +247,7 @@ export class PinSourceResolveError extends Error {
 }
 
 /**
- * `--mode ipns` was asked for but no target can SIGN (no `publisher` among
+ * `--set-mode ipns` was asked for but no target can SIGN (no `publisher` among
  * them, or the operator narrowed to a replica with `--host`). A loud refusal
  * rather than a silent pin-without-a-name: the operator asked for a name they
  * control, and a keyless replica must never be handed a signing key
@@ -250,13 +260,42 @@ export class PinPublisherRequiredError extends Error {
 		readonly roles: Array<HostRole | undefined>,
 	) {
 		super(
-			`--mode ipns needs a publisher to sign the name: none of the ` +
+			`--set-mode ipns needs a publisher to sign the name: none of the ` +
 				`${roles.length} pin target(s) is a publisher (roles: ` +
 				`${roles.map((r) => r ?? 'unset').join(', ')}). A replica is keyless ` +
 				`and only re-announces the publisher's signed record; pin with ` +
-				`--mode ipfs, or target the publisher.`,
+				`--set-mode ipfs, or target the publisher.`,
 		);
 		this.name = 'PinPublisherRequiredError';
+	}
+}
+
+/**
+ * The pin RESOLVED to `ipns` mode — stated, or preserved from what the entry
+ * already stores — but the caller supplied no {@link PinExternalInput.derived}
+ * key material, so a publisher that does not already hold the key could not
+ * sign. A loud refusal BEFORE anything is pinned (the master is env-only and
+ * lives one layer up, in the CLI), never a quiet pin that leaves the operator's
+ * name pointing at the OLD cid.
+ */
+export class PinDerivedKeyRequiredError extends Error {
+	constructor(
+		/** The pin name (the site id AND the KDF input). */
+		readonly pinName: string,
+		/** Whether the ipns mode was STATED (vs preserved from the stored one). */
+		readonly stated: boolean,
+	) {
+		super(
+			`pinning '${pinName}' in \`ipns\` mode requires the \`derived\` per-site ` +
+				`key (deriveIpnsKey from the env-only master + this pin name), but none ` +
+				`was given. ` +
+				(stated
+					? 'Export PINNACE_MASTER, or pin with --set-mode ipfs.'
+					: `That mode is what '${pinName}' is already stored under, so this ` +
+						`pin must refresh its name: export PINNACE_MASTER, or state ` +
+						`--set-mode ipfs to stop publishing it.`),
+		);
+		this.name = 'PinDerivedKeyRequiredError';
 	}
 }
 
@@ -345,7 +384,7 @@ interface PinPlan {
  * MFS, so nothing would show on the dashboard).
  * @throws {PinSourceResolveError} when `fromIpns` resolves on no target.
  * @throws {PinPublisherRequiredError} in `ipns` mode when no target can sign.
- * @throws if `ipns` mode is asked for without the `derived` key.
+ * @throws {PinDerivedKeyRequiredError} in `ipns` mode without the `derived` key.
  * @throws {EnsNameInferenceError} for a bare `--set-ens-name` (the `infer`
  * intent) on a non-`.eth` pin name.
  *
@@ -374,16 +413,18 @@ export async function pinExternal(
 	// touched (and before the source name is even resolved).
 	const ensName = input.ensName ?? PRESERVE_ENS_NAME;
 	assertEnsNameIntent(ensName, name);
-	const mode: SiteMode = input.mode ?? 'ipfs';
+
+	// The ONE mode this fan-out runs in: stated, else the PUBLISHER's stored one,
+	// else the conservative default (see resolveFanOutMode). A STATED mode needs
+	// no node, so the refusals below still precede any node contact for it.
+	const modeResolution = await resolveFanOutMode(input, ensName);
+	const mode = modeResolution.mode;
 	if (mode === 'ipns') {
-		if (!input.derived) {
-			throw new Error(
-				'pinExternal in `ipns` mode requires the `derived` per-site key ' +
-					'(deriveIpnsKey from the env-only master + this pin name)',
-			);
-		}
 		if (!targets.some(canSign)) {
 			throw new PinPublisherRequiredError(targets.map((t) => t.role));
+		}
+		if (!input.derived) {
+			throw new PinDerivedKeyRequiredError(name, input.mode !== undefined);
 		}
 	}
 
@@ -406,7 +447,13 @@ export async function pinExternal(
 	};
 
 	const settled = await Promise.allSettled(
-		targets.map((target) => pinOnNode(target, plan)),
+		targets.map((target, i) =>
+			pinOnNode(
+				target,
+				plan,
+				i === modeResolution.resolvedFrom ? modeResolution.metadata : undefined,
+			),
+		),
 	);
 
 	const ok: PinNodeOk[] = [];
@@ -437,6 +484,39 @@ export async function pinExternal(
 		failed,
 		success: ok.length > 0,
 	};
+}
+
+/**
+ * Resolve the ONE mode this pin runs in, from the PUBLISHER target — the node
+ * that holds the key and actually signs — mirroring deploy's resolution exactly
+ * (one concept, one rule): a STATED mode wins and touches no node, an omitted
+ * one PRESERVES what the publisher stores, and with no publisher among the
+ * targets there is nothing to resolve from (and nothing that could sign), so
+ * the default applies. The publisher's read doubles as its own ensName
+ * read-modify-write (returned as `metadata`), so it is never read twice.
+ */
+async function resolveFanOutMode(
+	input: PinExternalInput,
+	ensName: EnsNameIntent,
+): Promise<{
+	mode: SiteMode;
+	/** Index of the target the mode was resolved from, or -1. */
+	resolvedFrom: number;
+	/** That target's fully-resolved metadata (reused for its own write). */
+	metadata?: ResolvedSiteMetadata;
+}> {
+	const intent = siteModeIntent(input.mode);
+	if (intent.kind === 'set') return {mode: intent.mode, resolvedFrom: -1};
+	const resolvedFrom = input.targets.findIndex(canSign);
+	if (resolvedFrom < 0) return {mode: DEFAULT_SITE_MODE, resolvedFrom};
+	const metadata = await resolveSiteMetadataToWrite({
+		client: clientFor(input.targets[resolvedFrom]),
+		sitesDir: input.sitesDir ?? DEFAULT_SITES_DIR,
+		id: input.name,
+		mode: intent,
+		ensName,
+	});
+	return {mode: metadata.mode, resolvedFrom, metadata};
 }
 
 /**
@@ -491,8 +571,15 @@ function canSign(target: PinTarget): boolean {
  * {@link PinStageError} so the caller's allSettled records WHICH step failed;
  * the pin comes first because there is no point filing (or naming) content the
  * node does not hold.
+ *
+ * `metadata` is this node's ALREADY-resolved metadata when the fan-out's mode
+ * was read from it (the publisher); every other node resolves its own here.
  */
-async function pinOnNode(target: PinTarget, plan: PinPlan): Promise<PinNodeOk> {
+async function pinOnNode(
+	target: PinTarget,
+	plan: PinPlan,
+	metadata?: ResolvedSiteMetadata,
+): Promise<PinNodeOk> {
 	const {cid, name, recursive, sitesDir, mode} = plan;
 	const client = clientFor(target);
 
@@ -513,14 +600,16 @@ async function pinOnNode(target: PinTarget, plan: PinPlan): Promise<PinNodeOk> {
 	//    for — resolved against THIS node's existing metadata when the intent is
 	//    `preserve`, so a re-pin carries an existing name forward.
 	try {
-		const metadata = await resolveSiteMetadataToWrite({
-			client,
-			sitesDir,
-			id: name,
-			mode,
-			ensName: plan.ensName,
-		});
-		await placeInMfs(client, sitesDir, name, cid, metadata);
+		const resolved =
+			metadata ??
+			(await resolveSiteMetadataToWrite({
+				client,
+				sitesDir,
+				id: name,
+				mode: {kind: 'set', mode},
+				ensName: plan.ensName,
+			}));
+		await placeInMfs(client, sitesDir, name, cid, resolved);
 	} catch (cause) {
 		throw new PinStageError(
 			'place',

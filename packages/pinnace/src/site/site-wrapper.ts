@@ -31,7 +31,11 @@
  * ({@link EnsNameIntent}, {@link resolveSiteMetadataToWrite}), including the
  * read-modify-write that makes OMITTING the flags leave an existing name alone —
  * and the READ side, {@link resolveEnsNameToWarm}, the rule the on-box `warm`
- * loop resolves each site's eth.limo name with. They live together so the two
+ * loop resolves each site's eth.limo name with. `mode` travels through the SAME
+ * write-side resolver ({@link SiteModeIntent}): stating it is `--set-mode`,
+ * omitting it PRESERVES what the site stores, so the stored metadata — not a
+ * config file, and not a flag the operator must remember — is the durable home
+ * of how a site is addressed. They live together so the two
  * sides cannot drift about what `""` and ABSENT mean.
  * Decisions behind the intent shape are recorded in
  * `work/notes/observations/deploy-pin-write-site-metadata-decisions.md`.
@@ -102,6 +106,44 @@ export type EnsNameIntent =
 export const PRESERVE_ENS_NAME: EnsNameIntent = {kind: 'preserve'};
 
 /**
+ * What ONE operation says about the site's `mode` — the same shape as
+ * {@link EnsNameIntent}, with only TWO cases because `mode` has no meaningful
+ * empty state an operator would author (an absent stored mode simply means
+ * `ipfs`, so there is nothing for an `--unset-mode` to say):
+ *
+ *  - `set`      (`--set-mode ipfs|ipns`) — run in, and record, that mode.
+ *  - `preserve` (the flag omitted, the DEFAULT) — run in the mode the site is
+ *    ALREADY stored under, so a re-deploy/re-pin of a published site keeps
+ *    signing its name instead of silently demoting it to `ipfs`.
+ */
+export type SiteModeIntent =
+	/** `--set-mode <m>`: run in (and record) exactly this mode. */
+	| {kind: 'set'; mode: SiteMode}
+	/** the flag omitted: keep whatever the site already stores. */
+	| {kind: 'preserve'};
+
+/** The intent when the caller states no mode: keep the site's stored one. */
+export const PRESERVE_SITE_MODE: SiteModeIntent = {kind: 'preserve'};
+
+/**
+ * The mode of a site that stores NONE — the last tier of the resolution order
+ * `--set-mode` > stored `metadata.json` > this. `ipfs` is the conservative half
+ * of the pair (land + pin + MFS; it mints no name and signs nothing), so a
+ * FIRST deploy/pin never invents a published name, while a site that already
+ * has one keeps it (that is the `preserve` tier's job, not this one's).
+ */
+export const DEFAULT_SITE_MODE: SiteMode = 'ipfs';
+
+/**
+ * The intent a caller's OPTIONAL stated mode expresses: a value is a `set`, an
+ * omitted one is a `preserve`. This is the ONE place an undefined `mode` is
+ * given its meaning, so `deploy`, `pin` and the CLI cannot drift about it.
+ */
+export function siteModeIntent(mode?: SiteMode): SiteModeIntent {
+	return mode === undefined ? PRESERVE_SITE_MODE : {kind: 'set', mode};
+}
+
+/**
  * A bare `--set-ens-name` (the INFER intent) was asked for on a site whose `id`
  * does not end in `.eth`, so there is NOTHING to infer: removing the key would
  * leave the site with no eth.limo warming at all. A loud usage error rather
@@ -149,52 +191,71 @@ export interface ResolveSiteMetadataInput {
 	sitesDir: string;
 	/** The site `id` (its MFS wrapper dir). */
 	id: string;
-	/** The mode this operation is running in — always recorded. */
-	mode: SiteMode;
+	/** What to do with `mode` (default: {@link PRESERVE_SITE_MODE}). */
+	mode?: SiteModeIntent;
 	/** What to do with `ensName` (default: {@link PRESERVE_ENS_NAME}). */
 	ensName?: EnsNameIntent;
 }
 
 /**
+ * The metadata a write actually carries: {@link SiteMetadata} with the `mode`
+ * RESOLVED, because every write path states or resolves one (the optionality on
+ * `SiteMetadata` describes what may be STORED, including by an older pinnace).
+ */
+export interface ResolvedSiteMetadata extends SiteMetadata {
+	/** The mode this write runs in and records. */
+	mode: SiteMode;
+}
+
+/**
  * Resolve the {@link SiteMetadata} a `deploy`/`pin` will WRITE for one site on
- * ONE node: the `mode` it is running in, plus the `ensName` state its
- * {@link EnsNameIntent} asks for.
+ * ONE node: the `mode` its {@link SiteModeIntent} asks for, plus the `ensName`
+ * state its {@link EnsNameIntent} asks for.
  *
- * `preserve` (the default) is the only intent that READS: it does a
+ * `preserve` is the only intent — of EITHER field — that READS: it does a
  * read-modify-write of `/sites/<id>/metadata.json` so a re-deploy carries the
- * existing name — or an existing `""` opt-out — forward, and a FIRST write (no
- * metadata to read) simply leaves the field absent. The other three intents are
- * TOTAL (they fully determine the field), so they skip the read rather than pay
- * for an answer they would discard.
+ * existing name (or an existing `""` opt-out) and the existing MODE forward,
+ * and a FIRST write (no metadata to read) leaves the name absent and falls back
+ * to {@link DEFAULT_SITE_MODE}. The total intents (`set`/`unset`/`infer`) fully
+ * determine their field, so a write that states BOTH skips the read rather than
+ * pay for an answer it would discard. When both preserve, the ONE read answers
+ * both — mode is never a second round trip.
  *
  * PER NODE, deliberately: metadata travels WITH the site on each node, so each
  * node's own `metadata.json` is what is preserved (a node that never had the
- * site starts absent, whatever its siblings hold). The `mode` is always the one
- * this operation runs in, never the stored one — the operator's `--mode` is
- * what they just asked for.
+ * site starts absent, whatever its siblings hold). The `mode`, though, is ONE
+ * decision for a whole fan-out: `deploy`/`pin` resolve it from the PUBLISHER —
+ * the node that holds the key and actually signs — and then STATE that resolved
+ * value to every other target, so nodes cannot end up disagreeing about how the
+ * site is addressed.
  *
  * @throws {EnsNameInferenceError} for a bare set on a non-`.eth` id (callers
  * should {@link assertEnsNameIntent} up-front so this cannot fire mid-fan-out).
  */
 export async function resolveSiteMetadataToWrite(
 	input: ResolveSiteMetadataInput,
-): Promise<SiteMetadata> {
+): Promise<ResolvedSiteMetadata> {
 	const intent = input.ensName ?? PRESERVE_ENS_NAME;
+	const modeIntent = input.mode ?? PRESERVE_SITE_MODE;
 	assertEnsNameIntent(intent, input.id);
-	const metadata: SiteMetadata = {mode: input.mode};
-	if (intent.kind === 'set') return {ensName: intent.name, ...metadata};
-	if (intent.kind === 'unset') return {ensName: '', ...metadata};
-	if (intent.kind === 'infer') return metadata; // the key stays ABSENT.
 
+	// ONE read serves BOTH preserve branches (and none at all when neither asks).
+	const stored =
+		intent.kind === 'preserve' || modeIntent.kind === 'preserve'
+			? await readSiteMetadata(input.client, input.sitesDir, input.id)
+			: {};
+	const mode: SiteMode =
+		modeIntent.kind === 'set'
+			? modeIntent.mode
+			: (stored.mode ?? DEFAULT_SITE_MODE);
+
+	if (intent.kind === 'set') return {ensName: intent.name, mode};
+	if (intent.kind === 'unset') return {ensName: '', mode};
+	if (intent.kind === 'infer') return {mode}; // the key stays ABSENT.
 	// preserve: whatever the site already says, unchanged (absent stays absent).
-	const existing = await readSiteMetadata(
-		input.client,
-		input.sitesDir,
-		input.id,
-	);
-	return existing.ensName === undefined
-		? metadata
-		: {ensName: existing.ensName, ...metadata};
+	return stored.ensName === undefined
+		? {mode}
+		: {ensName: stored.ensName, mode};
 }
 
 /**
