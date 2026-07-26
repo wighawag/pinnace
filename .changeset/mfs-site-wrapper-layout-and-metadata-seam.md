@@ -1,7 +1,0 @@
----
-'pinnace': minor
----
-
-Store each site in MFS as a WRAPPER directory — `/sites/<id>/content` (the UnixFS root CID, where the site's CID used to sit directly) plus `/sites/<id>/metadata.json` (the per-site metadata `{ensName?, mode}`) — so a site's metadata travels with the site on the node and the on-box loop can read it from the thing it can see. `placeInMfs` now takes a `metadata` argument and writes the whole wrapper (`files/mkdir` the wrapper with `parents`, `files/rm` + `files/cp` the `content` subpath, `files/write` the `metadata.json`), staying idempotent: re-placing replaces content AND metadata. `discoverSites` reads the content CID from `/sites/<id>/content` and the metadata from `/sites/<id>/metadata.json`, and `DiscoveredSite` gains a `metadata` field; absent or malformed metadata reads as empty metadata rather than failing discovery. `site remove` resolves the CONTENT CID before removing the wrapper, so it still unpins the site's content, and `site list` reports the content CID too. `ensName` is preserved three-valued through write and read: a name, `""` (opt out), and absent (infer) stay distinct. `deploy` and `pin` (both entry points) record the `mode` they ran in; writing a real `ensName` and resolving eth.limo warming from it follow in their own changes.
-
-MIGRATION: sites placed under the OLD flat layout (`/sites/<id>` = the content CID) are not migrated in place — remove the entry (`pinnace site remove <id>`) and re-deploy/re-pin it to get the wrapper.
