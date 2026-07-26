@@ -43,8 +43,9 @@ interface KeyListResponse {
  * `key/list` on this node and return the IPNS id of the key named `keyName`, or
  * undefined when the node holds no such key. The keystore key name IS the site's
  * single `id` (CONTEXT.md `id`), so this lookup cannot miss by a name/keyId
- * split. Callers decide what an absent key MEANS (deploy skips the publish; pin
- * imports the derived key; the on-box timer reports `no-key`).
+ * split. Callers decide what an absent key MEANS (deploy and pin both import the
+ * derived key, and REFUSE when they have none; the on-box timer reports
+ * `no-key`).
  */
 export async function lookupIpnsKeyId(
 	client: KuboRpcClient,

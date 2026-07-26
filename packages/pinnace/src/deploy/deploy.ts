@@ -32,16 +32,40 @@
  *    the prototype's `doPublish = mode === "ipns" && PUBLISH_IPNS` gate, with
  *    role standing in for the prototype's `PUBLISH_IPNS=0` replica flag.
  *
+ * `ipns` MODE EITHER PRODUCES THE NAME OR REFUSES — never anything in between
+ * (the ONE policy `pin --set-mode ipns` already has; the two verbs differ in
+ * what they PLACE, never in whether they honour a stated mode). On a target
+ * that would publish:
+ *  - the publisher ALREADY holds the site's key -> publish. This path needs NO
+ *    key material (and so no master): it is the CI path.
+ *  - it holds none and the caller supplied the DERIVED key -> IMPORT it
+ *    ({@link importIpnsKeyIntoPublisher}, the same seam `pin`/`promote` use)
+ *    and then publish. The key is DERIVED, never invented: no `key/gen`.
+ *  - it holds none and no derived key was supplied -> REFUSE
+ *    ({@link DeployDerivedKeyRequiredError}).
+ *  - nothing in the fan-out can sign at all -> REFUSE
+ *    ({@link DeployPublisherRequiredError}).
+ * Both refusals are PRE-FLIGHT — they precede the CAR import, the pin, the MFS
+ * placement and the metadata write on EVERY node — so a deploy that cannot
+ * honour its mode changes nothing anywhere (a half-deployed fan-out whose name
+ * never moved is the worst outcome available). They are refusals of the WHOLE
+ * run, so they are thrown, never folded into the per-node `allSettled`.
+ *
  * SEAM BOUNDARY (see the sibling tasks): this module wires the per-mode call
  * SEQUENCE only. The full publisher/replica record export+mirror lives in
  * `publisher-replica-model`, the `key/list` + `name/publish` call shape lives in
  * `../publisher/ipns-publish.ts` (shared with `pin --set-mode ipns` and the on-box
- * republish timer), and importing the derived key into the publisher's keystore
- * lives in `key-import-publisher`. So deploy here does NOT `key/gen` or
- * `key/import` — it assumes the publisher already holds the key (looked up via
- * `key/list`) and issues `name/publish`. If a publisher has no matching key yet,
- * the publish is reported as skipped rather than silently generating one (key
- * provisioning is that other task's job, not deploy's).
+ * republish timer), and serializing+importing the derived key into the
+ * publisher's keystore lives in `key-import-publisher` — which REFUSES any
+ * non-publisher role, so auto-import can never promote a replica. Deploy
+ * composes those seams; it forks none of them, and it never signs anything
+ * itself (the client supplies key MATERIAL, the NODE signs: ADR-0003).
+ *
+ * DECISIONS behind the `ipns`-mode policy above (why the keystore is probed
+ * up-front, why an unprobeable node is still only that node's failure, why a
+ * publish-disabled fan-out now refuses, and why the CLI arm deliberately does
+ * NOT refuse a missing master the way `pin`'s does) are recorded in
+ * `work/notes/observations/deploy-auto-imports-site-key-in-ipns-mode-decisions.md`.
  */
 import {KuboRpcClient, type FetchLike} from '../rpc/kubo-rpc-client.js';
 import {buildCar, type BuiltCar} from '../car/car-build.js';
@@ -56,6 +80,8 @@ import {
 	type ResolvedSiteMetadata,
 } from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
+import {importIpnsKeyIntoPublisher} from '../publisher/key-import.js';
+import type {DerivedIpnsKey} from '../derive/ipns-key-derivation.js';
 import type {HostRole, SiteMode} from '../config/config-resolution.js';
 
 /** The MFS directory sites live under (matches site-management). */
@@ -113,6 +139,17 @@ export interface DeployInput {
 	targets: DeployTarget[];
 	/** The MFS directory sites live under (default `/sites`). */
 	sitesDir?: string;
+	/**
+	 * The per-site key derived from the operator's master + this deploy's `id`
+	 * (`deriveIpnsKey`), used ONLY to provision a publisher that does not already
+	 * hold it. Unused in `ipfs` mode, and unused in `ipns` mode when every signing
+	 * target already holds the key (the CI path, which needs no master at all).
+	 * The master itself is env-only and never reaches this module — the caller
+	 * derives (mirroring `pin`/`promote`), so the core never touches the
+	 * environment. Its ABSENCE where it IS needed is a loud refusal
+	 * ({@link DeployDerivedKeyRequiredError}), never a silent unsigned deploy.
+	 */
+	derived?: DerivedIpnsKey;
 }
 
 /** A per-target success record. */
@@ -133,6 +170,82 @@ export interface DeployNodeFailure {
 	baseUrl: string;
 	/** The error that failed this node's deploy (its content is up elsewhere). */
 	error: Error;
+}
+
+/**
+ * The deploy RESOLVED to `ipns` mode — stated (`--set-mode ipns`) or preserved
+ * from what the site already stores — but NOTHING in the fan-out can sign it:
+ * no `publisher` among the targets, or every publisher has
+ * {@link DeployTarget.publish} disabled. A loud refusal rather than a deploy
+ * that lands content under a name nobody moved; a keyless replica must never be
+ * handed a signing key (CONTEXT.md `replica`; ADR-0003). Mirrors
+ * `PinPublisherRequiredError`, and is thrown before any node is touched.
+ */
+export class DeployPublisherRequiredError extends Error {
+	constructor(
+		/** The site id this deploy would have signed. */
+		readonly siteId: string,
+		/** Whether the ipns mode was STATED (vs preserved from the stored one). */
+		readonly stated: boolean,
+		/** The targets that were offered, as roles + publish switches. */
+		readonly targets: Array<{role: HostRole; publish?: boolean}>,
+	) {
+		super(
+			(stated
+				? `--set-mode ipns needs a publisher to sign '${siteId}'`
+				: `'${siteId}' is already stored in \`ipns\` mode, so this deploy must ` +
+					`refresh its name, but that needs a publisher to sign it`) +
+				`: none of the ${targets.length} deploy target(s) can (` +
+				`${targets
+					.map((t) =>
+						t.publish === false ? `${t.role} (publish off)` : t.role,
+					)
+					.join(', ')}). A replica is keyless and only re-announces the ` +
+				`publisher's signed record; deploy with --set-mode ipfs, or include the ` +
+				`publisher in the fan-out.`,
+		);
+		this.name = 'DeployPublisherRequiredError';
+	}
+}
+
+/**
+ * The deploy RESOLVED to `ipns` mode — stated, or preserved from what the site
+ * already stores — but a target that must sign holds NO key for the site and
+ * the caller supplied no {@link DeployInput.derived} key material to import, so
+ * the name could not be produced. A loud refusal BEFORE anything is written to
+ * any node (the master is env-only and lives one layer up, in the CLI), never a
+ * quiet exit 0 that lands the content and leaves the name on the OLD cid.
+ *
+ * Mirrors `PinDerivedKeyRequiredError`, including its STATED/PRESERVED
+ * distinction, and names all three remedies: supply the key (export
+ * `PINNACE_MASTER`), provision the node once (`pinnace promote`), or stop
+ * asking for a name (`--set-mode ipfs`).
+ */
+export class DeployDerivedKeyRequiredError extends Error {
+	constructor(
+		/** The site id (its MFS entry, its key name AND the KDF input). */
+		readonly siteId: string,
+		/** Whether the ipns mode was STATED (vs preserved from the stored one). */
+		readonly stated: boolean,
+		/** The signing target that holds no key for the site. */
+		readonly baseUrl: string,
+	) {
+		super(
+			`deploying '${siteId}' in \`ipns\` mode needs the per-site key, but ` +
+				`${baseUrl} holds no key named '${siteId}' and no \`derived\` key ` +
+				`material was given (deriveIpnsKey from the env-only master + the site ` +
+				`id). ` +
+				(stated
+					? ''
+					: `That mode is what '${siteId}' is already stored under — it is ` +
+						`published under this name and this deploy must refresh it, or the ` +
+						`name keeps pointing at the OLD cid. `) +
+				`Export PINNACE_MASTER so this deploy can import the key, or run ` +
+				`\`pinnace promote ${siteId} --host <name>\` once to provision that ` +
+				`node, or deploy with --set-mode ipfs to stop publishing it.`,
+		);
+		this.name = 'DeployDerivedKeyRequiredError';
+	}
 }
 
 /** The overall deploy result: the CID, and per-node success/failure. */
@@ -169,6 +282,11 @@ export interface DeployResult {
  * from an unreadable node would write a demotion to every node. A node that
  * fails the SAME read later in the fan-out is a per-node failure like any other
  * ({@link DeployResult.failed}), and that node is left untouched.
+ * @throws {DeployPublisherRequiredError} in a resolved `ipns` mode when no
+ * target can sign — before any node is written to.
+ * @throws {DeployDerivedKeyRequiredError} in a resolved `ipns` mode when a
+ * signing target holds no key for the site and no `derived` key was supplied to
+ * import — before any node is written to.
  */
 export async function deploy(input: DeployInput): Promise<DeployResult> {
 	const {sourceDir, car, id, targets} = input;
@@ -184,11 +302,24 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 	const resolved = await resolveFanOutMode(input, sitesDir, ensName);
 	const mode = resolved.mode;
 
+	// Can this deploy actually produce the name it was asked for? Answered (and
+	// refused) BEFORE the CAR is built or a single byte is written anywhere.
+	const stated = input.mode !== undefined;
+	const keystores = await assertCanSign(input, mode, stated);
+
 	// Build the CAR ONCE — the same bytes (and thus the same CID) land on every
 	// node (redundancy, no single point of failure).
 	const built: BuiltCar = car ?? (await buildCar(sourceDir as string));
 
-	const plan: DeployPlan = {built, id, mode, sitesDir, ensName};
+	const plan: DeployPlan = {
+		built,
+		id,
+		mode,
+		sitesDir,
+		ensName,
+		stated,
+		...(input.derived ? {derived: input.derived} : {}),
+	};
 	// Fan out. allSettled so one node's failure never sinks the others.
 	const settled = await Promise.allSettled(
 		targets.map((target, i) =>
@@ -196,6 +327,7 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 				target,
 				plan,
 				i === resolved.resolvedFrom ? resolved.metadata : undefined,
+				keystores[i],
 			),
 		),
 	);
@@ -228,7 +360,26 @@ interface DeployPlan {
 	mode: SiteMode;
 	sitesDir: string;
 	ensName: EnsNameIntent;
+	/** Whether the mode was STATED (only ever used to word a refusal). */
+	stated: boolean;
+	/** The derived key to import into a publisher that holds none (if given). */
+	derived?: DerivedIpnsKey;
 }
+
+/**
+ * What the PRE-FLIGHT `key/list` learned about ONE signing target's keystore:
+ * it already `held` the site's key (with the IPNS id it resolves to), it
+ * answered and holds none (`absent`, so the key must be imported), or it did
+ * not answer at all (`unreachable`).
+ *
+ * `unreachable` is deliberately NOT a refusal: a node that is down must never
+ * sink the whole fan-out (the partial-failure contract). That node simply fails
+ * on its own, loudly, in its own arm of the `allSettled` — where the same
+ * key-absent refusal is repeated as its per-node failure, so an unprobed node
+ * still cannot land content and silently skip the signing.
+ */
+type KeystoreProbe =
+	{kind: 'held'; ipns: string} | {kind: 'absent'} | {kind: 'unreachable'};
 
 /**
  * Resolve the ONE mode this deploy runs in, from the PUBLISHER target — the
@@ -270,6 +421,71 @@ async function resolveFanOutMode(
 	return {mode: metadata.mode, resolvedFrom, metadata};
 }
 
+/**
+ * The PRE-FLIGHT gate of `ipns` mode: can this deploy actually produce the name
+ * it was asked for? Answered before the CAR is built and before ANY node is
+ * written to, so a deploy that cannot honour its mode changes nothing anywhere.
+ *
+ * Two refusals, in the order they can be answered:
+ *  1. nothing in the fan-out can sign ({@link DeployPublisherRequiredError}) —
+ *     no node needed to know that.
+ *  2. a signing target holds no key for the site and no derived key was given
+ *     to import ({@link DeployDerivedKeyRequiredError}). ONE keyless signer
+ *     refuses the WHOLE run: it would otherwise land the content and leave that
+ *     node's name on the old cid, which is the very failure this gate exists for.
+ *
+ * The `key/list` this asks is a READ (it mutates nothing), and it doubles as
+ * the publish path's own lookup — the result is threaded into the fan-out
+ * ({@link publish}), so a signing target is asked about its keystore ONCE, not
+ * twice. In `ipfs` mode nothing here runs at all: no keystore probe, no key
+ * material, no refusal.
+ *
+ * @returns per-target probes, aligned to `input.targets` (undefined for every
+ * target that does not sign: a replica is never even asked).
+ */
+async function assertCanSign(
+	input: DeployInput,
+	mode: SiteMode,
+	stated: boolean,
+): Promise<Array<KeystoreProbe | undefined>> {
+	const {targets, id} = input;
+	const none: Array<KeystoreProbe | undefined> = targets.map(() => undefined);
+	if (mode !== 'ipns') return none;
+	if (!targets.some(shouldPublish)) {
+		throw new DeployPublisherRequiredError(
+			id,
+			stated,
+			targets.map((t) => ({role: t.role, publish: t.publish})),
+		);
+	}
+
+	const probes = [...none];
+	await Promise.all(
+		targets.map(async (target, i) => {
+			if (!shouldPublish(target)) return;
+			try {
+				const ipns = await lookupIpnsKeyId(clientFor(target), id);
+				probes[i] = ipns ? {kind: 'held', ipns} : {kind: 'absent'};
+			} catch {
+				// This node's own problem, not the run's (see KeystoreProbe).
+				probes[i] = {kind: 'unreachable'};
+			}
+		}),
+	);
+
+	if (!input.derived) {
+		const keyless = probes.findIndex((probe) => probe?.kind === 'absent');
+		if (keyless >= 0) {
+			throw new DeployDerivedKeyRequiredError(
+				id,
+				stated,
+				targets[keyless].baseUrl,
+			);
+		}
+	}
+	return probes;
+}
+
 /** The per-node client every step of the deploy speaks through. */
 function clientFor(target: DeployTarget): KuboRpcClient {
 	return new KuboRpcClient({
@@ -291,6 +507,7 @@ async function deployToNode(
 	target: DeployTarget,
 	plan: DeployPlan,
 	metadata?: ResolvedSiteMetadata,
+	probe?: KeystoreProbe,
 ): Promise<DeployNodeOk> {
 	const {built, id, mode, sitesDir, ensName} = plan;
 	const client = clientFor(target);
@@ -318,7 +535,7 @@ async function deployToNode(
 	// 3. Mode branch: ipns mode ADDS publish, and ONLY on a publishing publisher.
 	//    It follows the RESOLVED mode, so a preserved `ipns` site is still signed.
 	if (mode === 'ipns' && shouldPublish(target)) {
-		const ipns = await publish(client, id, built.rootCid);
+		const ipns = await publish(client, target, plan, probe);
 		return {baseUrl: target.baseUrl, cid: built.rootCid, ipns, published: true};
 	}
 
@@ -335,30 +552,59 @@ function shouldPublish(target: DeployTarget): boolean {
 }
 
 /**
- * The publish path (ipns mode, publisher only): `key/list` to resolve the site
- * key's IPNS id, then `name/publish` to sign+refresh the record for
- * `/ipfs/<cid>` — both through the shared `ipns-publish` seam, so deploy, `pin
- * --set-mode ipns` and the on-box republish timer issue the IDENTICAL calls. The
- * keystore key name is the site's single `id` (the same value key-import imports
- * under — one identifier, so the lookup cannot miss by a name/keyId split).
+ * The publish path on ONE signing publisher (ipns mode), composed from the
+ * EXISTING seams — exactly as `pin --set-mode ipns` composes them, because the
+ * two verbs share ONE policy:
+ *  1. the site key's IPNS id, from the PRE-FLIGHT probe ({@link assertCanSign})
+ *     when that node answered, else `key/list` here (the probe could not reach
+ *     it, so this is where its failure surfaces as its own per-node failure).
+ *  2. no key there yet -> {@link importIpnsKeyIntoPublisher} (`key/import`), the
+ *     same call `pin`/`promote` make, which itself REFUSES a non-publisher role
+ *     so auto-import can never promote a replica. The key is DERIVED, never
+ *     invented: nothing here ever issues `key/gen`. The client supplies key
+ *     MATERIAL only; the NODE signs (ADR-0003).
+ *  3. {@link publishSiteRecord} (`name/publish arg=/ipfs/<cid> key=<id>`) — the
+ *     shared call shape deploy, pin and the on-box republish timer use, so the
+ *     record's lifetime/ttl cannot drift between them.
  *
- * Does NOT `key/gen`/`key/import`: the key is provisioned by the sibling
- * `key-import-publisher` task; here we assume it exists. If it does not yet, we
- * skip the publish (returning undefined) rather than silently generating a key
- * deploy has no business owning. (`pin --set-mode ipns` composes the same two calls
- * with the OPPOSITE policy: it imports the derived key first, because the
- * operator just asked for that name.)
+ * The keystore key name is the site's single `id` (the same value key-import
+ * imports under — one identifier, so the lookup cannot miss by a name/keyId
+ * split). Step 2 is skipped when the key is already there, which is what keeps
+ * the CI path master-free: a re-deploy of a provisioned site is a plain
+ * re-publish.
+ *
+ * @throws {DeployDerivedKeyRequiredError} when this node holds no key and no
+ * derived key was supplied — the same refusal the pre-flight gate makes, for
+ * the one node it could not probe. A deploy NEVER lands content on a publisher
+ * and quietly leaves its name behind.
  */
 async function publish(
 	client: KuboRpcClient,
-	id: string,
-	cid: string,
-): Promise<string | undefined> {
-	const ipns = await lookupIpnsKeyId(client, id);
+	target: DeployTarget,
+	plan: DeployPlan,
+	probe?: KeystoreProbe,
+): Promise<string> {
+	const {id, derived} = plan;
+	const cid = plan.built.rootCid;
+	let ipns =
+		probe?.kind === 'held'
+			? probe.ipns
+			: probe?.kind === 'absent'
+				? undefined
+				: await lookupIpnsKeyId(client, id);
 	if (!ipns) {
-		// The publisher has no key for this site yet (key-import-publisher owns
-		// provisioning it). Land the content but do not sign.
-		return undefined;
+		if (!derived) {
+			throw new DeployDerivedKeyRequiredError(id, plan.stated, target.baseUrl);
+		}
+		const imported = await importIpnsKeyIntoPublisher({
+			client,
+			role: target.role,
+			keyName: id,
+			derived,
+		});
+		// Prefer what the NODE says the key resolves to; fall back to the locally
+		// derived id (the same value by construction: one master + one id = one name).
+		ipns = imported.Id ?? derived.ipnsId;
 	}
 	await publishSiteRecord({client, id, cid});
 	return ipns;

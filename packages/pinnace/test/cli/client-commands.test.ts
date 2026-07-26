@@ -1,6 +1,10 @@
 import {describe, it, expect} from 'vitest';
 import {run, type ClientDeps, type RunContext} from '../../src/cli/run.js';
 import {PinSourceResolveError} from '../../src/pin/pin-external.js';
+import {
+	DeployDerivedKeyRequiredError,
+	DeployPublisherRequiredError,
+} from '../../src/deploy/deploy.js';
 import type {PinnaceConfigFile} from '../../src/config/config-resolution.js';
 
 /**
@@ -1112,6 +1116,89 @@ describe('pin --from-ipns <source>: MIGRATE from an existing IPNS name', () => {
 		expect(code).toBe(1);
 		expect(err.join('\n')).toContain('k51nothere');
 		expect(err.join('\n')).toContain('routing: not found');
+	});
+});
+
+describe('deploy in ipns mode — the CLI derives the key OPTIMISTICALLY (as pin does)', () => {
+	/** The master is env-ONLY (never a pinnace.json field), exactly as pin. */
+	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
+
+	it('--set-mode ipns: derives from the master + the site id and passes it down', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...masterEnv}});
+		const code = await run(
+			['deploy', '--set-mode', 'ipns', './dist', 'mysite'],
+			context,
+		);
+		expect(code).toBe(0);
+		// The single `id` positional IS the KDF input, as for derive/promote/pin.
+		expect(calls.deriveIpnsKey.length).toBe(1);
+		expect(calls.deriveIpnsKey[0]).toMatchObject({
+			master: 'the-master-secret',
+			keyId: 'mysite',
+		});
+		expect(
+			(calls.deploy[0] as {derived?: {ipnsId: string}}).derived?.ipnsId,
+		).toBe('k51stubid');
+	});
+
+	it('NO --set-mode: still derives (only the core knows the stored mode)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...masterEnv}});
+		expect(await run(['deploy', './dist', 'mysite'], context)).toBe(0);
+		expect(calls.deriveIpnsKey.length).toBe(1);
+		expect((calls.deploy[0] as {mode?: string}).mode).toBeUndefined();
+	});
+
+	it('--set-mode ipfs: derives nothing at all', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...masterEnv}});
+		expect(
+			await run(['deploy', '--set-mode', 'ipfs', './dist', 'mysite'], context),
+		).toBe(0);
+		expect(calls.deriveIpnsKey.length).toBe(0);
+		expect((calls.deploy[0] as {derived?: unknown}).derived).toBeUndefined();
+	});
+
+	it('--set-mode ipns with NO master still DEPLOYS (the CI path is master-free)', async () => {
+		// Unlike `pin`, deploy does not pre-refuse on a missing master: the
+		// publisher may already hold the key (the CI path). Only the CORE, which
+		// can see the keystore, decides between auto-import and a loud refusal.
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['deploy', '--set-mode', 'ipns', './dist', 'mysite'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(calls.deriveIpnsKey.length).toBe(0);
+		expect(calls.deploy.length).toBe(1);
+		expect((calls.deploy[0] as {derived?: unknown}).derived).toBeUndefined();
+	});
+
+	it('the core REFUSALS surface as a loud exit 1 (not a stack trace)', async () => {
+		for (const error of [
+			new DeployDerivedKeyRequiredError('mysite', true, 'https://a.example'),
+			new DeployPublisherRequiredError('mysite', true, [
+				{role: 'replica' as const},
+			]),
+		]) {
+			const {deps} = recordingDeps();
+			const refusing: ClientDeps = {
+				...deps,
+				deploy: async () => {
+					throw error;
+				},
+			};
+			const {context, err} = ctx({deps: refusing, env: {...hostTokenEnv}});
+			const code = await run(
+				['deploy', '--set-mode', 'ipns', './dist', 'mysite'],
+				context,
+			);
+			expect(code).not.toBe(0);
+			expect(err.join('\n')).toContain('pinnace deploy:');
+			expect(err.join('\n')).toContain(error.message);
+		}
 	});
 });
 

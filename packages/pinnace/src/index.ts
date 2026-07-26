@@ -157,6 +157,8 @@ export {
 } from './site/site-management.js';
 export {
 	deploy,
+	DeployPublisherRequiredError,
+	DeployDerivedKeyRequiredError,
 	type DeployInput,
 	type DeployTarget,
 	type DeployResult,

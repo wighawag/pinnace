@@ -73,6 +73,8 @@ import {
 } from '../provision/cloud-init.js';
 import {
 	deploy as coreDeploy,
+	DeployDerivedKeyRequiredError,
+	DeployPublisherRequiredError,
 	type DeployInput,
 	type DeployResult,
 	type DeployTarget,
@@ -611,6 +613,18 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
  * and the CLI simply states nothing; only an INVALID value is an unresolved
  * mode: a loud refusal naming the site, never a guess.
  *
+ * `ipns` MODE PROVISIONS ITS OWN KEY (the same policy `pin --set-mode ipns`
+ * has). The key is derived from the env-ONLY master + the site `id` (the single
+ * `id` IS the KDF input, as for `derive`/`promote`/`pin`) and handed to the
+ * core, which imports it onto a publisher that holds none. The CLI derives
+ * OPTIMISTICALLY — whenever a master is available and the resolved mode COULD be
+ * `ipns` — because only the core knows the site's stored mode and what the
+ * publisher's keystore holds. Unlike `pin`, a missing master is NOT refused
+ * here: a publisher that already holds the key signs with no master in sight,
+ * which is exactly how CI deploys. The core makes the loud, pre-flight refusals
+ * ({@link DeployDerivedKeyRequiredError}, {@link DeployPublisherRequiredError}),
+ * which this prints as a plain exit-1 error.
+ *
  * The two ensName verb-flags ({@link ensNameIntentFromFlags}) decide what the
  * deploy writes into the site's MFS `metadata.json`; omitting them leaves the
  * site's existing `ensName` untouched.
@@ -660,15 +674,50 @@ async function runDeploy(
 		}
 		throw error;
 	}
+	// The key material a resolved `ipns` mode may need, mirroring `pin`: a purely
+	// local KDF over the env-ONLY master (no node contact), derived WHENEVER it
+	// could be used, because only the CORE (which reads the site's stored mode and
+	// the publisher's keystore) knows whether it is needed. A stated `ipfs` deploy
+	// derives nothing at all.
+	//
+	// Deliberately UNLIKE `pin`, an unset master is NOT a CLI refusal here: the
+	// publisher may ALREADY hold the key, which is the CI path (`--set-mode ipns`
+	// with no master must keep working). The core refuses loudly
+	// ({@link DeployDerivedKeyRequiredError}) only when the key is genuinely
+	// missing AND unavailable.
+	let derived: DerivedIpnsKey | undefined;
+	if (mode.kind === 'preserve' || mode.mode === 'ipns') {
+		const master = resolveMasterSecret({env: rc.env});
+		// The single `id` IS the site id AND the KDF input (as derive/promote/pin).
+		if (master) derived = rc.deps.deriveIpnsKey({master, keyId: siteId});
+	}
+
 	const input: DeployInput = {
 		sourceDir: dir,
 		id: siteId,
 		...(mode.kind === 'set' ? {mode: mode.mode} : {}),
 		targets,
 		ensName,
+		...(derived ? {derived} : {}),
 	};
 
-	const result = await rc.deps.deploy(input);
+	let result: DeployResult;
+	try {
+		result = await rc.deps.deploy(input);
+	} catch (error) {
+		// The two `ipns`-mode refusals the CLI cannot pre-check, because both rest
+		// on what only the NODES can answer (the site's stored mode, and whether the
+		// publisher already holds the key). Both are pre-flight in the core, so
+		// nothing was written anywhere.
+		if (
+			error instanceof DeployDerivedKeyRequiredError ||
+			error instanceof DeployPublisherRequiredError
+		) {
+			rc.err(`pinnace deploy: ${error.message}`);
+			return 1;
+		}
+		throw error;
+	}
 	rc.out(`cid: ${result.cid}`);
 	for (const ok of result.ok) {
 		rc.out(

@@ -99,6 +99,7 @@ The full flow, from zero to a redundant, failover-capable IPNS site. Values belo
 ```sh
 export PINNACE_HOST_PUBLISHER_TOKEN=$(openssl rand -hex 32)
 export PINNACE_HOST_REPLICA_TOKEN=$(openssl rand -hex 32)
+export PINNACE_MASTER=<your high-entropy master secret>   # every ipns name derives from this
 # choose one id for the site, used as both its MFS home and the key input
 ```
 
@@ -149,17 +150,19 @@ Print a site's `k51...` id from the master + id with no deploy, network, or conf
 pinnace derive mysite
 ```
 
-### 5. Deploy + provision the publisher key
+### 5. Deploy
 
 ```sh
-# build one CAR, import the same CID into every node, place it in the MFS wrapper
+# build one CAR, import the same CID into every node, place it in the MFS wrapper,
+# and publish the name (importing the derived key onto the publisher if it has none)
 pinnace --config pinnace.json deploy --set-mode ipns ./site mysite
-
-# import the derived key onto the publisher (and flip its role to publisher)
-pinnace --config pinnace.json promote mysite --host publisher
 ```
 
-`--set-mode ipns` is stated ONCE: it is written into the site's `metadata.json`, so every later deploy of `mysite` picks it up from there.
+That is the whole first deploy: in `ipns` mode `deploy` PROVISIONS its own key. If the publisher's keystore has no key for `mysite`, the key derived from your master + the site id is imported onto it (never generated on the box, never onto a replica) and the name is published. No separate `promote` step is needed for a new site.
+
+`deploy --set-mode ipns` either produces a working name or fails telling you how to fix it: if the publisher holds no key and no `PINNACE_MASTER` is exported, the deploy REFUSES before writing anything to any node, naming your three options (export the master, run `pinnace promote`, or deploy with `--set-mode ipfs`). It never lands content and quietly leaves the name on the old CID.
+
+`--set-mode ipns` is stated ONCE: it is written into the site's `metadata.json`, so every later deploy of `mysite` picks it up from there. Later deploys need NO master, because the publisher already holds the key — which is what makes CI deploys (`install-ci`) key-free: they just re-sign the new CID.
 
 After this the on-box timers run the failover loop automatically: the publisher re-signs + exports the record, replicas mirror + re-announce it, and if the publisher goes down the replicas keep the name alive from their cached record within its validity window.
 
@@ -197,9 +200,9 @@ curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the export
 | Command | What it does |
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
-| `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher. Omitted flags preserve the site's stored `mode`/`ensName`. |
+| `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. |
 | `pinnace pin <cid> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows). Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
-| `pinnace promote <id> [--host <name>]` | Derive the per-site key from the master and import it onto the host, making it the publisher (also the replica-promotion path). |
+| `pinnace promote <id> [--host <name>]` | The deliberate FAILOVER path: derive the per-site key from the master and import it onto the named host, flipping a replica to publisher so it can sign the name (e.g. after losing the original publisher). `deploy`/`pin` provision an existing publisher's key themselves, so this is not a step in a normal first deploy. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName` and the eth.limo name they resolve to, network-announce, gateway-serves. |
 | `pinnace install-ci --system github --build-command <c> --output-dir <d>` | Emit a deploy CI workflow and report the secrets/vars to set. |

@@ -3,7 +3,14 @@ import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MockKuboApi, type RecordedRequest} from '../../src/rpc/mock-kubo.js';
-import {deploy, type DeployTarget} from '../../src/deploy/deploy.js';
+import {
+	deploy,
+	DeployDerivedKeyRequiredError,
+	DeployPublisherRequiredError,
+	type DeployTarget,
+} from '../../src/deploy/deploy.js';
+import {deriveIpnsKey} from '../../src/derive/ipns-key-derivation.js';
+import {serializeIpnsKeyForImport} from '../../src/publisher/key-import.js';
 import {
 	parseSiteMetadata,
 	EnsNameInferenceError,
@@ -438,7 +445,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		expect(a.requestsFor('name/publish').length).toBe(0);
 	});
 
-	it('ipns mode: ADDS key/list + name/publish AFTER import + MFS', async () => {
+	it('ipns mode: PROBES the keystore up-front, then ADDS name/publish after import + MFS', async () => {
 		const a = mockNode('https://node-a.test', 'k51mysite');
 		await deploy({
 			sourceDir: siteDir,
@@ -447,15 +454,17 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
 		});
 
-		// The FULL sequence: import + MFS, THEN key/list + name/publish.
+		// The FULL sequence: the keystore question is asked BEFORE anything is
+		// written (it is what decides whether this deploy can sign at all), and
+		// that ONE key/list also serves the publish — it is not asked twice.
 		expect(a.requests.map((r) => r.path)).toEqual([
+			'key/list',
 			'dag/import',
 			'files/ls',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
 			'files/write',
-			'key/list',
 			'name/publish',
 		]);
 
@@ -672,16 +681,23 @@ describe('deploy — a replica / publish-disabled target NEVER publishes', () =>
 	});
 
 	it('a publish-disabled publisher (publish:false) never name/publishes', async () => {
+		const signer = mockNode('https://signer.test', 'k51a');
 		const a = mockNode('https://node-a.test', 'k51a');
 		await deploy({
 			sourceDir: siteDir,
 			id: 'mysite.eth',
 			mode: 'ipns',
-			targets: [targetWith(a, 'token-a', {role: 'publisher', publish: false})],
+			targets: [
+				targetWith(signer, 'token-signer', {role: 'publisher'}),
+				targetWith(a, 'token-a', {role: 'publisher', publish: false}),
+			],
 		});
 		expect(a.requestsFor('name/publish').length).toBe(0);
+		expect(a.requestsFor('key/list').length).toBe(0);
 		expect(a.requestsFor('dag/import').length).toBe(1);
 		expect(a.requestsFor('files/cp').length).toBe(1);
+		// The one target that CAN sign still did.
+		expect(signer.requestsFor('name/publish').length).toBe(1);
 	});
 });
 
@@ -724,5 +740,326 @@ describe('deploy — multi-target fan-out (partial failure is still success)', (
 		expect(result.success).toBe(false);
 		expect(result.ok.length).toBe(0);
 		expect(result.failed.length).toBe(2);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// `ipns` mode PROVISIONS its own key, or REFUSES (task
+// `deploy-auto-imports-site-key-in-ipns-mode`). Deploy now carries pin's policy,
+// not the opposite one: the derived key is IMPORTED when the publisher holds
+// none and the caller supplied it, and a deploy that could not sign the name it
+// was asked for is REFUSED UP-FRONT rather than landing content under a name
+// left pointing at the OLD cid.
+// ---------------------------------------------------------------------------
+
+/**
+ * The FROZEN golden vector from `test/derive/ipns-key-derivation.test.ts` (the
+ * same one the pin tests use): the same (master, id) yields the same `k51...`
+ * id everywhere, so a deploy reports the name `derive`/`promote` already print.
+ */
+const GOLDEN_MASTER = 'test-master-secret';
+const GOLDEN_ID = 'mysite';
+const GOLDEN_IPNS_ID =
+	'k51qzi5uqu5dkkob0ou1d9xbkr1yskaj07trqc5czn58kvkos6n7y2yid3u4n5';
+
+/** The derived per-site key the CLI resolves from the env-only master. */
+function derivedForGoldenId() {
+	return deriveIpnsKey({master: GOLDEN_MASTER, keyId: GOLDEN_ID});
+}
+
+/** A node whose keystore is EMPTY (the FIRST ipns deploy: nothing can sign yet). */
+function keylessNode(baseUrl: string, storedMetadata?: string): MockKuboApi {
+	const mock = mockNode(baseUrl, GOLDEN_IPNS_ID);
+	mock.on('key/list', {json: {Keys: []}});
+	mock.on('key/import', {json: {Name: GOLDEN_ID, Id: GOLDEN_IPNS_ID}});
+	seedMetadata(mock, storedMetadata);
+	return mock;
+}
+
+/** A node that ALREADY holds the site's key (the CI path: no master needed). */
+function keyedNode(baseUrl: string, storedMetadata?: string): MockKuboApi {
+	const mock = mockNode(baseUrl, GOLDEN_IPNS_ID);
+	mock.on('key/list', {
+		json: {Keys: [{Name: GOLDEN_ID, Id: GOLDEN_IPNS_ID}]},
+	});
+	seedMetadata(mock, storedMetadata);
+	return mock;
+}
+
+/** Make the node either STORE the given metadata.json, or store none at all. */
+function seedMetadata(mock: MockKuboApi, storedMetadata?: string): void {
+	if (storedMetadata === undefined) {
+		mock.on('files/read', {status: 500, text: 'file does not exist'});
+		return;
+	}
+	mock.on('files/ls', {
+		json: {Entries: [{Name: 'content'}, {Name: 'metadata.json'}]},
+	});
+	mock.on('files/read', {text: storedMetadata});
+}
+
+/** Every call that CHANGES a node: a refused deploy must have made none. */
+const MUTATING_PATHS = [
+	'dag/import',
+	'pin/add',
+	'files/mkdir',
+	'files/rm',
+	'files/cp',
+	'files/write',
+	'key/import',
+	'name/publish',
+];
+
+/** Assert this node was left completely untouched by a refused deploy. */
+function expectNothingMutated(mock: MockKuboApi): void {
+	expect(
+		mock.requests.map((r) => r.path).filter((p) => MUTATING_PATHS.includes(p)),
+	).toEqual([]);
+}
+
+describe('deploy — ipns mode IMPORTS the derived key when the publisher has none', () => {
+	it('imports the key (no key/gen) and then publishes, reporting the ipns id', async () => {
+		const a = keylessNode('https://publisher.test');
+		const derived = derivedForGoldenId();
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			mode: 'ipns',
+			derived,
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+
+		// The key MATERIAL is supplied by the client; the NODE signs (ADR-0003).
+		// Nothing is invented: no key/gen, ever.
+		const imported = a.requestsFor('key/import');
+		expect(imported.length).toBe(1);
+		expect(imported[0].query.get('arg')).toBe(GOLDEN_ID);
+		expect(
+			Buffer.from(imported[0].fileParts?.[0].bytes as Uint8Array).toString(
+				'hex',
+			),
+		).toBe(Buffer.from(serializeIpnsKeyForImport(derived)).toString('hex'));
+		expect(a.requestsFor('key/gen').length).toBe(0);
+
+		// The import happens on the way to the publish, after the content landed.
+		expect(a.requests.map((r) => r.path)).toEqual([
+			'key/list',
+			'dag/import',
+			'files/ls',
+			'files/mkdir',
+			'files/rm',
+			'files/cp',
+			'files/write',
+			'key/import',
+			'name/publish',
+		]);
+
+		// ...and the operator is told the name they now control.
+		expect(result.ok[0].published).toBe(true);
+		expect(result.ok[0].ipns).toBe(GOLDEN_IPNS_ID);
+	});
+
+	it('imports for a PRESERVED stored `ipns` too (a re-deploy refreshes its name)', async () => {
+		const a = keylessNode('https://publisher.test', '{"mode":"ipns"}');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			derived: derivedForGoldenId(),
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		expect(result.mode).toBe('ipns');
+		expect(a.requestsFor('key/import').length).toBe(1);
+		expect(a.requestsFor('name/publish').length).toBe(1);
+	});
+
+	it('the key ALREADY there: publishes with NO derived key and NO key/import', async () => {
+		// THE CI PATH. The import happened once from the operator's machine (or
+		// via `promote`); every later deploy just signs, with no master in sight.
+		const a = keyedNode('https://publisher.test', '{"mode":"ipns"}');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		expect(result.success).toBe(true);
+		expect(result.ok[0].ipns).toBe(GOLDEN_IPNS_ID);
+		expect(a.requestsFor('key/import').length).toBe(0);
+		// The keystore is asked ONCE (the pre-flight probe serves the publish).
+		expect(a.requestsFor('key/list').length).toBe(1);
+		expect(a.requestsFor('name/publish').length).toBe(1);
+	});
+
+	it('a REPLICA is never handed a key and never signs (auto-import cannot promote)', async () => {
+		const pub = keylessNode('https://publisher.test');
+		const rep = keylessNode('https://replica.test');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			mode: 'ipns',
+			derived: derivedForGoldenId(),
+			targets: [
+				targetWith(pub, 'token-pub', {role: 'publisher'}),
+				targetWith(rep, 'token-rep', {role: 'replica'}),
+			],
+		});
+		expect(result.ok.length).toBe(2);
+		// The replica landed + placed the content, and that is ALL it did.
+		expect(rep.requestsFor('dag/import').length).toBe(1);
+		expect(rep.requestsFor('files/cp').length).toBe(1);
+		expect(rep.requestsFor('key/list').length).toBe(0);
+		expect(rep.requestsFor('key/import').length).toBe(0);
+		expect(rep.requestsFor('name/publish').length).toBe(0);
+		// Only the publisher was provisioned.
+		expect(pub.requestsFor('key/import').length).toBe(1);
+	});
+
+	it('ipfs mode is untouched: no keystore probe, no import, no refusal', async () => {
+		const a = keylessNode('https://publisher.test');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			mode: 'ipfs',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		expect(result.success).toBe(true);
+		expect(a.requestsFor('key/list').length).toBe(0);
+		expect(a.requestsFor('key/import').length).toBe(0);
+		expect(a.requestsFor('name/publish').length).toBe(0);
+	});
+});
+
+describe('deploy — ipns mode REFUSES rather than silently not signing', () => {
+	it('STATED --set-mode ipns with no key and no derived key: refuses, naming all three remedies', async () => {
+		const a = keylessNode('https://publisher.test');
+		let error: unknown;
+		await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			mode: 'ipns',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		}).catch((thrown: unknown) => {
+			error = thrown;
+		});
+		expect(error).toBeInstanceOf(DeployDerivedKeyRequiredError);
+		const message = (error as Error).message;
+		expect(message).toContain(GOLDEN_ID);
+		expect(message).toContain('PINNACE_MASTER');
+		expect(message).toContain('promote');
+		expect(message).toContain('--set-mode ipfs');
+		// A STATED mode does not claim the site is already published.
+		expect(message).not.toContain('already');
+		expectNothingMutated(a);
+	});
+
+	it('PRESERVED stored `ipns` with no key and no derived key: refuses, saying the name is already live', async () => {
+		const a = keylessNode('https://publisher.test', '{"mode":"ipns"}');
+		let error: unknown;
+		await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		}).catch((thrown: unknown) => {
+			error = thrown;
+		});
+		expect(error).toBeInstanceOf(DeployDerivedKeyRequiredError);
+		const message = (error as Error).message;
+		expect(message).toContain('already');
+		expect(message).toContain('PINNACE_MASTER');
+		expect(message).toContain('promote');
+		expect(message).toContain('--set-mode ipfs');
+		expectNothingMutated(a);
+	});
+
+	it('refuses BEFORE touching ANY node of the fan-out', async () => {
+		const pub = keylessNode('https://publisher.test');
+		const rep = keylessNode('https://replica.test');
+		await expect(
+			deploy({
+				sourceDir: siteDir,
+				id: GOLDEN_ID,
+				mode: 'ipns',
+				targets: [
+					targetWith(pub, 'token-pub', {role: 'publisher'}),
+					targetWith(rep, 'token-rep', {role: 'replica'}),
+				],
+			}),
+		).rejects.toBeInstanceOf(DeployDerivedKeyRequiredError);
+		expectNothingMutated(pub);
+		expectNothingMutated(rep);
+		// The replica was not even asked about its keystore.
+		expect(rep.requests.length).toBe(0);
+	});
+
+	it('one keyless publisher among several refuses the WHOLE run (not just that node)', async () => {
+		const keyed = keyedNode('https://keyed.test');
+		const keyless = keylessNode('https://keyless.test');
+		await expect(
+			deploy({
+				sourceDir: siteDir,
+				id: GOLDEN_ID,
+				mode: 'ipns',
+				targets: [
+					targetWith(keyed, 'token-keyed', {role: 'publisher'}),
+					targetWith(keyless, 'token-keyless', {role: 'publisher'}),
+				],
+			}),
+		).rejects.toBeInstanceOf(DeployDerivedKeyRequiredError);
+		expectNothingMutated(keyed);
+		expectNothingMutated(keyless);
+	});
+
+	it('resolved `ipns` with NO signing target: refuses (a replica is keyless)', async () => {
+		const rep = keylessNode('https://replica.test');
+		let error: unknown;
+		await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			mode: 'ipns',
+			derived: derivedForGoldenId(),
+			targets: [targetWith(rep, 'token-rep', {role: 'replica'})],
+		}).catch((thrown: unknown) => {
+			error = thrown;
+		});
+		expect(error).toBeInstanceOf(DeployPublisherRequiredError);
+		expect((error as Error).message).toMatch(/publisher/i);
+		expectNothingMutated(rep);
+	});
+
+	it('resolved `ipns` with every publisher publish-disabled: refuses too', async () => {
+		const a = keyedNode('https://node-a.test');
+		await expect(
+			deploy({
+				sourceDir: siteDir,
+				id: GOLDEN_ID,
+				mode: 'ipns',
+				derived: derivedForGoldenId(),
+				targets: [
+					targetWith(a, 'token-a', {role: 'publisher', publish: false}),
+				],
+			}),
+		).rejects.toBeInstanceOf(DeployPublisherRequiredError);
+		expectNothingMutated(a);
+	});
+
+	it('a publisher that cannot be probed is that NODE’s failure, not the run’s', async () => {
+		// A down node must never sink the fan-out (the partial-failure contract):
+		// its keystore answer is simply unknown, so the deploy proceeds and the
+		// node fails on its own, loudly, while the healthy node still signs.
+		const good = keyedNode('https://good.test');
+		const down = keyedNode('https://down.test');
+		down.on('key/list', {status: 500, text: 'boom'});
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: GOLDEN_ID,
+			mode: 'ipns',
+			targets: [
+				targetWith(good, 'token-good', {role: 'publisher'}),
+				targetWith(down, 'token-down', {role: 'publisher'}),
+			],
+		});
+		expect(result.success).toBe(true);
+		expect(result.ok.map((o) => o.baseUrl)).toEqual(['https://good.test']);
+		expect(result.failed.map((f) => f.baseUrl)).toEqual(['https://down.test']);
+		expect(good.requestsFor('name/publish').length).toBe(1);
 	});
 });
