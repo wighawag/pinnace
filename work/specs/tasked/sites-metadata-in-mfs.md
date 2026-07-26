@@ -30,7 +30,7 @@ The eth.limo `ensName` lever that could not be built before (its own task bounce
 5. As an operator, I want the on-box loop (warm/republish/status) to READ each site's metadata from MFS, so that per-site behaviour (eth.limo warming, ipns vs ipfs) is driven by what the node can actually see, staying autonomous.
 6. As an operator, I want eth.limo warming resolved from `metadata.ensName` with the three-way rule — explicit non-empty warms `<ensName>.limo`; unset + `.eth` id infers `ensName = id`; `ensName: ""` opts out even for a `.eth` id — so that a `.eth`-named site auto-warms eth.limo and I can opt out, and the lever the docs promise actually works.
 7. As an operator, I want `site remove <id>` to still cleanly remove a site (MFS entry + unpin) under the new wrapper layout, so that I can delete a site regardless of layout.
-8. As an operator migrating from the old flat layout (`/sites/<id>` = the content CID directly), I want to remove the old entries and re-deploy under the new wrapper layout without ceremony, so that the transition is a delete + re-deploy.
+8. ~~As an operator migrating from the old flat layout (`/sites/<id>` = the content CID directly), I want to remove the old entries and re-deploy under the new wrapper layout without ceremony, so that the transition is a delete + re-deploy.~~ **DROPPED (2026-07-26, human decision).** There is no installed base to migrate: pinnace has no users on the flat layout, so the story protects nobody. Deliberately accepted consequences, should a flat-layout site exist anywhere: a re-`deploy` over one SUCCEEDS but leaves the old content tree as garbage inside the new wrapper, and `site remove` cannot resolve its content cid so it drops the MFS entry while reporting `unpinned: false` and leaking the pin. Neither is worth code. If an installed base ever appears, this becomes a fresh spec, not a revival of this story.
 
 ## Implementation Decisions
 
@@ -52,7 +52,7 @@ Test at the existing seams: the mock Kubo RPC API for MFS reads/writes (`files/m
 
 ## Out of Scope
 
-- Automatically MIGRATING existing flat-layout sites in place (rewriting `/sites/<id>` from content-CID to a wrapper dir): out of scope; the transition is delete + re-deploy (story 8). An in-place migration helper could be a later idea.
+- ANY handling of existing flat-layout sites, in place or otherwise: out of scope, and story 8 (the delete + re-deploy transition) is now DROPPED outright rather than merely unautomated — there is no installed base, so no migration path is built, documented or tested. See story 8 for the accepted consequences.
 - Arbitrary/extensible metadata schemas or a metadata versioning scheme: v1 metadata is a small fixed shape (`ensName`, `mode`); growth is expected but not a v1 concern.
 - Changing IPNS key derivation, the publisher/replica record machinery, or the dashboard rendering (they consume the new discovery output but their own logic is unchanged here).
 
