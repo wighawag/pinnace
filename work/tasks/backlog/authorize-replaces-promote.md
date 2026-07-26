@@ -5,6 +5,7 @@ spec: sites-metadata-in-mfs
 promptGuidance.testFirst: true
 blockedBy: []
 covers: [4]
+needsAnswers: true
 ---
 
 ## What to build
