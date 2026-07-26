@@ -77,7 +77,7 @@ pinnace deploy --endpoint https://ipfs-publisher.example.com --set-mode ipns ./d
 pinnace status --endpoint https://ipfs-publisher.example.com
 ```
 
-`--endpoint` is a flag OF the command (write it after the verb; only `--config` may precede one). Being the arg tier it REPLACES the file's hosts for that run (so it also narrows a multi-node config to one node); `--host-endpoint.<name> <url>` instead overrides the endpoint OF a host the file declares. `pinnace.json` is a convenience for multi-node / durable setups, not a requirement — and `derive` needs no node, and so no config, at all.
+`--endpoint` is GLOBAL, like `--config`: write it on either side of the verb (`pinnace --endpoint <url> status` and `pinnace status --endpoint <url>` are the same command), but only once. Being the arg tier it REPLACES the file's hosts for that run (so it also narrows a multi-node config to one node); `--host-endpoint.<name> <url>` instead overrides the endpoint OF a host the file declares. `pinnace.json` is a convenience for multi-node / durable setups, not a requirement — and `derive` needs no node, and so no config, at all.
 
 Secrets are **env-only, never in the config file** (structurally: the resolver has no file path for them). Each host's bearer token is read from `PINNACE_HOST_<NAME>_TOKEN` (the name upper-cased), and the master from `PINNACE_MASTER`:
 
@@ -206,9 +206,11 @@ curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the export
 | `pinnace site <list\|add\|remove> ...` | Manage the sites a node serves (MFS wrappers + pins). |
 | `pinnace node <republish\|mirror\|warm\|status>` | The on-box agent verbs (run by the box's systemd timers; role-gated). |
 
-Global: `--config <path>` selects the `pinnace.json` (default `./pinnace.json`, whose ABSENCE is fine — a named-but-missing path fails loud); it is the one flag that may come BEFORE the command.
+Global (either side of the command): `--config <path>` selects the `pinnace.json` (default `./pinnace.json`, whose ABSENCE is fine — a named-but-missing path fails loud), and `--endpoint <url>` supplies one publisher node instead of a config file (token still env-only). `--endpoint` may be given only ONCE: repeating it is a usage error rather than a silent pick.
 
-Every node-touching verb (`deploy`, `pin`, `status`, `site`, `promote`) also accepts, after the verb: `--endpoint <url>` (one publisher node instead of a config file; token still env-only) and `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
+Every node-touching verb (`deploy`, `pin`, `status`, `site`, `promote`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
+
+A flag you type must never mean nothing: any value-taking flag written with NO value (at the end of the line, or immediately followed by another `--flag`) is a usage error naming it. So a mistyped `pinnace deploy --endpoint --set-mode ipns ./dist mysite` refuses, instead of dropping the endpoint and quietly deploying to every host in `pinnace.json`.
 
 ## Library use
 

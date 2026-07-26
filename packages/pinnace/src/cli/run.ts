@@ -201,6 +201,26 @@ interface ResolvedRunContext {
 	deps: ClientDeps;
 	out: (line: string) => void;
 	err: (line: string) => void;
+	/**
+	 * The GLOBAL `--endpoint <url>` when the operator gave one (never `''`: a
+	 * bare flag is refused in {@link run} before we get here). It is stripped
+	 * from the argv, so the verbs read it from HERE rather than from their own
+	 * parsed flags, and it reaches the resolver through
+	 * {@link cliOverridesFromFlags}.
+	 */
+	endpoint?: string;
+}
+
+/**
+ * The GLOBAL flags, stripped off the argv before the command is read: they may
+ * appear on EITHER side of the verb (`pinnace --endpoint <url> status` and
+ * `pinnace status --endpoint <url>` are the same invocation).
+ */
+interface GlobalFlags {
+	/** `--config <path>`: which `pinnace.json` is the file layer. */
+	configPath?: string;
+	/** `--endpoint <url>`: the single node this run acts on. */
+	endpoint?: string;
 }
 
 /**
@@ -257,19 +277,21 @@ export class ConfigLoadError extends Error {
 
 /**
  * Fill in the run context defaults (real env/file/core/console) once, loading
- * the config from `configPath` (the operator's explicit `--config`, or
- * `undefined` for the `./pinnace.json` default) through the loader seam.
+ * the config from `globals.configPath` (the operator's explicit `--config`, or
+ * `undefined` for the `./pinnace.json` default) through the loader seam, and
+ * carrying the global `--endpoint` through to the verbs.
  */
 function resolveContext(
 	context: RunContext,
-	configPath?: string,
+	globals: GlobalFlags,
 ): ResolvedRunContext {
 	return {
 		env: context.env ?? (process.env as EnvRecord),
-		file: (context.loadConfigFile ?? defaultLoadConfigFile)(configPath),
+		file: (context.loadConfigFile ?? defaultLoadConfigFile)(globals.configPath),
 		deps: context.deps ?? DEFAULT_DEPS,
 		out: context.out ?? ((line) => console.log(line)),
 		err: context.err ?? ((line) => console.error(line)),
+		...(globals.endpoint !== undefined ? {endpoint: globals.endpoint} : {}),
 	};
 }
 
@@ -281,22 +303,42 @@ function resolveContext(
  * benign no-op (exit 0); an UNKNOWN command is loud (exit 1) so the surface is
  * an explicit allow-list, not a silent catch-all.
  *
- * A GLOBAL `--config <path>` flag may appear BEFORE the command; it is consumed
- * here (stripped from the per-verb argv) and threaded into config loading via
- * the {@link RunContext.loadConfigFile} seam. With no `--config`, the default
- * `./pinnace.json` is read and its absence is benign; an explicitly-named path
- * that is missing/unreadable/invalid JSON fails loud (names the path, exit 1).
+ * Two GLOBAL flags may appear on EITHER side of the command and are consumed
+ * here (stripped from the per-verb argv):
+ *  - `--config <path>` is threaded into config loading via the
+ *    {@link RunContext.loadConfigFile} seam. With no `--config`, the default
+ *    `./pinnace.json` is read and its absence is benign; an explicitly-named
+ *    path that is missing/unreadable/invalid JSON fails loud (names the path,
+ *    exit 1).
+ *  - `--endpoint <url>` is carried on {@link ResolvedRunContext.endpoint} to the
+ *    verbs. A BARE or REPEATED one is a loud usage error here, BEFORE any
+ *    config is loaded or any verb runs ({@link takeEndpointFlag}).
  */
 export async function run(
 	argv: readonly string[],
 	context: RunContext = {},
 ): Promise<number> {
-	const {configPath, rest: postGlobal} = takeConfigFlag(argv);
-
+	// --endpoint is stripped FIRST so its bare form is judged against what the
+	// operator actually typed: after --config were stripped, a bare
+	// `--endpoint --config <path>` would look like `--endpoint <path>`.
+	const endpointFlag = takeEndpointFlag(argv);
 	const err = context.err ?? ((line) => console.error(line));
+	if (endpointFlag.error !== undefined) {
+		// A usage error, refused before any file/network work: the operator typed a
+		// targeting instruction we cannot honour, so nothing runs.
+		err(`${name()}: ${endpointFlag.error}`);
+		return 1;
+	}
+	const {configPath, rest: postGlobal} = takeConfigFlag(endpointFlag.rest);
+
 	let rc: ResolvedRunContext;
 	try {
-		rc = resolveContext(context, configPath);
+		rc = resolveContext(context, {
+			configPath,
+			...(endpointFlag.endpoint !== undefined
+				? {endpoint: endpointFlag.endpoint}
+				: {}),
+		});
 	} catch (cause) {
 		// A loud, path-named failure only ever comes from an EXPLICIT --config;
 		// the default loader swallows an absent ./pinnace.json into an empty config.
@@ -382,6 +424,75 @@ function takeConfigFlag(argv: readonly string[]): {
 	return {configPath, rest};
 }
 
+/**
+ * Split the GLOBAL `--endpoint <url>` flag off the argv, the way
+ * {@link takeConfigFlag} splits `--config`.
+ *
+ * `--endpoint` READS as global (it names the one node the whole run acts on),
+ * so it is accepted on EITHER side of the command: scanning the WHOLE argv is
+ * what makes `pinnace --endpoint <url> status` and `pinnace status --endpoint
+ * <url>` the same invocation (before this, the leading form died with a
+ * misleading `unknown command '--endpoint'`). Stripping it also keeps a verb
+ * parser from mis-reading the flag or its url as one of its own
+ * flags/positionals. What the flag MEANS is untouched: it is still the arg tier
+ * of {@link CliOverrides.endpoint} (arg > env > file), replacing the file's
+ * hosts for the run.
+ *
+ * Two shapes are refused LOUDLY instead of being resolved to something the
+ * operator did not type (returned as an `error` string for {@link run} to
+ * print, so this stays a pure function):
+ *  - a BARE flag (end of argv, immediately followed by another `--flag`, or an
+ *    explicit empty value): a flag the operator typed must never mean nothing.
+ *    Silently dropping it WIDENED the run back to every host in `pinnace.json`,
+ *    i.e. discarded a narrowing instruction and still succeeded.
+ *  - a REPEATED flag (typically one before AND one after the verb): there is no
+ *    honest winner, even when the two values are identical, so neither is
+ *    picked. (`--config` still takes its LAST occurrence: the two globals
+ *    differ here on purpose, and the reasoning — with the flag-order one, and
+ *    why the verbs that touch no node accept this flag and ignore it — is in
+ *    `work/notes/observations/endpoint-flag-loud-and-global-decisions.md`.)
+ */
+function takeEndpointFlag(argv: readonly string[]): {
+	endpoint?: string;
+	rest: string[];
+	error?: string;
+} {
+	const rest: string[] = [];
+	let endpoint: string | undefined;
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] !== '--endpoint') {
+			rest.push(argv[i]);
+			continue;
+		}
+		// The same no-value convention parseArgs uses, applied BEFORE the value is
+		// swallowed: only a non-flag token is this flag's value.
+		const next = argv[i + 1];
+		const hasValue = next !== undefined && !next.startsWith('--');
+		const value = hasValue ? next : undefined;
+		if (hasValue) i++;
+		if (value === undefined || value === '') {
+			return {
+				rest,
+				error:
+					"--endpoint needs a value: the node's Kubo RPC url, as " +
+					'--endpoint <url> (before or after the command); drop the flag to ' +
+					'act on the hosts in pinnace.json',
+			};
+		}
+		if (endpoint !== undefined) {
+			return {
+				rest,
+				error:
+					`--endpoint given more than once ('${endpoint}' and '${value}'); ` +
+					'it names the ONE node this run acts on, so pass it exactly once ' +
+					'(either side of the command)',
+			};
+		}
+		endpoint = value;
+	}
+	return {...(endpoint !== undefined ? {endpoint} : {}), rest};
+}
+
 /** A parsed argv split into `--flag value` map + bare positionals. */
 interface ParsedArgs {
 	flags: Record<string, string>;
@@ -440,6 +551,7 @@ function parseArgs(
  */
 function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags} = parseArgs(argv);
+	if (!refuseBareFlags('pinnace provision', flags, rc)) return 1;
 	const host = flags['host'];
 	const apiDomain = flags['api-domain'];
 	const acmeEmail = flags['acme-email'];
@@ -508,6 +620,7 @@ async function runDeploy(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv, ENS_NAME_BOOLEAN_FLAGS);
+	if (!refuseBareFlags('pinnace deploy', flags, rc)) return 1;
 	const [dir, siteId] = positionals;
 	if (!dir || !siteId) {
 		rc.err(
@@ -524,7 +637,7 @@ async function runDeploy(
 	const mode = siteModeIntentFromFlags('pinnace deploy', flags, siteId, rc);
 	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
 
-	const cli = cliOverridesFromFlags(flags);
+	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace deploy: ${NO_HOSTS_HINT}`);
@@ -575,6 +688,7 @@ async function runDeploy(
  */
 function runInstallCi(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags} = parseArgs(argv);
+	if (!refuseBareFlags('pinnace install-ci', flags, rc)) return 1;
 	const system = flags['system'];
 	const buildCommand = flags['build-command'];
 	const outputDir = flags['output-dir'];
@@ -622,7 +736,8 @@ async function runStatus(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags} = parseArgs(argv);
-	const cli = cliOverridesFromFlags(flags);
+	if (!refuseBareFlags('pinnace status', flags, rc)) return 1;
+	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace status: ${NO_HOSTS_HINT}`);
@@ -678,7 +793,8 @@ function printedEnsName(ensName: string | undefined): string {
  * Fails loudly if the master is unset.
  */
 function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
-	const {positionals} = parseArgs(argv);
+	const {flags, positionals} = parseArgs(argv);
+	if (!refuseBareFlags('pinnace derive', flags, rc)) return 1;
 	const [siteId] = positionals;
 	if (!siteId) {
 		rc.err('pinnace derive: usage: pinnace derive <id>');
@@ -759,6 +875,7 @@ async function runPin(
 		'no-recursive',
 		...ENS_NAME_BOOLEAN_FLAGS,
 	]);
+	if (!refuseBareFlags('pinnace pin', flags, rc)) return 1;
 	const [cid] = positionals;
 	const fromIpns = flags['from-ipns'];
 	const pinName = flags['as'];
@@ -792,7 +909,7 @@ async function runPin(
 	const mode = siteModeIntentFromFlags('pinnace pin', flags, pinName, rc);
 	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
 
-	const cli = cliOverridesFromFlags(flags);
+	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace pin: ${NO_HOSTS_HINT}`);
@@ -1046,6 +1163,62 @@ function ensNameIntent(
 	return intent;
 }
 
+/**
+ * The flags exempt from {@link refuseBareFlags}, because their bare form is
+ * ALREADY meaningful or already refused, and sweeping them would re-mean or
+ * shadow that:
+ *  - `set-ens-name` takes an OPTIONAL value: bare = infer from a `.eth` id
+ *    ({@link ensNameIntentFromFlags}),
+ *  - `set-mode` owns a TAILORED refusal naming its two values
+ *    ({@link siteModeIntentFromFlags}).
+ * Everything else that takes a value is swept.
+ */
+const OPTIONAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
+	'set-ens-name',
+	'set-mode',
+]);
+
+/**
+ * Refuse every flag the operator typed with NO value, loudly (returns false
+ * after emitting, so the verb can `return 1` without dispatching).
+ *
+ * This is the general form of the rule the bare-`--set-mode` refusal
+ * established: A FLAG THE OPERATOR TYPED MUST NEVER MEAN NOTHING. The verbs
+ * read optional flags as `if (flags['x'])`, so a bare one (parsed as `''` by
+ * {@link parseArgs}: end of argv, immediately followed by another `--flag`, or
+ * an explicit empty value) used to be SWALLOWED, silently reverting to the
+ * default the operator was trying to override: a bare `--host` widened a `pin`
+ * to every node, a bare `--gateways` kept the configured list, a bare
+ * `--host-endpoint.<name>` overrode a host's endpoint with `''`. Called by
+ * every verb right after {@link parseArgs} (the global `--endpoint` is refused
+ * earlier still, in {@link takeEndpointFlag}, since it never reaches a verb).
+ *
+ * It knows nothing of which flags a verb understands, so a bare UNKNOWN flag is
+ * refused too while an unknown flag WITH a value stays ignored as before: the
+ * question here is only whether a TYPED flag carries what it needs, and
+ * rejecting unknown flags is a separate surface decision (recorded, with the
+ * exemption reasoning, in
+ * `work/notes/observations/endpoint-flag-loud-and-global-decisions.md`).
+ */
+function refuseBareFlags(
+	prefix: string,
+	flags: Record<string, string>,
+	rc: ResolvedRunContext,
+): boolean {
+	const bare = Object.keys(flags).filter(
+		(key) => flags[key] === '' && !OPTIONAL_VALUE_FLAGS.has(key),
+	);
+	if (bare.length === 0) return true;
+	const named = bare.map((key) => `--${key}`).join(', ');
+	rc.err(
+		`${prefix}: ${named} ${bare.length === 1 ? 'needs' : 'need'} a value: ` +
+			`pass ${bare.map((key) => `'--${key} <value>'`).join(', ')}, or drop ` +
+			`${bare.length === 1 ? 'the flag' : 'them'} (a flag with no value is ` +
+			'never read as its default)',
+	);
+	return false;
+}
+
 /** Return the keys whose value is falsy (missing required flags), in order. */
 function missingFlags(required: Record<string, string | undefined>): string[] {
 	return Object.entries(required)
@@ -1058,13 +1231,19 @@ function missingFlags(required: Record<string, string | undefined>): string[] {
  * flags. `--gateways a,b` overrides the gateway list; per-host token/endpoint
  * overrides use the `--host-token.<name>` / `--host-endpoint.<name>` form.
  *
- * `--endpoint <url>` is the CONFIG-LESS path: it supplies ONE publisher node
- * directly (its token still env-only, from `PINNACE_HOST_PUBLISHER_TOKEN`), so
- * every node-touching verb works with no `pinnace.json`. Being the arg tier it
+ * `endpoint` is the CONFIG-LESS path: it supplies ONE publisher node directly
+ * (its token still env-only, from `PINNACE_HOST_PUBLISHER_TOKEN`), so every
+ * node-touching verb works with no `pinnace.json`. Being the arg tier it
  * REPLACES the file's hosts — unlike `--host-endpoint.<name>`, which overrides
- * the endpoint OF a host the file declares.
+ * the endpoint OF a host the file declares. It is passed in SEPARATELY because
+ * `--endpoint` is a GLOBAL flag stripped from the argv before any verb parses
+ * it ({@link takeEndpointFlag}), and so is carried on
+ * {@link ResolvedRunContext.endpoint} rather than in `flags`.
  */
-function cliOverridesFromFlags(flags: Record<string, string>): CliOverrides {
+function cliOverridesFromFlags(
+	flags: Record<string, string>,
+	endpoint?: string,
+): CliOverrides {
 	const cli: CliOverrides = {};
 	const hostToken: Record<string, string> = {};
 	const hostEndpoint: Record<string, string> = {};
@@ -1076,7 +1255,7 @@ function cliOverridesFromFlags(flags: Record<string, string>): CliOverrides {
 	}
 	if (Object.keys(hostToken).length > 0) cli.hostToken = hostToken;
 	if (Object.keys(hostEndpoint).length > 0) cli.hostEndpoint = hostEndpoint;
-	if (flags['endpoint']) cli.endpoint = flags['endpoint'];
+	if (endpoint) cli.endpoint = endpoint;
 	if (flags['gateways'])
 		cli.gateways = flags['gateways']
 			.split(',')
@@ -1101,6 +1280,7 @@ async function runSiteCli(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv);
+	if (!refuseBareFlags('pinnace site', flags, rc)) return 1;
 	const [verb, ...verbArgs] = positionals;
 	if (!verb) {
 		rc.err(`pinnace site: expected a verb (${SITE_VERBS.join(', ')})`);
@@ -1113,7 +1293,7 @@ async function runSiteCli(
 		return 1;
 	}
 
-	const cli = cliOverridesFromFlags(flags);
+	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	const client = buildHostClient('pinnace site', flags['host'], cfg, rc, cli);
 	if (!client) return 1; // buildHostClient already emitted the loud error.
@@ -1254,6 +1434,7 @@ async function runPromote(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv);
+	if (!refuseBareFlags('pinnace promote', flags, rc)) return 1;
 	const [siteId] = positionals;
 	if (!siteId) {
 		rc.err('pinnace promote: usage: pinnace promote <id> [--host <name>]');
@@ -1268,7 +1449,7 @@ async function runPromote(
 		return 1;
 	}
 
-	const cli = cliOverridesFromFlags(flags);
+	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	const host = pickHost('pinnace promote', flags['host'], cfg, rc);
 	if (!host) return 1;
