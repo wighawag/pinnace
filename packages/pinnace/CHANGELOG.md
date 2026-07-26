@@ -1,5 +1,65 @@
 # pinnace
 
+## 0.8.0
+
+### Minor Changes
+
+- 3f7daf2: Release the post-reshape correction set as a MINOR, because two changes alter behaviour an existing setup can feel rather than merely repairing it.
+
+  - **`promote` is replaced by `authorize`** (breaking rename, `--host` dropped): the verb now targets the config's declared publisher, is idempotent, and no longer pretends to change any role. Failover is a reprovision, and the docs now say so.
+  - **`deploy --set-mode ipns` on a keyless publisher** no longer exits 0 having quietly signed nothing: it either imports the derived key (when the master is available) or refuses before writing to any node.
+  - **`republish` honours a site's stored `mode`**, so a site stored as `ipfs` is no longer signed just because a key for its id happens to sit in the keystore.
+
+  Together with the metadata write-path repairs and the `--endpoint` fixes, this is a behavioural release, not a patch.
+
+### Patch Changes
+
+- ffb0c64: `promote` is replaced by `authorize`: an honest verb that does exactly what it says.
+
+  BREAKING: `pinnace promote <id> [--host <name>]` is GONE (a hard rename, no alias) and `pinnace authorize [<id>]` replaces it. `--host` is no longer accepted by this verb at all: the config already declares which host is `role: publisher`, so the flag could only restate or contradict it, and typing one is now a loud usage error rather than a silently ignored flag. From the package root, `promoteReplicaToPublisher` / `PromoteReplicaInput` / `PromoteReplicaResult` are replaced by `authorizePublisher` / `AuthorizeInput` / `AuthorizeResult` (plus `AuthorizeSecondSignerError`, `AuthorizedSite`, `AuthorizeStatus`, `AuthorizeHost`, `AuthorizePublisherTarget`), and the core moved from `publisher/record-sequence.ts` into its own `publisher/authorize.ts`.
+
+  The FICTION is deleted. `promoteReplicaToPublisher` returned a hard-coded `role: 'publisher'` and its docs said it flipped the node's role, while persisting nothing: a node's role lives in `pinnace.json` `hosts[].role` and in the box's own `NODE_ROLE` (a cloud-init env value, unreachable over Kubo RPC), neither of which that call touched. Its `currentRole` input was declared and never read. Both are gone. The verb grants key MATERIAL and says so, and the result now reports what actually happened per site: the key name, its ipns id, and whether it was imported now (`authorized`) or was already there (`already-authorized`).
+
+  What `authorize` is FOR is the master-free CI bootstrap: run it ONCE from the machine that holds `PINNACE_MASTER`, and CI deploys that name forever with no master in the pipeline. (`deploy` auto-imports the key too, but only when it HAS the master, which bootstraps nothing for a CI-only project.) It targets the config's declared publisher; the bare form covers every site the publisher holds in MFS, while `authorize <id>` covers exactly that site and does NOT require it to exist in MFS yet, so a key can be pre-authorized before the first deploy.
+
+  It is now IDEMPOTENT: the publisher's keystore is probed with `key/list` FIRST, and a key already held is a clean no-op reported as `already-authorized`, never a re-import. Three refusals guard it, all before anything is written: a config declaring ZERO publishers (nothing to authorize) or MORE THAN ONE (exactly one node per IPNS name may sign it), and another configured host already holding a key for the site — importing then would create a SECOND signer, and two signers race the record's sequence numbers so the name flaps between their cids. The existing refusal to import onto a `replica` (`KeyImportRoleError`, ADR-0003) is unchanged and is now actually reachable: the target's DECLARED role is passed to the import seam instead of the hard-coded `'publisher'` the old code sent.
+
+  `--endpoint <url>` still works and is documented as the ASSERTION it is: it MINTS a synthetic host named `publisher` with role `publisher`, so the operator is claiming that node is the publisher and pinnace cannot verify it (the box's real `NODE_ROLE` is not exposed over Kubo RPC). The role guards therefore cannot fire on that path, and with one visible node neither can the second-signer guard. Nothing fakes a check.
+
+  The docs are corrected to match: the README command table + walkthrough and the CONTEXT.md glossary now describe `authorize`'s primary CI-bootstrap use, state plainly that a real FAILOVER is currently a REPROVISION of the box (roles and `PUBLISHER_ENDPOINT` are cloud-init values), and no longer describe this verb as changing any role. `deploy`'s key-missing refusal now names `pinnace authorize <id>` instead of `pinnace promote <id> --host <name>`.
+
+- 9f5651c: `deploy` now honours a resolved `ipns` mode the way `pin` already does: it either produces a working name or fails telling you exactly how to fix it, and never anything in between.
+
+  Previously a deploy asked for a name it could not sign exited 0 having landed the content: the publisher held no key for the site, the publish was silently skipped, and no `ipns://` line was printed. On a FIRST deploy that looked like a live name that did not exist; on a re-deploy of a site STORED as `ipns` (the mode is preserved, so this needs no flag) the content updated while the name kept pointing at the OLD cid, silently.
+
+  `deploy --set-mode ipns` (and a preserved stored `ipns`) now carries pin's policy. The key already on the publisher publishes as before, needing NO master: that is the CI path and it is unchanged. A publisher holding no key gets the DERIVED key imported (`importIpnsKeyIntoPublisher`, the same seam `pin`/`promote` use, which refuses a replica), so a new `ipns` site no longer needs a separate `pinnace promote` step; `promote` is now documented as the deliberate failover / replica-promotion path it is. Nothing is ever generated on the box: no `key/gen`, and no auto-promotion of a replica.
+
+  The two new refusals are PRE-FLIGHT, before the CAR is built and before any import, pin, MFS placement or metadata write on ANY node, so a deploy that cannot honour its mode changes nothing anywhere: `DeployDerivedKeyRequiredError` (a signing target holds no key and no key material was derivable, naming all three remedies: export `PINNACE_MASTER`, run `pinnace promote <id> --host <name>`, or deploy with `--set-mode ipfs`) and `DeployPublisherRequiredError` (nothing in the fan-out can sign: no publisher, or every publisher has `publish` disabled). Both are refusals of the WHOLE run, not per-node failures; a node that merely fails to answer its keystore probe is still just that node's failure, and the rest of the fan-out proceeds.
+
+  BEHAVIOUR CHANGE: `deploy --set-mode ipns` against a keyless publisher used to exit 0 without signing. It now either auto-imports the key (with `PINNACE_MASTER` set) or exits 1 having touched nothing. `--set-mode ipns` with every target unable to sign (previously a quiet land-only deploy) now also refuses. `ipfs` mode is completely unaffected: no keystore lookup, no master, no refusal. New from the package root: `DeployDerivedKeyRequiredError`, `DeployPublisherRequiredError`, and `DeployInput.derived` (the CLI derives it from the env-only master + the site `id`, exactly as `pin` does).
+
+- e398445: Make `--endpoint` behave like the global, honest flag it reads as.
+
+  It is now accepted on EITHER side of the command, exactly like `--config`: `pinnace --endpoint <url> status` and `pinnace status --endpoint <url>` are the same invocation (the leading form used to exit 1 with a misleading `unknown command '--endpoint'`). It is stripped globally before the verb parses anything, so nothing about what it MEANS changed: still the arg tier of the resolution (arg > env > file), still replacing the file's hosts for that run, with `--host-endpoint.<name>` still overriding the endpoint OF a configured host. Given more than once it is a loud usage error naming both values, rather than a silent pick.
+
+  A BARE `--endpoint` is now refused. Previously it parsed as an empty value and was dropped, so `pinnace deploy --endpoint --set-mode ipns ./dist mysite` discarded the operator's targeting instruction and deployed to EVERY host in `pinnace.json`: the worst shape of failure, a narrowing instruction silently widened. All three bare shapes (end of the line, immediately followed by another `--flag`, an explicit empty value) now fail loud naming the flag and its form, in either position.
+
+  The same swallowed-bare-form defect is fixed on every sibling flag, generalising the rule the bare `--set-mode` refusal established: a flag the operator typed must never mean nothing. Any value-taking flag written with no value is now a usage error naming it, so these no longer silently revert to the default they were meant to override: `--host` (a bare one widened a `pin` to every node, and let `site`/`promote` auto-pick), `--gateways`, `--host-endpoint.<name>`, `--host-token.<name>` (which used to override with `''`), `--from-ipns`, and the optional flags of `provision` (`--dashboard-domain`, `--publisher-endpoint`, `--kubo-version`, `--pinnace-version`, `--node-major`) and `install-ci` (`--branch`, `--node-version`). Two flags are deliberately exempt, keeping their existing meaning: `--set-ens-name` (bare = infer from a `.eth` id) and `--set-mode` (which owns a tailored refusal naming `ipfs|ipns`). The arg parser itself is unchanged.
+
+- f3b715b: The on-box loop now ACTS on the per-site metadata it could already see: `republish` obeys the stored `mode`, and `status` reports it.
+
+  `republish` used to decide whether to sign purely from keystore-key presence, so a site the operator deliberately stores as `mode: ipfs` was still signed and republished whenever a key happened to exist for its id (left over from an earlier ipns life, or derived for a sibling purpose). It now resolves per site: a stored `ipfs` is NEVER published, even with a key, and reports its own `ipfs-mode` outcome rather than `no-key` (which would claim a key was missing when one is present); a stored `ipns` behaves exactly as before (key -> `exported`, no key -> `no-key`); and a site with NO stored mode also behaves exactly as before, key presence deciding, so an existing live site placed before metadata existed keeps republishing.
+
+  `status` reported nothing from the metadata, so an operator could not see what the box would do with a site. `SiteStatus` (and the `node status` payload, `status.json`, and the dashboard page) now carry the stored `mode`, the stored `ensName` and `ensNameToWarm` — the eth.limo name resolved by the same `resolveEnsNameToWarm` rule the on-box `warm` loop uses, never a second copy of it. The three-valued `ensName` stays three-valued end to end: `""` (opt out) is reported as `""` and never flattened to absent, absent leaves no key in the JSON at all, and the dashboard renders "opted out" and "none" differently. The dashboard table gains `mode`, `ens name` and a linked `eth.limo` column; `pinnace status` prints the same three per site.
+
+- c49226d: Close the two paths through which a write could silently destroy a site's stored MFS metadata.
+
+  `site add` now PRESERVES: it states neither `mode` nor `ensName`, and stating nothing is not a licence to overwrite, so it resolves its `metadata.json` through the same `resolveSiteMetadataToWrite` seam `deploy`/`pin` use. Re-adding an existing site keeps its stored `ensName` and its stored `mode` (it no longer demotes a published `ipns` site to `ipfs` and drops its eth.limo name); a FIRST add still records `{mode: 'ipfs'}` — the DEFAULT mode of a site that stores none, not a report of the placement it performed.
+
+  On the WRITE path, "this site stores nothing" must now be established POSITIVELY, from a successful `files/ls` that does not list `metadata.json` (walking up to the sites dir, and to the MFS root, so a first deploy and a fresh box are still clean absences). Any other failure — the listing itself failing, or the file being listed but unreadable — is an OUTAGE, and the write is REFUSED with a loud `SiteMetadataUnreadableError` naming the site, the node and the failed step, writing nothing. Previously a down or 401ing node made a no-flag re-deploy/re-pin resolve to `ipfs`, overwrite the stored metadata and exit 0. Kubo's error text is never inspected; the shape of a successful listing is the signal. An operator can still write through an unreadable node by stating the whole record (`--set-mode` plus `--set-ens-name`/`--unset-ens-name`), which needs no read at all.
+
+  The tolerant discovery read is unchanged: `discoverSites` (and the on-box `warm`/`republish`/`status` loop it feeds) still reads absent, malformed or unreadable metadata as empty and never fails the pass. New from the package root: `readSiteMetadataForWrite` and `SiteMetadataUnreadableError`; `KuboRpcClient.baseUrl` is now public so an error can name its node.
+
 ## 0.7.0
 
 ### Minor Changes
