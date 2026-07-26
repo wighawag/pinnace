@@ -7,7 +7,12 @@ import {
 	type GatewayProbe,
 	type ProvidersLookup,
 } from '../../src/status/status-report.js';
+import {resolveEnsNameToWarm} from '../../src/site/site-wrapper.js';
 import {discoverSites} from '../../src/node/node-commands.js';
+import {
+	encodeSiteMetadata,
+	type SiteMetadata,
+} from '../../src/site/site-wrapper.js';
 
 /**
  * The `status` core is tested ENTIRELY against fakes:
@@ -68,6 +73,134 @@ function withDistinctCids(mock: MockKuboApi): MockKuboApi {
 	});
 	return mock;
 }
+
+/**
+ * Seed `/sites/<id>/metadata.json` per site. `files/read` is single-path but the
+ * mock answers every path with ONE canned response, so the per-site metadata is
+ * seeded by intercepting the base fetch (the same pattern
+ * {@link withDistinctCids} uses for CIDs). A site absent from the map gets
+ * Kubo's loud non-2xx for a missing path — i.e. really no `metadata.json`, as a
+ * site placed before metadata existed has. The bodies go through the REAL
+ * codec, so `""` reaches the report exactly as MFS would hand it over.
+ */
+function withPerSiteMetadata(
+	mock: MockKuboApi,
+	byId: Record<string, SiteMetadata>,
+): MockKuboApi {
+	const base = mock.fetchImpl;
+	Object.defineProperty(mock, 'fetchImpl', {
+		value: async (input: string | URL, init?: Parameters<typeof base>[1]) => {
+			const url = new URL(typeof input === 'string' ? input : input.toString());
+			if (url.pathname.endsWith('/files/read')) {
+				const arg = url.searchParams.get('arg') ?? '';
+				await base(input, init); // record the call
+				const hit = Object.entries(byId).find(
+					([id]) => arg === `/sites/${id}/metadata.json`,
+				);
+				if (!hit) return new Response('file does not exist', {status: 500});
+				return new Response(
+					Buffer.from(encodeSiteMetadata(hit[1])).toString('utf8'),
+					{status: 200},
+				);
+			}
+			return base(input, init);
+		},
+		writable: true,
+	});
+	return mock;
+}
+
+/**
+ * A mock Kubo whose `/sites/*` holds the metadata cases the report must carry
+ * through UNFLATTENED:
+ *  - `alice.eth`  -> `{mode: 'ipns'}`, ensName ABSENT (the `.eth` inference),
+ *  - `blog`       -> an explicit `named.eth` on a non-`.eth` id,
+ *  - `optout.eth` -> `ensName: ""`, the opt-out that must stay distinct,
+ *  - `bob`        -> NO `metadata.json` at all (an older/plain site).
+ */
+function mockWithMetadataCases(): MockKuboApi {
+	const mock = new MockKuboApi();
+	mock.on('files/ls', {
+		json: {
+			Entries: [
+				{Name: 'alice.eth'},
+				{Name: 'blog'},
+				{Name: 'optout.eth'},
+				{Name: 'bob'},
+			],
+		},
+	});
+	mock.on('files/stat', {json: {Hash: 'bafysite', Type: 'directory'}});
+	mock.on('id', {json: {ID: 'peer-self'}});
+	mock.on('key/list', {json: {Keys: [{Name: 'alice.eth', Id: 'k51alice'}]}});
+	return withPerSiteMetadata(mock, {
+		'alice.eth': {mode: 'ipns'},
+		blog: {ensName: 'named.eth', mode: 'ipfs'},
+		'optout.eth': {ensName: '', mode: 'ipfs'},
+	});
+}
+
+/** Build the report over {@link mockWithMetadataCases}, checks stubbed out. */
+async function metadataReportSites() {
+	const report = await statusReport({
+		client: clientWith(mockWithMetadataCases()),
+		sitesDir: '/sites',
+		providersLookup: async () => ({Providers: []}),
+		gatewayProbe: async () => 504,
+	});
+	return report.sites;
+}
+
+/**
+ * `status` REPORTS what the site's MFS metadata says, so the operator can SEE
+ * what the box will do with it: the stored `mode`, the stored `ensName` (all
+ * three of its values kept apart), and the eth.limo name the on-box `warm` rule
+ * resolves from them — through the SAME `resolveEnsNameToWarm` the loop uses,
+ * never a second copy of the rule.
+ */
+describe('status core — reports the site stored metadata (mode + ensName)', () => {
+	it('carries the stored mode and ensName onto each SiteStatus', async () => {
+		const sites = await metadataReportSites();
+		const alice = sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.mode).toBe('ipns');
+		const blog = sites.find((s) => s.id === 'blog')!;
+		expect(blog.mode).toBe('ipfs');
+		expect(blog.ensName).toBe('named.eth');
+	});
+
+	it('keeps ensName "" (opt out) DISTINCT from an ABSENT ensName', async () => {
+		const sites = await metadataReportSites();
+		// The opt-out is reported as the empty string it is stored as...
+		expect(sites.find((s) => s.id === 'optout.eth')!.ensName).toBe('');
+		// ...and a site that stores none reports ABSENT, not `''`.
+		expect(sites.find((s) => s.id === 'alice.eth')!.ensName).toBeUndefined();
+		expect(sites.find((s) => s.id === 'bob')!.ensName).toBeUndefined();
+	});
+
+	it('reports a site with NO metadata as storing nothing (mode absent too)', async () => {
+		const bob = (await metadataReportSites()).find((s) => s.id === 'bob')!;
+		expect(bob.mode).toBeUndefined();
+		expect(bob.ensName).toBeUndefined();
+		expect(bob.ensNameToWarm).toBeUndefined();
+	});
+
+	it('reports the RESOLVED eth.limo target via the three-way warm rule', async () => {
+		const sites = await metadataReportSites();
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		// Absent ensName + `.eth` id -> INFERRED.
+		expect(byId('alice.eth').ensNameToWarm).toBe('alice.eth');
+		// Explicit name on a non-`.eth` id -> that name.
+		expect(byId('blog').ensNameToWarm).toBe('named.eth');
+		// `""` opts out, even on a `.eth` id.
+		expect(byId('optout.eth').ensNameToWarm).toBeUndefined();
+		// Absent + non-`.eth` id -> nothing to warm.
+		expect(byId('bob').ensNameToWarm).toBeUndefined();
+		// The rule is the one the warm loop uses, not a re-implementation.
+		expect(byId('alice.eth').ensNameToWarm).toBe(
+			resolveEnsNameToWarm('alice.eth', {mode: 'ipns'}),
+		);
+	});
+});
 
 describe('status core — per-site four-field report shape', () => {
 	it('reports id, cid, ipns, announced, gatewayServes per discovered site', async () => {
@@ -240,5 +373,36 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect(result.peerId).toBe('peer-self');
 		// Read ONCE by the report itself; the command layer reuses it.
 		expect(mock.requestsFor('id').length).toBe(1);
+	});
+
+	it('carries mode, ensName and the resolved eth.limo target into the payload', async () => {
+		const client = clientWith(mockWithMetadataCases());
+		const op = makeStatusOp({
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => 504,
+		});
+		const sites = await discoverSites(client, '/sites');
+		const result = await op(
+			{client, role: 'publisher', sitesDir: '/sites'},
+			sites,
+		);
+
+		const byId = (id: string) => result.sites.find((s) => s.id === id)!;
+		expect(byId('alice.eth').mode).toBe('ipns');
+		expect(byId('alice.eth').ensNameToWarm).toBe('alice.eth');
+		expect(byId('blog').ensName).toBe('named.eth');
+
+		// The payload is JSON: `""` must SURVIVE as a key (the opt-out), while an
+		// absent ensName must leave no key at all. Unlike `ipns`, which the payload
+		// deliberately flattens to `''`, ensName is never coerced.
+		const payload = JSON.parse(JSON.stringify(result.sites)) as Array<
+			Record<string, unknown>
+		>;
+		const optout = payload.find((s) => s['id'] === 'optout.eth')!;
+		expect(optout['ensName']).toBe('');
+		const bob = payload.find((s) => s['id'] === 'bob')!;
+		expect('ensName' in bob).toBe(false);
+		expect('mode' in bob).toBe(false);
+		expect('ensNameToWarm' in bob).toBe(false);
 	});
 });

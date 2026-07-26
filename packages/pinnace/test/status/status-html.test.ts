@@ -23,12 +23,16 @@ function reportFixture(): StatusPageReport {
 				id: 'alice.eth',
 				cid: 'bafyalice',
 				ipns: 'k51alice',
+				mode: 'ipns',
+				// ensName ABSENT: the on-box rule infers it from the `.eth` id.
+				ensNameToWarm: 'alice.eth',
 				announced: true,
 				gatewayServes: true,
 			},
 			{
 				id: 'bob',
 				cid: 'bafybob',
+				mode: 'ipfs',
 				announced: false,
 				gatewayServes: false,
 			},
@@ -95,6 +99,55 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(bobRow.match(/>no</g)?.length).toBe(2);
 	});
 
+	it('shows the stored mode and the RESOLVED eth.limo target it will warm', () => {
+		const html = renderStatusHtml(reportFixture());
+		// The stored mode of each site, so the operator sees how it is addressed.
+		expect(html).toContain('>ipns<');
+		expect(html).toContain('>ipfs<');
+		// The resolved eth.limo target is linked; bob resolves none.
+		expect(html).toContain('href="https://alice.eth.limo/"');
+		// Exactly the one warmed site: its href + its label. bob resolves none.
+		expect(html.match(/alice\.eth\.limo/g)?.length).toBe(2);
+		expect(html).not.toContain('bafybob.limo');
+	});
+
+	it('distinguishes an ensName opt-out ("") from a site that stores none', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{id: 'optout.eth', cid: 'bafyoptout', mode: 'ipfs', ensName: ''},
+				{id: 'plain.eth', cid: 'bafyplain', mode: 'ipfs'},
+			],
+		});
+		const optoutRow = html.slice(
+			html.indexOf('optout.eth'),
+			html.indexOf('plain.eth'),
+		);
+		expect(optoutRow).toContain('opted out');
+		// The site that stores NO ensName is not reported as an opt-out.
+		const plainRow = html.slice(html.indexOf('plain.eth'));
+		expect(plainRow).not.toContain('opted out');
+		// It still warms by inference from its `.eth` id, which the report resolved.
+		expect(html).not.toContain('optout.eth.limo');
+	});
+
+	it('shows an explicit ensName, and links the name it warms', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'blog',
+					cid: 'bafyblog',
+					mode: 'ipfs',
+					ensName: 'named.eth',
+					ensNameToWarm: 'named.eth',
+				},
+			],
+		});
+		expect(html).toContain('named.eth');
+		expect(html).toContain('href="https://named.eth.limo/"');
+	});
+
 	it('says so plainly when the node has no sites yet (fresh box)', () => {
 		const html = renderStatusHtml({
 			peerId: '12D3KooWpeerself',
@@ -130,7 +183,9 @@ describe('renderStatusHtml: self-contained + escaped', () => {
 		expect(html).not.toMatch(/\ssrc=/i);
 		// The only outbound URLs are the per-site gateway links.
 		const urls = html.match(/https?:\/\/[^"\s]+/g) ?? [];
-		expect(urls.every((u) => u.includes('dweb.link'))).toBe(true);
+		expect(
+			urls.every((u) => u.includes('dweb.link') || u.endsWith('.limo/')),
+		).toBe(true);
 	});
 
 	it('HTML-escapes site-controlled strings (id, cid, ipns)', () => {

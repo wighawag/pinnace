@@ -7,6 +7,7 @@ import {
 	writeFile,
 	rm,
 } from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
@@ -142,6 +143,98 @@ describe('republishAndExport (publisher) — exactly one signer, exports the raw
 				'alice.eth',
 			);
 			expect(res.sites.find((s) => s.id === 'bob')?.status).toBe('no-key');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+});
+
+/**
+ * `republish` signs on the site's STORED `mode` (its MFS `metadata.json`), not
+ * on a key happening to exist in the keystore: the operator's recorded intent
+ * is what the box acts on. The three tiers, all pinned below:
+ *   stored `ipfs` -> never publish (its own `ipfs-mode` outcome, NOT `no-key`,
+ *                    which would claim a key was missing when one is present),
+ *   stored `ipns` -> exactly as before (key -> publish, no key -> `no-key`),
+ *   mode ABSENT   -> exactly as before (key presence decides), so a site placed
+ *                    before metadata existed keeps republishing.
+ */
+describe('republishAndExport honours the site stored metadata.mode', () => {
+	it('does NOT publish a stored-ipfs site even though the node holds a key for it', async () => {
+		const mock = publisherMock(); // holds keys for BOTH sites
+		const {ctx, dir} = await tempCtx(mock, {role: 'publisher'});
+		try {
+			const res = await republishAndExport(ctx, [
+				{id: 'alice.eth', cid: 'bafyalice', metadata: {mode: 'ipfs'}},
+			]);
+			// The key exists, but the site says ipfs: nothing is signed or exported.
+			expect(mock.requestsFor('name/publish').length).toBe(0);
+			expect(mock.requestsFor('routing/get').length).toBe(0);
+			expect(existsSync(ctx.recordsDir!)).toBe(false);
+			// A DISTINCT outcome: `no-key` would be a lie (there IS a key).
+			expect(res.sites[0].status).toBe('ipfs-mode');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
+	it('publishes a stored-ipns site with a key exactly as before', async () => {
+		const mock = publisherMock();
+		const {ctx, dir} = await tempCtx(mock, {role: 'publisher'});
+		try {
+			const res = await republishAndExport(ctx, [
+				{id: 'alice.eth', cid: 'bafyalice', metadata: {mode: 'ipns'}},
+			]);
+			expect(mock.requestsFor('name/publish').length).toBe(1);
+			expect(mock.requestsFor('routing/get').length).toBe(1);
+			expect(res.sites[0].status).toBe('exported');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
+	it('reports no-key for a stored-ipns site the node holds NO key for', async () => {
+		const mock = publisherMock();
+		const {ctx, dir} = await tempCtx(mock, {role: 'publisher'});
+		try {
+			const res = await republishAndExport(ctx, [
+				{id: 'keyless.eth', cid: 'bafykeyless', metadata: {mode: 'ipns'}},
+			]);
+			expect(mock.requestsFor('name/publish').length).toBe(0);
+			expect(res.sites[0].status).toBe('no-key');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
+	it('BACK-COMPAT: a site with NO stored mode still republishes on key presence', async () => {
+		// The load-bearing tier: an existing live site placed before metadata
+		// existed (or by an older pinnace) must not silently stop republishing.
+		const mock = publisherMock();
+		const {ctx, dir} = await tempCtx(mock, {role: 'publisher'});
+		try {
+			const res = await republishAndExport(ctx, [
+				{id: 'alice.eth', cid: 'bafyalice', metadata: {}},
+			]);
+			expect(mock.requestsFor('name/publish').length).toBe(1);
+			expect(mock.requestsFor('name/publish')[0].query.get('key')).toBe(
+				'alice.eth',
+			);
+			expect(res.sites[0].status).toBe('exported');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
+	it('BACK-COMPAT: a site with NO stored mode and no key is still no-key', async () => {
+		const mock = publisherMock();
+		const {ctx, dir} = await tempCtx(mock, {role: 'publisher'});
+		try {
+			const res = await republishAndExport(ctx, [
+				{id: 'keyless', cid: 'bafykeyless', metadata: {}},
+			]);
+			expect(mock.requestsFor('name/publish').length).toBe(0);
+			expect(res.sites[0].status).toBe('no-key');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}

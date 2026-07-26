@@ -79,14 +79,39 @@ const NAME_SUFFIX = '.ipns-name';
 // ---------------------------------------------------------------------------
 
 /**
- * PUBLISHER op. For each discovered site the node holds a key for:
+ * PUBLISHER op. For each discovered site that should be republished:
  *   1. `name/publish` to refresh the signed record (~72h lifetime, ~1h ttl),
  *   2. `routing/get` to EXPORT the raw signed record, then
  *   3. write the record + its ipns id under {@link NodeCommandContext.recordsDir}
  *      where replicas fetch them.
- * Sites the node holds NO key for are ipfs-mode only and are left alone
- * (reported `no-key`, never published). This is the ONLY place a signing
- * primitive (`name/publish`) runs in the whole sequence.
+ * This is the ONLY place a signing primitive (`name/publish`) runs in the whole
+ * sequence.
+ *
+ * WHETHER to sign is decided by the site's stored **metadata** `mode` (the
+ * `metadata.json` beside its content in MFS, which discovery already read), NOT
+ * by a key happening to sit in the keystore — the operator's recorded intent is
+ * what the box acts on, which is the whole point of metadata travelling with
+ * the site (spec `sites-metadata-in-mfs`). Three tiers:
+ *
+ *  - stored `ipfs` -> NEVER published, even when a key exists for the id (one
+ *    left over from an earlier ipns life, or derived for a sibling purpose).
+ *    Reported `ipfs-mode`, deliberately NOT `no-key`: a key IS present, and
+ *    saying otherwise would send the operator hunting for a key problem that
+ *    does not exist.
+ *  - stored `ipns` -> exactly as before: a key signs+exports (`exported`), no
+ *    key reports `no-key` (the site wants a name this node cannot sign for).
+ *  - mode ABSENT -> exactly as before, key presence decides. A site placed
+ *    before metadata existed (or by an older pinnace) stores no mode, and must
+ *    keep republishing rather than silently go dark on this change.
+ *
+ * DECISION (worth knowing, recorded in
+ * `work/notes/observations/republish-absent-mode-is-not-read-as-ipfs-2026-07-26.md`):
+ * that last tier is the ONE place in pinnace where an absent `mode` is NOT read
+ * as the `ipfs` default (`DEFAULT_SITE_MODE`, the write-side resolver and the
+ * CONTEXT.md glossary all say absent means `ipfs`). Applying the default here
+ * would take a live mode-less site off the air the moment this shipped, which
+ * is a far worse failure than continuing to sign a name the operator has never
+ * said to stop signing.
  */
 export async function republishAndExport(
 	ctx: NodeCommandContext,
@@ -96,9 +121,16 @@ export async function republishAndExport(
 	const outcomes: SiteOutcome[] = [];
 
 	for (const site of sites) {
+		if (site.metadata.mode === 'ipfs') {
+			// The site STORES ipfs: it is addressed by cid and wants no name, so it is
+			// not signed even if this node holds a key for its id.
+			outcomes.push({id: site.id, cid: site.cid, status: 'ipfs-mode'});
+			continue;
+		}
 		const ipns = keys.get(site.id);
 		if (!ipns) {
-			// ipfs-mode site (no key): nothing to sign or export.
+			// A site that wants a name (or stores no mode at all) but has no key here:
+			// nothing to sign or export.
 			outcomes.push({id: site.id, cid: site.cid, status: 'no-key'});
 			continue;
 		}

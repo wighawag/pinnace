@@ -646,11 +646,26 @@ async function runStatus(
 		rc.out(`${host.name} (${host.endpoint}) peer ${report.peerId}`);
 		for (const site of report.sites) {
 			rc.out(
-				`  ${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''} announced=${site.announced} gatewayServes=${site.gatewayServes}`,
+				`  ${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''}` +
+					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site.ensName)}` +
+					` eth.limo ${site.ensNameToWarm ? `${site.ensNameToWarm}.limo` : 'none'}` +
+					` announced=${site.announced} gatewayServes=${site.gatewayServes}`,
 			);
 		}
 	}
 	return 0;
+}
+
+/**
+ * How `status` PRINTS the three-valued stored `ensName`, keeping all three
+ * apart on one line: a stored name prints as itself, `""` prints `opted-out`
+ * (never warm, even a `.eth` id) and an absent field prints `unset` (the box
+ * infers from a `.eth` id). Printing `""` as a bare empty string would read as
+ * a rendering bug and erase the very distinction the metadata preserves.
+ */
+function printedEnsName(ensName: string | undefined): string {
+	if (ensName === undefined) return 'unset';
+	return ensName === '' ? 'opted-out' : ensName;
 }
 
 /**

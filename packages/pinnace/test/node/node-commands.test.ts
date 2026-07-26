@@ -665,6 +665,56 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 		}
 	});
 
+	it('carries the site metadata into BOTH views, keeping "" distinct from absent', async () => {
+		const mock = mockWithTwoSites();
+		const statusOp: NodeCommandOps['status'] = async () => ({
+			peerId: '12D3KooWpeerself',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					ipns: 'k51alice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+				},
+				{
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					ipns: '',
+					mode: 'ipfs',
+					ensName: '',
+				},
+				{id: 'bob', cid: 'bafybob', ipns: ''},
+			],
+		});
+		const {ctx, dir} = await baseContext(mock, {ops: {status: statusOp}});
+		try {
+			await runNodeCommand('status', ctx);
+			const body = JSON.parse(
+				await readFile(join(ctx.dashboardDir!, 'status.json'), 'utf8'),
+			) as {sites: Array<Record<string, unknown>>};
+			const byId = (id: string) => body.sites.find((s) => s['id'] === id)!;
+			expect(byId('alice.eth')['mode']).toBe('ipns');
+			expect(byId('alice.eth')['ensNameToWarm']).toBe('alice.eth');
+			// The opt-out survives the JSON round trip as `""`...
+			expect(byId('optout.eth')['ensName']).toBe('');
+			// ...while a site that stores nothing carries no key at all.
+			expect('ensName' in byId('bob')).toBe(false);
+			expect('mode' in byId('bob')).toBe(false);
+
+			// The human view shows the same fields (mode + the eth.limo it warms).
+			const html = await readFile(
+				join(ctx.dashboardDir!, 'index.html'),
+				'utf8',
+			);
+			expect(html).toContain('>ipns<');
+			expect(html).toContain('href="https://alice.eth.limo/"');
+			expect(html).toContain('opted out');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
 	it('writes neither output when no dashboard dir is configured', async () => {
 		const mock = mockWithTwoSites();
 		const {ctx, dir} = await baseContext(mock, {dashboardDir: undefined});

@@ -39,7 +39,7 @@
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {renderStatusHtml} from '../status/status-html.js';
-import type {HostRole} from '../config/config-resolution.js';
+import type {HostRole, SiteMode} from '../config/config-resolution.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import {
 	republishAndExport,
@@ -105,6 +105,24 @@ export interface SiteOutcome {
 	gatewayServes?: boolean;
 	/** `status`-verb only: the raw HTTP status the cold-gateway probe returned. */
 	gatewayHttp?: number;
+	/**
+	 * `status`-verb only: the `mode` the site STORES in its `metadata.json`,
+	 * reported as stored — ABSENT stays absent rather than being resolved to the
+	 * `ipfs` default, because `republish` treats the two differently.
+	 */
+	mode?: SiteMode;
+	/**
+	 * `status`-verb only: the `ensName` the site STORES, with `""` (the opt-out)
+	 * kept DISTINCT from absent (infer from a `.eth` id). Never coerced — unlike
+	 * `ipns`, whose payload flattens undefined to `''`.
+	 */
+	ensName?: string;
+	/**
+	 * `status`-verb only: the ENS name eth.limo warming will target, resolved by
+	 * the same {@link resolveEnsNameToWarm} rule `warm` uses. Absent when the site
+	 * is not eth.limo-warmed.
+	 */
+	ensNameToWarm?: string;
 }
 
 /** The uniform result an op returns: the per-site outcomes it produced. */
@@ -380,6 +398,12 @@ async function defaultStatus(
 		id: s.id,
 		cid: s.cid,
 		ipns: keys.get(s.id) ?? '',
+		// The site's own metadata, reported as stored (see SiteOutcome), plus the
+		// warm rule's resolution of it — the same fields the owned `status` op
+		// carries, so both paths render the same dashboard columns.
+		mode: s.metadata.mode,
+		ensName: s.metadata.ensName,
+		ensNameToWarm: resolveEnsNameToWarm(s.id, s.metadata),
 	}));
 	return {sites: outcomes};
 }

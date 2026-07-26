@@ -37,7 +37,7 @@ For a single node you need no file at all: `--endpoint <url>` supplies that node
 pinnace deploy --endpoint https://ipfs-publisher.example.com --set-mode ipns ./dist mysite
 ```
 
-A site's own state lives with the site, on the node: MFS holds each one as a wrapper directory `/sites/<id>/{content, metadata.json}`, where `content` is the site's CID and `metadata.json` is its per-site metadata (`mode`, `ensName`), written by `deploy`/`pin` and read back by the node's own loop (it is how the `warm` timer learns a site's `ensName`) and by `status`. So per-site settings are flags at deploy/pin time (`--set-mode ipfs|ipns`, `--set-ens-name [<name>]`, `--unset-ens-name`), never config entries; omitting a flag preserves what the site already stores.
+A site's own state lives with the site, on the node: MFS holds each one as a wrapper directory `/sites/<id>/{content, metadata.json}`, where `content` is the site's CID and `metadata.json` is its per-site metadata (`mode`, `ensName`), written by `deploy`/`pin` and read back by the node's own loop (it is how the `warm` timer learns a site's `ensName` and how the `republish` timer knows not to sign an `ipfs`-mode site) and by `status`, which reports both. So per-site settings are flags at deploy/pin time (`--set-mode ipfs|ipns`, `--set-ens-name [<name>]`, `--unset-ens-name`), never config entries; omitting a flag preserves what the site already stores.
 
 The full setup guide (mental model, config + secrets, and the end-to-end provision -> deploy -> failover flow) is in the package README:
 

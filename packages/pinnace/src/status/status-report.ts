@@ -15,6 +15,13 @@
  *   4. gateway-serves     — does a COLD public gateway serve it? An HTTP
  *                           range/HEAD result from a public gateway.
  *
+ * It ALSO reports what the site's MFS **metadata** says about itself — its
+ * stored `mode` and `ensName`, plus the eth.limo name the on-box `warm` rule
+ * resolves from them ({@link SiteStatus}) — so the operator can see what the box
+ * will DO with a site, not only what it currently holds. That metadata is read
+ * once by {@link discoverSites} and carried here; this module resolves nothing
+ * of its own beyond calling the warm rule.
+ *
  * The two checks in (3) and (4) reach OUTSIDE the node. They are INJECTABLE
  * ({@link ProvidersLookup}, {@link GatewayProbe}) so tests run against a fake
  * HTTP layer and never the live network; production supplies the default
@@ -42,6 +49,8 @@
 import {discoverSites, type DiscoveredSite} from '../node/node-commands.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import type {NodeCommandContext, NodeOpResult} from '../node/node-commands.js';
+import type {SiteMode} from '../config/config-resolution.js';
+import {resolveEnsNameToWarm} from '../site/site-wrapper.js';
 
 /** The delegated-routing providers endpoint (path takes the CID). */
 const DELEGATED_ROUTING_BASE =
@@ -75,7 +84,12 @@ export type ProvidersLookup = (cid: string) => Promise<ProvidersResponse>;
  */
 export type GatewayProbe = (cid: string) => Promise<number>;
 
-/** The status of one site: the four report fields plus its `id`. */
+/**
+ * The status of one site: the four report fields, its `id`, and what its MFS
+ * **metadata** says — so the operator can see not just what the node HAS but
+ * what it will DO with the site (its `mode`, its `ensName`, the eth.limo name
+ * `warm` resolves from them).
+ */
 export interface SiteStatus {
 	/** The site's single `id` (its MFS entry under `/sites/`). */
 	id: string;
@@ -83,6 +97,27 @@ export interface SiteStatus {
 	cid: string;
 	/** The IPNS id, if a same-named keystore key exists (else undefined). */
 	ipns?: string;
+	/**
+	 * The `mode` the site STORES in its `metadata.json` — reported as stored, so
+	 * ABSENT (a site placed before metadata existed) stays absent rather than
+	 * being resolved to the `ipfs` default. That distinction is load-bearing:
+	 * `republish` treats a stored `ipfs` and an absent mode differently.
+	 */
+	mode?: SiteMode;
+	/**
+	 * The `ensName` the site STORES, with all THREE of its values kept apart: a
+	 * name, `""` (the opt-out) and ABSENT (infer from a `.eth` id) mean three
+	 * different things to the warm rule, so `""` is never flattened to absent nor
+	 * absent to `""`.
+	 */
+	ensName?: string;
+	/**
+	 * The ENS name eth.limo warming will actually target, resolved from the two
+	 * fields above by the on-box rule itself
+	 * ({@link ../site/site-wrapper.js#resolveEnsNameToWarm}) — never a second copy
+	 * of it. `undefined` means this site is not eth.limo-warmed at all.
+	 */
+	ensNameToWarm?: string;
 	/** True when the delegated-routing providers list for the CID has our PeerID. */
 	announced: boolean;
 	/** The HTTP status the cold public gateway probe returned (undefined on error). */
@@ -148,6 +183,11 @@ export async function statusReport(
 			id: site.id,
 			cid: site.cid,
 			ipns: keys.get(site.id),
+			// Reported AS STORED (`undefined` stays `undefined`), then the resolved
+			// warm target through the loop's own rule.
+			mode: site.metadata.mode,
+			ensName: site.metadata.ensName,
+			ensNameToWarm: resolveEnsNameToWarm(site.id, site.metadata),
 			announced,
 			gatewayHttp,
 			gatewayServes: gatewayHttp !== undefined && servesStatus(gatewayHttp),
@@ -185,6 +225,12 @@ export function makeStatusOp(
 				id: s.id,
 				cid: s.cid,
 				ipns: s.ipns ?? '',
+				// UNLIKE `ipns` just above, the metadata fields are NEVER coerced: an
+				// absent `ensName` must stay absent (JSON.stringify drops it) so the
+				// payload keeps it distinct from the stored `""` opt-out.
+				mode: s.mode,
+				ensName: s.ensName,
+				ensNameToWarm: s.ensNameToWarm,
 				announced: s.announced,
 				gatewayServes: s.gatewayServes,
 				gatewayHttp: s.gatewayHttp,

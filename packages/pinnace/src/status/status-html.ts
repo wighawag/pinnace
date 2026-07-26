@@ -42,6 +42,9 @@ const IPFS_GATEWAY_HOST = 'ipfs.dweb.link';
 /** The public gateway subdomain host used for IPNS links (`<id>.ipns.<host>`). */
 const IPNS_GATEWAY_HOST = 'ipns.dweb.link';
 
+/** The eth.limo gateway host a resolved `ensName` is warmed (and linked) at. */
+const ETH_LIMO_HOST = 'limo';
+
 /**
  * One site row's data. Deliberately WIDER than
  * {@link ../status/status-report.js#SiteStatus}: every field but `id` is
@@ -57,6 +60,24 @@ export interface StatusPageSite {
 	cid?: string;
 	/** The IPNS id when the site has a key (absent/empty for ipfs-mode sites). */
 	ipns?: string;
+	/**
+	 * The `mode` the site stores in its MFS metadata (`ipfs`/`ipns`), or absent
+	 * for a site that stores none. Rendered AS STORED, never resolved to a
+	 * default, so the page shows what the box will read.
+	 */
+	mode?: string;
+	/**
+	 * The `ensName` the site stores, three-valued: a name, `""` (the opt-out) or
+	 * absent (infer from a `.eth` id). The three render DIFFERENTLY — an opt-out
+	 * must not look like a site that simply never set one.
+	 */
+	ensName?: string;
+	/**
+	 * The ENS name eth.limo warming actually targets, already resolved by the
+	 * report (the on-box `resolveEnsNameToWarm` rule); absent means not warmed.
+	 * The renderer resolves NOTHING itself — it stays a pure view.
+	 */
+	ensNameToWarm?: string;
 	/** Whether the network announces this node for the CID. */
 	announced?: boolean;
 	/** Whether a cold public gateway served the CID. */
@@ -107,7 +128,7 @@ export function renderStatusHtml(
 	const rows =
 		report.sites.length > 0
 			? report.sites.map(renderSiteRow).join('\n')
-			: `\t\t\t<tr><td class="empty" colspan="5">no sites yet (nothing under the node's MFS sites dir)</td></tr>`;
+			: `\t\t\t<tr><td class="empty" colspan="8">no sites yet (nothing under the node's MFS sites dir)</td></tr>`;
 
 	return `<!doctype html>
 <html lang="en">
@@ -126,7 +147,7 @@ ${PAGE_CSS}
 	<p class="meta">generated <time datetime="${generated}">${generated}</time>, reloading every ${refresh}s</p>
 	<table>
 		<thead>
-			<tr><th>site</th><th>cid</th><th>ipns</th><th>announced</th><th>gateway</th></tr>
+			<tr><th>site</th><th>cid</th><th>ipns</th><th>mode</th><th>ens name</th><th>eth.limo</th><th>announced</th><th>gateway</th></tr>
 		</thead>
 		<tbody>
 ${rows}
@@ -138,7 +159,11 @@ ${rows}
 `;
 }
 
-/** Render one site's table row: id, gateway-linked cid + ipns, two indicators. */
+/**
+ * Render one site's table row: id, gateway-linked cid + ipns, what its MFS
+ * metadata stores (mode + ensName) and the eth.limo name that resolves to, then
+ * the two health indicators.
+ */
 function renderSiteRow(site: StatusPageSite): string {
 	const cid = site.cid
 		? gatewayLink(
@@ -152,9 +177,27 @@ function renderSiteRow(site: StatusPageSite): string {
 				`https://${uriPart(site.ipns)}.${IPNS_GATEWAY_HOST}/`,
 			)
 		: '<span class="none">none</span>';
+	const mode = site.mode
+		? `<code>${escapeHtml(site.mode)}</code>`
+		: '<span class="none">none</span>';
+	// The THREE ensName states read differently on the page: a stored name, the
+	// explicit opt-out, and a site that simply stores none.
+	const ensName =
+		site.ensName === undefined
+			? '<span class="none">none</span>'
+			: site.ensName === ''
+				? '<span class="none">opted out</span>'
+				: `<code>${escapeHtml(site.ensName)}</code>`;
+	const ethLimo = site.ensNameToWarm
+		? gatewayLink(
+				`${site.ensNameToWarm}.${ETH_LIMO_HOST}`,
+				`https://${uriPart(site.ensNameToWarm)}.${ETH_LIMO_HOST}/`,
+			)
+		: '<span class="none">none</span>';
 	return (
 		`\t\t\t<tr><th scope="row">${escapeHtml(site.id)}</th>` +
 		`<td>${cid}</td><td>${ipns}</td>` +
+		`<td>${mode}</td><td>${ensName}</td><td>${ethLimo}</td>` +
 		`<td>${indicator(site.announced)}</td><td>${indicator(site.gatewayServes)}</td></tr>`
 	);
 }

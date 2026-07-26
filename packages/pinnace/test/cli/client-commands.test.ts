@@ -653,6 +653,40 @@ describe('status — dispatches to core statusReport per site', () => {
 		const input = calls.statusReport[0] as {client: unknown};
 		expect(input.client).toBeTruthy();
 	});
+
+	it('prints each site stored mode + ensName and the eth.limo it warms', async () => {
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					ipns: 'k51alice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					announced: true,
+					gatewayServes: true,
+				},
+				{
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					mode: 'ipfs',
+					ensName: '',
+					announced: false,
+					gatewayServes: false,
+				},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const printed = out.join('\n');
+		expect(printed).toContain('mode ipns');
+		expect(printed).toContain('eth.limo alice.eth.limo');
+		// The three ensName values stay apart in the printed line too.
+		expect(printed).toContain('ensName opted-out');
+		expect(printed).toContain('ensName unset');
+	});
 });
 
 describe('derive — prints a site IPNS id from master + single `id`, NO deploy', () => {
