@@ -3,7 +3,7 @@ title: Resolve the eth.limo warming from ensName (explicit > .eth-suffix inferen
 slug: ensname-resolution-and-eth-opt-out
 spec: pinnace
 covers: [15]
-needsAnswers: true
+reason: superseded by the sites-metadata-in-mfs spec. This task bounced because there was no channel for a site's `ensName` (client `pinnace.json`) to reach the on-box `warm` loop (which only sees MFS). The new spec moves per-site metadata into MFS (`/sites/<id>/metadata.json`), so `ensName` reaches the box; the three-way eth.limo rule (explicit > `.eth`-infer > opt-out) is now delivered by `onbox-loop-reads-metadata-ensname-warming` (spec `sites-metadata-in-mfs`), built on the MFS metadata seam. See `work/notes/observations/ensname-hint-channel-to-onbox-warm-undecided.md`.
 ---
 
 ## What to build
