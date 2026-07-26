@@ -1,18 +1,21 @@
 import {describe, it, expect} from 'vitest';
 import {run, type ClientDeps, type RunContext} from '../../src/cli/run.js';
-import type {
-	PinnaceConfigFile,
-	HostRole,
-} from '../../src/config/config-resolution.js';
+import type {PinnaceConfigFile} from '../../src/config/config-resolution.js';
 import type {
 	NodeVerb,
 	NodeCommandContext,
 	NodeCommandResult,
 } from '../../src/node/node-commands.js';
+import type {
+	AuthorizeInput,
+	AuthorizeResult,
+} from '../../src/publisher/authorize.js';
+import {AuthorizeSecondSignerError} from '../../src/publisher/authorize.js';
+import {KeyImportRoleError} from '../../src/publisher/key-import.js';
 
 /**
  * These tests prove the ON-BOX `node` namespace, the `site` namespace, and the
- * `promote` verb are wired end-to-end through the SAME injectable
+ * `authorize` verb are wired end-to-end through the SAME injectable
  * {@link ClientDeps} seam the client verbs use (no forked dispatch idiom): each
  * parses/validates args, resolves config (arg > env > file; master + token
  * env-only), assembles the right context/client, calls the CORRECT core
@@ -25,7 +28,9 @@ import type {
  */
 
 /** A recording set of stub core deps; every dispatched call is captured. */
-function recordingDeps(): {
+function recordingDeps(
+	authorize?: (input: AuthorizeInput) => Promise<AuthorizeResult>,
+): {
 	deps: ClientDeps;
 	calls: {
 		runNodeCommand: Array<{verb: NodeVerb; ctx: NodeCommandContext}>;
@@ -33,7 +38,7 @@ function recordingDeps(): {
 		removeSite: unknown[];
 		addSite: unknown[];
 		deriveIpnsKey: unknown[];
-		promoteReplicaToPublisher: unknown[];
+		authorizePublisher: AuthorizeInput[];
 	};
 } {
 	const calls = {
@@ -42,7 +47,7 @@ function recordingDeps(): {
 		removeSite: [] as unknown[],
 		addSite: [] as unknown[],
 		deriveIpnsKey: [] as unknown[],
-		promoteReplicaToPublisher: [] as unknown[],
+		authorizePublisher: [] as AuthorizeInput[],
 	};
 	const deps: Partial<ClientDeps> = {
 		runNodeCommand: async (verb, ctx) => {
@@ -73,19 +78,24 @@ function recordingDeps(): {
 				ipnsId: 'k51stubid',
 			};
 		},
-		promoteReplicaToPublisher: async (input) => {
-			calls.promoteReplicaToPublisher.push(input);
+		authorizePublisher: async (input) => {
+			calls.authorizePublisher.push(input);
+			if (authorize) return authorize(input);
 			return {
-				role: 'publisher' as HostRole,
-				keyName: (input as {keyName: string}).keyName,
-				ipns: 'k51stubid',
+				publisher: input.publisher.name,
+				sites: (input.ids ?? ['discovered']).map((id) => ({
+					id,
+					ipns: 'k51stubid',
+					status: 'authorized' as const,
+				})),
+				unchecked: [],
 			};
 		},
 	};
 	return {deps: deps as ClientDeps, calls};
 }
 
-/** A representative in-memory pinnace.json (two hosts, one site). */
+/** A representative in-memory pinnace.json (two hosts, one publisher). */
 const fileConfig: PinnaceConfigFile = {
 	hosts: [
 		{name: 'a', endpoint: 'https://a.example', role: 'publisher'},
@@ -278,36 +288,114 @@ describe('pinnace site <verb> — assembles a client + invokes the site core', (
 });
 
 // ---------------------------------------------------------------------------
-// promote — derive the key from master + invoke promoteReplicaToPublisher.
+// authorize — target the DECLARED publisher, derive from the env-only master.
 // ---------------------------------------------------------------------------
 
-describe('promote <id> — derives the key from master + invokes promoteReplicaToPublisher', () => {
-	it('reads the master ENV-ONLY, derives the key, and dispatches to the core', async () => {
+describe('authorize [<id>] — targets the config declared publisher', () => {
+	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
+
+	it('dispatches to the declared publisher (never a --host pick), with the other hosts to check', async () => {
 		const {deps, calls} = recordingDeps();
-		const {context} = ctx({
-			deps,
-			env: {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'},
-		});
-		const code = await run(['promote', 'mysite', '--host', 'b'], context);
+		const {context} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['authorize', 'mysite'], context);
 		expect(code).toBe(0);
-		// Master fed to the derivation with the site id as the KDF input.
+
+		expect(calls.authorizePublisher.length).toBe(1);
+		const input = calls.authorizePublisher[0];
+		// The target is the host the CONFIG declares `role: publisher` — host `b`
+		// (the replica) is never a candidate, and no --host was needed to say so.
+		expect(input.publisher.name).toBe('a');
+		expect(input.publisher.role).toBe('publisher');
+		expect(input.publisher.client).toBeTruthy();
+		// Every OTHER configured host is handed over for the second-signer guard.
+		expect(input.others?.map((h) => h.name)).toEqual(['b']);
+		expect(input.ids).toEqual(['mysite']);
+	});
+
+	it('derives the key from the ENV-ONLY master, with the site id as the KDF input', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...masterEnv}});
+		await run(['authorize', 'mysite'], context);
+
+		// The core calls back for key material only where it imports; the CLI's
+		// closure is what carries the master (which never reaches the core).
+		calls.authorizePublisher[0].deriveKey('mysite');
 		expect(calls.deriveIpnsKey.length).toBe(1);
 		expect(calls.deriveIpnsKey[0]).toMatchObject({
 			master: 'the-master-secret',
 			keyId: 'mysite',
 		});
-		// Then promotion of the chosen host with its current role + derived key.
-		expect(calls.promoteReplicaToPublisher.length).toBe(1);
-		const input = calls.promoteReplicaToPublisher[0] as {
-			client: unknown;
-			currentRole: HostRole;
-			keyName: string;
-			derived: unknown;
+	});
+
+	it('the BARE form states no ids at all (the core discovers them from MFS)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['authorize'], context);
+		expect(code).toBe(0);
+		expect(calls.authorizePublisher[0].ids).toBeUndefined();
+	});
+
+	it('reports per-site what it did (authorized / already-authorized)', async () => {
+		// A stub returning a MIX, to prove both tokens reach the operator.
+		const {deps} = recordingDeps(async (input) => ({
+			publisher: input.publisher.name,
+			sites: [
+				{id: 'old', ipns: 'k51old', status: 'already-authorized' as const},
+				{id: 'fresh', ipns: 'k51fresh', status: 'authorized' as const},
+			],
+			unchecked: [],
+		}));
+		const {context, out} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['authorize'], context);
+		expect(code).toBe(0);
+		const printed = out.join('\n');
+		expect(printed).toContain('old: already-authorized');
+		expect(printed).toContain('fresh: authorized');
+		expect(printed).toContain('k51fresh');
+	});
+
+	it('REFUSES --host: the config already declares who the publisher is', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['authorize', 'mysite', '--host', 'b'], context);
+		expect(code).not.toBe(0);
+		expect(calls.authorizePublisher.length).toBe(0);
+		expect(err.join('\n')).toMatch(/--host/);
+		expect(err.join('\n')).toMatch(/publisher/i);
+	});
+
+	it('refuses loudly when the config declares NO publisher', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({
+			deps,
+			env: {...masterEnv},
+			loadConfigFile: () => singleHostConfig, // one host, role replica
+		});
+		const code = await run(['authorize', 'mysite'], context);
+		expect(code).not.toBe(0);
+		expect(calls.authorizePublisher.length).toBe(0);
+		expect(err.join('\n')).toMatch(/no.*publisher/i);
+	});
+
+	it('refuses loudly when the config declares MORE THAN ONE publisher', async () => {
+		const {deps, calls} = recordingDeps();
+		const twoPublishers: PinnaceConfigFile = {
+			hosts: [
+				{name: 'a', endpoint: 'https://a.example', role: 'publisher'},
+				{name: 'c', endpoint: 'https://c.example', role: 'publisher'},
+			],
 		};
-		expect(input.client).toBeTruthy();
-		expect(input.currentRole).toBe('replica');
-		expect(input.keyName).toBe('mysite');
-		expect(input.derived).toBeTruthy();
+		const {context, err} = ctx({
+			deps,
+			env: {...masterEnv, PINNACE_HOST_C_TOKEN: 'env-token-c'},
+			loadConfigFile: () => twoPublishers,
+		});
+		const code = await run(['authorize', 'mysite'], context);
+		expect(code).not.toBe(0);
+		expect(calls.authorizePublisher.length).toBe(0);
+		// It names both, rather than coin-flipping one.
+		expect(err.join('\n')).toContain('a');
+		expect(err.join('\n')).toContain('c');
 	});
 
 	it('fails loud when the master is absent (env-only; never from the file)', async () => {
@@ -321,22 +409,54 @@ describe('promote <id> — derives the key from master + invokes promoteReplicaT
 			env: {...hostTokenEnv},
 			loadConfigFile: () => decoyFile,
 		});
-		const code = await run(['promote', 'mysite', '--host', 'b'], context);
+		const code = await run(['authorize', 'mysite'], context);
 		expect(code).not.toBe(0);
-		expect(calls.promoteReplicaToPublisher.length).toBe(0);
-		expect(err.join('\n')).toMatch(/master/i);
+		expect(calls.authorizePublisher.length).toBe(0);
+		expect(err.join('\n')).toContain('PINNACE_MASTER');
 	});
 
-	it('fails loud naming the missing env var when the host has no token', async () => {
+	it("fails loud naming the missing env var when the PUBLISHER's token is unset", async () => {
 		const {deps, calls} = recordingDeps();
-		const {context, err} = ctx({
-			deps,
-			env: {PINNACE_MASTER: 'm'},
-		});
-		const code = await run(['promote', 'mysite', '--host', 'b'], context);
+		const {context, err} = ctx({deps, env: {PINNACE_MASTER: 'm'}});
+		const code = await run(['authorize', 'mysite'], context);
 		expect(code).not.toBe(0);
-		expect(calls.promoteReplicaToPublisher.length).toBe(0);
-		expect(err.join('\n')).toContain('PINNACE_HOST_B_TOKEN');
+		expect(calls.authorizePublisher.length).toBe(0);
+		expect(err.join('\n')).toContain('PINNACE_HOST_A_TOKEN');
+	});
+
+	it('an OTHER host with no token is reported unchecked, never fatal', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({
+			deps,
+			env: {PINNACE_MASTER: 'm', PINNACE_HOST_A_TOKEN: 'env-token-a'},
+		});
+		const code = await run(['authorize', 'mysite'], context);
+		expect(code).toBe(0);
+		// `b` could not be asked, so it is not handed to the guard...
+		expect(calls.authorizePublisher[0].others).toEqual([]);
+		// ...and the operator is told which box was not covered.
+		expect(out.join('\n')).toContain('b');
+	});
+
+	it('prints the core refusal when another host already holds the key (exit 1)', async () => {
+		const {deps} = recordingDeps(async (input) => {
+			throw new AuthorizeSecondSignerError('mysite', 'b', input.publisher.name);
+		});
+		const {context, err} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['authorize', 'mysite'], context);
+		expect(code).toBe(1);
+		expect(err.join('\n')).toContain('mysite');
+		expect(err.join('\n')).toContain('b');
+	});
+
+	it('prints the key-import role refusal (a declared replica) as exit 1', async () => {
+		const {deps} = recordingDeps(async () => {
+			throw new KeyImportRoleError('replica', 'mysite');
+		});
+		const {context, err} = ctx({deps, env: {...masterEnv}});
+		const code = await run(['authorize', 'mysite'], context);
+		expect(code).toBe(1);
+		expect(err.join('\n')).toMatch(/replica/);
 	});
 
 	it('takes the site `id` from the ARG alone (no config site entry to normalise it)', async () => {
@@ -349,25 +469,39 @@ describe('promote <id> — derives the key from master + invokes promoteReplicaT
 		} as unknown as PinnaceConfigFile;
 		const {context} = ctx({
 			deps,
-			env: {...hostTokenEnv, PINNACE_MASTER: 'm'},
+			env: {...masterEnv},
 			loadConfigFile: () => staleFile,
 		});
-		const code = await run(['promote', 'ad-hoc-id', '--host', 'b'], context);
+		const code = await run(['authorize', 'ad-hoc-id'], context);
 		expect(code).toBe(0);
-		expect(calls.deriveIpnsKey[0]).toMatchObject({keyId: 'ad-hoc-id'});
-		expect(
-			(calls.promoteReplicaToPublisher[0] as {keyName: string}).keyName,
-		).toBe('ad-hoc-id');
+		expect(calls.authorizePublisher[0].ids).toEqual(['ad-hoc-id']);
+	});
+});
+
+describe('promote is GONE (hard rename, no alias)', () => {
+	it('rejects `pinnace promote` as an unknown command', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({
+			deps,
+			env: {...hostTokenEnv, PINNACE_MASTER: 'm'},
+		});
+		const code = await run(['promote', 'mysite'], context);
+		expect(code).toBe(1);
+		expect(calls.authorizePublisher.length).toBe(0);
+		expect(err.join('\n')).toMatch(/unknown command/i);
 	});
 });
 
 /**
  * The config file is OPTIONAL: `--endpoint <url>` supplies the single node for
- * the `site` + `promote` namespaces too (token still env-only), so these verbs
- * work with NO `pinnace.json` — and with exactly one host, `--host` may be
- * omitted as usual.
+ * the `site` + `authorize` namespaces too (token still env-only), so these
+ * verbs work with NO `pinnace.json`. Note what that means for `authorize`: the
+ * endpoint MINTS a synthetic host named `publisher` with role `publisher`, so
+ * the operator is ASSERTING that node is the publisher — the declared-role
+ * guards cannot fire there, and with one visible box neither can the
+ * second-signer guard.
  */
-describe('no pinnace.json — --endpoint supplies the single node (site + promote)', () => {
+describe('no pinnace.json — --endpoint supplies the single node (site + authorize)', () => {
 	const soloTokenEnv = {
 		PINNACE_HOST_PUBLISHER_TOKEN: 'env-token-solo',
 	} as const;
@@ -387,7 +521,7 @@ describe('no pinnace.json — --endpoint supplies the single node (site + promot
 		expect(calls.listSites.length).toBe(1);
 	});
 
-	it('promote operates against the CLI-supplied node with no config file', async () => {
+	it('authorize operates against the CLI-supplied node, with NO fleet to check', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({
 			deps,
@@ -395,15 +529,17 @@ describe('no pinnace.json — --endpoint supplies the single node (site + promot
 			loadConfigFile: () => ({}),
 		});
 		const code = await run(
-			['promote', 'mysite', '--endpoint', 'https://solo.example'],
+			['authorize', 'mysite', '--endpoint', 'https://solo.example'],
 			context,
 		);
 		expect(code).toBe(0);
-		expect(calls.promoteReplicaToPublisher.length).toBe(1);
-		// The CLI node is a publisher (a single-node target signs its own name).
-		expect(
-			(calls.promoteReplicaToPublisher[0] as {currentRole: string}).currentRole,
-		).toBe('publisher');
+		expect(calls.authorizePublisher.length).toBe(1);
+		// The CLI node is MINTED as the publisher (an assertion pinnace cannot
+		// verify), so the role guard passes by construction...
+		expect(calls.authorizePublisher[0].publisher.role).toBe('publisher');
+		expect(calls.authorizePublisher[0].publisher.name).toBe('publisher');
+		// ...and there is no other host to ask about a second signer.
+		expect(calls.authorizePublisher[0].others).toEqual([]);
 	});
 });
 
@@ -411,7 +547,7 @@ describe('no pinnace.json — --endpoint supplies the single node (site + promot
 // env/config isolation — the operator's real environment is untouched.
 // ---------------------------------------------------------------------------
 
-describe('env/config isolation — real environment untouched (node/site/promote)', () => {
+describe('env/config isolation — real environment untouched (node/site/authorize)', () => {
 	it('never reads process.env for the on-box node context (uses the injected env)', async () => {
 		const {deps, calls} = recordingDeps();
 		const sentinelKey = 'RPC_BEARER_TOKEN';

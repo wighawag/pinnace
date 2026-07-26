@@ -865,7 +865,7 @@ describe('pin <cid> --as <name> — dispatches to core pinExternal (all nodes)',
 });
 
 describe('pin --set-mode ipns — ADDS the operator OWN stable name to a pin', () => {
-	/** The master is env-ONLY (never a pinnace.json field), exactly as promote. */
+	/** The master is env-ONLY (never a pinnace.json field), exactly as authorize. */
 	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
 
 	it('with NO --set-mode it states no mode (the core preserves the stored one)', async () => {
@@ -903,7 +903,7 @@ describe('pin --set-mode ipns — ADDS the operator OWN stable name to a pin', (
 		);
 		expect(code).toBe(0);
 
-		// The `--as <name>` IS the KDF input (one id), same as derive/promote.
+		// The `--as <name>` IS the KDF input (one id), same as derive/authorize.
 		expect(calls.deriveIpnsKey.length).toBe(1);
 		expect(calls.deriveIpnsKey[0]).toMatchObject({
 			master: 'the-master-secret',
@@ -1011,7 +1011,7 @@ describe('pin --set-mode ipns — ADDS the operator OWN stable name to a pin', (
 });
 
 describe('pin --from-ipns <source>: MIGRATE from an existing IPNS name', () => {
-	/** The master is env-ONLY (never a pinnace.json field), exactly as promote. */
+	/** The master is env-ONLY (never a pinnace.json field), exactly as authorize. */
 	const masterEnv = {...hostTokenEnv, PINNACE_MASTER: 'the-master-secret'};
 
 	it('hands the SOURCE name (not a cid) to the core and reports what it resolved to', async () => {
@@ -1131,7 +1131,7 @@ describe('deploy in ipns mode — the CLI derives the key OPTIMISTICALLY (as pin
 			context,
 		);
 		expect(code).toBe(0);
-		// The single `id` positional IS the KDF input, as for derive/promote/pin.
+		// The single `id` positional IS the KDF input, as for derive/authorize/pin.
 		expect(calls.deriveIpnsKey.length).toBe(1);
 		expect(calls.deriveIpnsKey[0]).toMatchObject({
 			master: 'the-master-secret',

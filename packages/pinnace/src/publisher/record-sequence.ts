@@ -36,17 +36,20 @@
  * `/records/<name>.ipns-record`, `routing put`, fall back to cache)
  * (`~/searches/ipfs-hetzner/cloud-init.yaml`).
  *
- * Promotion (story 14) — {@link promoteReplicaToPublisher} — reuses the
- * `key-import-publisher` seam ({@link importIpnsKeyIntoPublisher}) to import the
- * derived key and flip the role, recovering the name within the record's
- * validity window without content downtime.
+ * NOT here: granting a node the key in the first place. That is `authorize`
+ * (`./authorize.ts`), a client-driven verb over the `key-import-publisher`
+ * seam, which used to live in this module as `promoteReplicaToPublisher` —
+ * misfiled, because it is not part of the recurring record sequence, and
+ * misnamed, because it never promoted anything (it returned a hard-coded
+ * `role: 'publisher'` while persisting no role at all). A node's role lives in
+ * `pinnace.json` and in the box's `NODE_ROLE`, neither reachable over Kubo RPC,
+ * so a real promotion is a REPROVISION of the box. What this module still
+ * gives a lost publisher is the GRACE WINDOW above: replicas keep re-announcing
+ * the last signed record for its remaining validity.
  */
 import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
-import type {HostRole} from '../config/config-resolution.js';
-import type {DerivedIpnsKey} from '../derive/ipns-key-derivation.js';
-import {importIpnsKeyIntoPublisher} from './key-import.js';
 import {
 	publishSiteRecord,
 	RECORD_LIFETIME,
@@ -271,66 +274,6 @@ export function makeMirrorOp(): (
 	sites: DiscoveredSite[],
 ) => Promise<NodeOpResult> {
 	return (ctx, sites) => mirrorAndReannounce(ctx, sites);
-}
-
-// ---------------------------------------------------------------------------
-// Promote a replica to publisher (story 14).
-// ---------------------------------------------------------------------------
-
-/** Inputs to {@link promoteReplicaToPublisher}. */
-export interface PromoteReplicaInput {
-	/** The Kubo RPC client for the node being promoted (per-node, bearer-guarded). */
-	client: KuboRpcClient;
-	/** The node's CURRENT role (typically `replica`; `publisher` is a safe re-run). */
-	currentRole: HostRole;
-	/** The keystore key name to import under (the site name / `key/list` Name). */
-	keyName: string;
-	/** The derived per-site key (seed + public key) from `ipns-key-derivation`. */
-	derived: DerivedIpnsKey;
-}
-
-/** The outcome of a promotion: the flipped role + the key that was imported. */
-export interface PromoteReplicaResult {
-	/** Always `publisher` after a successful promotion (the flipped role). */
-	role: HostRole;
-	/** The key name imported into the (now) publisher's keystore. */
-	keyName: string;
-	/** The IPNS id the imported key resolves to (from the `key/import` response). */
-	ipns?: string;
-}
-
-/**
- * PROMOTE a keyless replica to publisher (spec user story 14): import the
- * derived key into the node's keystore and flip its role to `publisher`, so the
- * former replica can now sign/refresh the record itself — recovering the name
- * without downtime of the CONTENT (the CID stays pinned throughout).
- *
- * This is a client-driven operation (run by the operator against the target
- * node's RPC), NOT an on-box recurring verb: it reuses the `key-import-publisher`
- * seam ({@link importIpnsKeyIntoPublisher}) to land the key material. Because
- * that seam REFUSES a non-publisher role, we call it with role `publisher` (the
- * target role) — promotion is precisely the act of making this node the
- * publisher, so importing under the publisher role is correct.
- *
- * MUST happen WITHIN the current record's validity window: while the old
- * publisher's ~72h record is still valid (kept alive by replica re-announcement
- * during the grace window), the promoted node's first `name/publish` re-signs
- * before the record lapses, so the name never goes dark. Promotion imports the
- * key ONLY; it does not itself sign — the node signs on its next `republish`.
- */
-export async function promoteReplicaToPublisher(
-	input: PromoteReplicaInput,
-): Promise<PromoteReplicaResult> {
-	// Reuse the key-import seam. It refuses any non-publisher role, so we pass
-	// the TARGET role (`publisher`): promotion IS making this node the publisher.
-	const imported = await importIpnsKeyIntoPublisher({
-		client: input.client,
-		role: 'publisher',
-		keyName: input.keyName,
-		derived: input.derived,
-	});
-	// Flip the role. From here the node is the single signer for this name.
-	return {role: 'publisher', keyName: input.keyName, ipns: imported.Id};
 }
 
 // ---------------------------------------------------------------------------

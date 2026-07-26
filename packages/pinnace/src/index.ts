@@ -87,6 +87,16 @@ export {
 	type KeyImportResult,
 } from './publisher/key-import.js';
 export {
+	authorizePublisher,
+	AuthorizeSecondSignerError,
+	type AuthorizeInput,
+	type AuthorizeResult,
+	type AuthorizeHost,
+	type AuthorizePublisherTarget,
+	type AuthorizedSite,
+	type AuthorizeStatus,
+} from './publisher/authorize.js';
+export {
 	lookupIpnsKeyId,
 	publishSiteRecord,
 	type PublishSiteRecordInput,
@@ -96,11 +106,8 @@ export {
 	mirrorAndReannounce,
 	makeRepublishOp,
 	makeMirrorOp,
-	promoteReplicaToPublisher,
 	RECORD_LIFETIME,
 	RECORD_TTL,
-	type PromoteReplicaInput,
-	type PromoteReplicaResult,
 } from './publisher/record-sequence.js';
 export {
 	runNodeCommand,

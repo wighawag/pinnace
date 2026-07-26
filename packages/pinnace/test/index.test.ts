@@ -8,7 +8,7 @@ import type {PinnaceConfigFile} from '../src/config/config-resolution.js';
  * ROUTING (the verb reaches the right namespace + dispatches into the core)
  * without touching a live daemon, the real env, or the real ./pinnace.json.
  * The full dispatch-with-resolved-args coverage lives in
- * test/cli/node-site-promote-commands.test.ts; here we only prove the router
+ * test/cli/node-site-authorize-commands.test.ts; here we only prove the router
  * hands the four node verbs / three site verbs through end-to-end.
  */
 function seamContext(): RunContext {

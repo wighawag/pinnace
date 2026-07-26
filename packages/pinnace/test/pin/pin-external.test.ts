@@ -354,7 +354,7 @@ describe('site remove — the EXISTING verb unpins a pin-added site', () => {
 
 /**
  * The FROZEN golden vector from `test/derive/ipns-key-derivation.test.ts`: the
- * same (master, id) MUST yield the same `k51...` id here as `derive`/`promote`
+ * same (master, id) MUST yield the same `k51...` id here as `derive`/`authorize`
  * print, so an operator can pre-set the name before ever pinning.
  */
 const GOLDEN_MASTER = 'test-master-secret';
@@ -609,7 +609,7 @@ describe('pinExternal — mode ipns ADDS the publish path (publisher only)', () 
 			mode: 'ipns',
 			derived: derivedForGoldenName(),
 		});
-		// Same (master, id) -> same k51... as `derive`/`promote` print.
+		// Same (master, id) -> same k51... as `derive`/`authorize` print.
 		expect(result.ipns).toBe(GOLDEN_IPNS_ID);
 		expect(result.ok[0].ipns).toBe(GOLDEN_IPNS_ID);
 	});

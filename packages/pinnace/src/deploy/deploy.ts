@@ -39,7 +39,7 @@
  *  - the publisher ALREADY holds the site's key -> publish. This path needs NO
  *    key material (and so no master): it is the CI path.
  *  - it holds none and the caller supplied the DERIVED key -> IMPORT it
- *    ({@link importIpnsKeyIntoPublisher}, the same seam `pin`/`promote` use)
+ *    ({@link importIpnsKeyIntoPublisher}, the same seam `pin`/`authorize` use)
  *    and then publish. The key is DERIVED, never invented: no `key/gen`.
  *  - it holds none and no derived key was supplied -> REFUSE
  *    ({@link DeployDerivedKeyRequiredError}).
@@ -57,7 +57,7 @@
  * `../publisher/ipns-publish.ts` (shared with `pin --set-mode ipns` and the on-box
  * republish timer), and serializing+importing the derived key into the
  * publisher's keystore lives in `key-import-publisher` — which REFUSES any
- * non-publisher role, so auto-import can never promote a replica. Deploy
+ * non-publisher role, so auto-import can never hand a replica a key. Deploy
  * composes those seams; it forks none of them, and it never signs anything
  * itself (the client supplies key MATERIAL, the NODE signs: ADR-0003).
  *
@@ -145,7 +145,7 @@ export interface DeployInput {
 	 * hold it. Unused in `ipfs` mode, and unused in `ipns` mode when every signing
 	 * target already holds the key (the CI path, which needs no master at all).
 	 * The master itself is env-only and never reaches this module — the caller
-	 * derives (mirroring `pin`/`promote`), so the core never touches the
+	 * derives (mirroring `pin`/`authorize`), so the core never touches the
 	 * environment. Its ABSENCE where it IS needed is a loud refusal
 	 * ({@link DeployDerivedKeyRequiredError}), never a silent unsigned deploy.
 	 */
@@ -218,7 +218,7 @@ export class DeployPublisherRequiredError extends Error {
  *
  * Mirrors `PinDerivedKeyRequiredError`, including its STATED/PRESERVED
  * distinction, and names all three remedies: supply the key (export
- * `PINNACE_MASTER`), provision the node once (`pinnace promote`), or stop
+ * `PINNACE_MASTER`), authorize the node once (`pinnace authorize`), or stop
  * asking for a name (`--set-mode ipfs`).
  */
 export class DeployDerivedKeyRequiredError extends Error {
@@ -241,8 +241,8 @@ export class DeployDerivedKeyRequiredError extends Error {
 						`published under this name and this deploy must refresh it, or the ` +
 						`name keeps pointing at the OLD cid. `) +
 				`Export PINNACE_MASTER so this deploy can import the key, or run ` +
-				`\`pinnace promote ${siteId} --host <name>\` once to provision that ` +
-				`node, or deploy with --set-mode ipfs to stop publishing it.`,
+				`\`pinnace authorize ${siteId}\` once from a machine that has the ` +
+				`master, or deploy with --set-mode ipfs to stop publishing it.`,
 		);
 		this.name = 'DeployDerivedKeyRequiredError';
 	}
@@ -559,8 +559,8 @@ function shouldPublish(target: DeployTarget): boolean {
  *     when that node answered, else `key/list` here (the probe could not reach
  *     it, so this is where its failure surfaces as its own per-node failure).
  *  2. no key there yet -> {@link importIpnsKeyIntoPublisher} (`key/import`), the
- *     same call `pin`/`promote` make, which itself REFUSES a non-publisher role
- *     so auto-import can never promote a replica. The key is DERIVED, never
+ *     same call `pin`/`authorize` make, which itself REFUSES a non-publisher role
+ *     so auto-import can never hand a replica a key. The key is DERIVED, never
  *     invented: nothing here ever issues `key/gen`. The client supplies key
  *     MATERIAL only; the NODE signs (ADR-0003).
  *  3. {@link publishSiteRecord} (`name/publish arg=/ipfs/<cid> key=<id>`) — the

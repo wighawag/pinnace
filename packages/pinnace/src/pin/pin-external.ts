@@ -20,7 +20,7 @@
  *  - `ipns`: everything above PLUS the operator's OWN stable name for that
  *    mirrored content: the per-site key derived from their master + the `--as
  *    <name>` id is imported onto the PUBLISHER ({@link importIpnsKeyIntoPublisher},
- *    the same call `promote` makes) if absent, then the publisher signs
+ *    the same call `authorize` makes) if absent, then the publisher signs
  *    `name/publish arg=/ipfs/<cid>` through the SHARED publish seam
  *    (`../publisher/ipns-publish.ts`) deploy's ipns mode uses. The address is the
  *    stable `ipns://<id>`, and re-pinning a NEWER cid under the same name
@@ -187,7 +187,7 @@ export interface PinExternalInput {
 	 * The per-site key derived from the operator's master + this pin's `name`
 	 * (`deriveIpnsKey`). REQUIRED in `ipns` mode and unused in `ipfs` mode. The
 	 * master itself is env-only and never reaches this module — the caller derives
-	 * (mirroring `promote`), so the core never touches the environment.
+	 * (mirroring `authorize`), so the core never touches the environment.
 	 */
 	derived?: DerivedIpnsKey;
 }
@@ -654,7 +654,7 @@ async function pinOnNode(
  *   1. {@link lookupIpnsKeyId} (`key/list`) — does this publisher already hold a
  *      key named after the pin?
  *   2. if not, {@link importIpnsKeyIntoPublisher} (`key/import`) — the SAME call
- *      `promote` makes, which itself REFUSES any non-publisher role. The client
+ *      `authorize` makes, which itself REFUSES any non-publisher role. The client
  *      supplies key MATERIAL only; it signs nothing (ADR-0003).
  *   3. {@link publishSiteRecord} (`name/publish arg=/ipfs/<cid> key=<name>`) —
  *      the shared call shape deploy and the on-box republish timer use, so the

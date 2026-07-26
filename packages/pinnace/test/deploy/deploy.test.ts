@@ -755,7 +755,7 @@ describe('deploy — multi-target fan-out (partial failure is still success)', (
 /**
  * The FROZEN golden vector from `test/derive/ipns-key-derivation.test.ts` (the
  * same one the pin tests use): the same (master, id) yields the same `k51...`
- * id everywhere, so a deploy reports the name `derive`/`promote` already print.
+ * id everywhere, so a deploy reports the name `derive`/`authorize` already print.
  */
 const GOLDEN_MASTER = 'test-master-secret';
 const GOLDEN_ID = 'mysite';
@@ -874,7 +874,7 @@ describe('deploy — ipns mode IMPORTS the derived key when the publisher has no
 
 	it('the key ALREADY there: publishes with NO derived key and NO key/import', async () => {
 		// THE CI PATH. The import happened once from the operator's machine (or
-		// via `promote`); every later deploy just signs, with no master in sight.
+		// via `authorize`); every later deploy just signs, with no master in sight.
 		const a = keyedNode('https://publisher.test', '{"mode":"ipns"}');
 		const result = await deploy({
 			sourceDir: siteDir,
@@ -889,7 +889,7 @@ describe('deploy — ipns mode IMPORTS the derived key when the publisher has no
 		expect(a.requestsFor('name/publish').length).toBe(1);
 	});
 
-	it('a REPLICA is never handed a key and never signs (auto-import cannot promote)', async () => {
+	it('a REPLICA is never handed a key and never signs (auto-import cannot hand a replica a key)', async () => {
 		const pub = keylessNode('https://publisher.test');
 		const rep = keylessNode('https://replica.test');
 		const result = await deploy({
@@ -944,7 +944,7 @@ describe('deploy — ipns mode REFUSES rather than silently not signing', () => 
 		const message = (error as Error).message;
 		expect(message).toContain(GOLDEN_ID);
 		expect(message).toContain('PINNACE_MASTER');
-		expect(message).toContain('promote');
+		expect(message).toContain('authorize');
 		expect(message).toContain('--set-mode ipfs');
 		// A STATED mode does not claim the site is already published.
 		expect(message).not.toContain('already');
@@ -965,7 +965,7 @@ describe('deploy — ipns mode REFUSES rather than silently not signing', () => 
 		const message = (error as Error).message;
 		expect(message).toContain('already');
 		expect(message).toContain('PINNACE_MASTER');
-		expect(message).toContain('promote');
+		expect(message).toContain('authorize');
 		expect(message).toContain('--set-mode ipfs');
 		expectNothingMutated(a);
 	});

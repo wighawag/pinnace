@@ -16,13 +16,13 @@
  *    node-commands and the explicit-`env` resolver in config-resolution).
  *
  * The on-box `pinnace node <verb>` and the `pinnace site <verb>` namespaces,
- * the `promote` verb, dispatch through the SAME {@link RunContext}/
+ * the `authorize` verb, dispatch through the SAME {@link RunContext}/
  * {@link ClientDeps} seam (they are NOT a forked dispatch idiom): the on-box
  * `node` verbs assemble a {@link NodeCommandContext} from the box env
  * (`/etc/pinnace-node.env`, exported into `process.env` by the systemd timer's
- * `EnvironmentFile`) and call the core `runNodeCommand`; `site`/`promote`
- * assemble a per-host {@link KuboRpcClient} from the resolved config and call
- * the site / promote core.
+ * `EnvironmentFile`) and call the core `runNodeCommand`; `site`/`authorize`
+ * assemble per-host {@link KuboRpcClient}s from the resolved config and call
+ * the site / authorize core.
  */
 import {readFileSync} from 'node:fs';
 import {name} from '../index.js';
@@ -55,10 +55,13 @@ import {
 } from '../site/site-wrapper.js';
 import {makeStatusOp} from '../status/status-report.js';
 import {
-	promoteReplicaToPublisher as corePromoteReplicaToPublisher,
-	type PromoteReplicaInput,
-	type PromoteReplicaResult,
-} from '../publisher/record-sequence.js';
+	authorizePublisher as coreAuthorizePublisher,
+	AuthorizeSecondSignerError,
+	type AuthorizeInput,
+	type AuthorizeResult,
+	type AuthorizeHost,
+} from '../publisher/authorize.js';
+import {KeyImportRoleError} from '../publisher/key-import.js';
 import {
 	deriveIpnsKey as coreDeriveIpnsKey,
 	type DeriveIpnsInput as DeriveIpnsKeyInput,
@@ -144,12 +147,10 @@ export interface ClientDeps {
 	removeSite(input: RemoveSiteInput): Promise<RemoveSiteResult>;
 	/** `site add` -> place an already-imported CID into MFS as a site. */
 	addSite(input: AddSiteInput): Promise<AddSiteResult>;
-	/** `promote` -> derive the per-site key material from the master + `id`. */
+	/** `deploy`/`pin`/`authorize` -> the per-site key material from master + `id`. */
 	deriveIpnsKey(input: DeriveIpnsKeyInput): DerivedIpnsKey;
-	/** `promote` -> import the key + flip the node's role to publisher (story 14). */
-	promoteReplicaToPublisher(
-		input: PromoteReplicaInput,
-	): Promise<PromoteReplicaResult>;
+	/** `authorize` -> grant the declared publisher the site key(s), idempotently. */
+	authorizePublisher(input: AuthorizeInput): Promise<AuthorizeResult>;
 }
 
 /** The real core, used when a caller does not inject stubs. */
@@ -165,7 +166,7 @@ const DEFAULT_DEPS: ClientDeps = {
 	removeSite: coreRemoveSite,
 	addSite: coreAddSite,
 	deriveIpnsKey: coreDeriveIpnsKey,
-	promoteReplicaToPublisher: corePromoteReplicaToPublisher,
+	authorizePublisher: coreAuthorizePublisher,
 };
 
 /**
@@ -384,8 +385,8 @@ export async function run(
 	if (command === 'pin') {
 		return runPin(rest, rc);
 	}
-	if (command === 'promote') {
-		return runPromote(rest, rc);
+	if (command === 'authorize') {
+		return runAuthorize(rest, rc);
 	}
 
 	rc.err(`${name()}: unknown command '${command}'`);
@@ -615,7 +616,7 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
  *
  * `ipns` MODE PROVISIONS ITS OWN KEY (the same policy `pin --set-mode ipns`
  * has). The key is derived from the env-ONLY master + the site `id` (the single
- * `id` IS the KDF input, as for `derive`/`promote`/`pin`) and handed to the
+ * `id` IS the KDF input, as for `derive`/`authorize`/`pin`) and handed to the
  * core, which imports it onto a publisher that holds none. The CLI derives
  * OPTIMISTICALLY — whenever a master is available and the resolved mode COULD be
  * `ipns` — because only the core knows the site's stored mode and what the
@@ -688,7 +689,7 @@ async function runDeploy(
 	let derived: DerivedIpnsKey | undefined;
 	if (mode.kind === 'preserve' || mode.mode === 'ipns') {
 		const master = resolveMasterSecret({env: rc.env});
-		// The single `id` IS the site id AND the KDF input (as derive/promote/pin).
+		// The single `id` IS the site id AND the KDF input (as derive/authorize/pin).
 		if (master) derived = rc.deps.deriveIpnsKey({master, keyId: siteId});
 	}
 
@@ -893,7 +894,7 @@ const PIN_USAGE =
  * pin is addressed by the immutable `ipfs://<cid>`). `--set-mode ipns` ADDS the
  * operator's OWN stable name for the
  * mirrored content: the key derived from the env-ONLY master + the `--as <name>`
- * id (the same single-`id`-is-the-KDF-input rule as `derive`/`promote`) is
+ * id (the same single-`id`-is-the-KDF-input rule as `derive`/`authorize`) is
  * imported onto the PUBLISHER, which then signs `name/publish` for the pinned
  * cid. Re-pinning a newer cid under the same name moves that name.
  *
@@ -909,9 +910,9 @@ const PIN_USAGE =
  * ({@link PinDerivedKeyRequiredError}) if a preserved `ipns` entry has none.
  *
  * `--host <name>` NARROWS the fan-out to that one node (note this differs from
- * `site`/`promote`, where `--host` SELECTS the single node it acts on and is
- * required with several hosts; here omitting it means ALL nodes, matching
- * `deploy`). Each host's token is resolved env-only and LAZILY, so a host with
+ * `site`, where `--host` SELECTS the single node it acts on and is required
+ * with several hosts, and from `authorize`, which takes no `--host` at all;
+ * here omitting it means ALL nodes, matching `deploy`). Each host's token is resolved env-only and LAZILY, so a host with
  * no resolvable token fails loud naming its exact env var. `--no-recursive`
  * pins the root block only. Exit code follows the core's `success` (a non-empty
  * success subset is still success).
@@ -1469,59 +1470,184 @@ async function runNodeCli(
 	return 0;
 }
 
+/** The two forms of `authorize`, and the reason it takes no `--host`. */
+const AUTHORIZE_USAGE =
+	'usage: pinnace authorize            (every site the publisher holds in MFS)\n' +
+	'   or: pinnace authorize <id>       (just that site; it need not exist yet)';
+
 /**
- * `pinnace promote <id> [--host <name>]` -> {@link
- * ClientDeps.promoteReplicaToPublisher} (spec user story 14). Derives the
- * per-site key from the env-only master + the site `id` (the KDF input,
- * {@link ClientDeps.deriveIpnsKey}), assembles the chosen host's client, and
- * promotes it: import the key + flip the role to publisher, recovering the name
- * within the record's validity window without content downtime. The master is
- * env-ONLY (never from `pinnace.json`); its absence is a LOUD error.
+ * `pinnace authorize [<id>]` -> {@link ClientDeps.authorizePublisher}. Grants
+ * the config's DECLARED publisher the key MATERIAL for one site (`<id>`) or for
+ * every site it holds in MFS (the bare form), so CI can deploy those names
+ * forever WITHOUT the master. It changes no role and performs no failover (see
+ * the core module doc); re-running it is a safe no-op.
+ *
+ * There is deliberately NO `--host`: the config already declares who the
+ * publisher is, so the flag could only restate it — or contradict it. A typed
+ * `--host` is therefore a loud usage error rather than a silently ignored flag
+ * (the same "a flag you typed must never mean nothing" rule
+ * {@link refuseBareFlags} applies), which is also why `pickHost`'s
+ * "--host is mandatory once you have two hosts" friction does not apply here.
+ *
+ * The refusals, all before any node is touched:
+ *  - a missing `PINNACE_MASTER` (env-ONLY, never from `pinnace.json`),
+ *  - a config declaring ZERO publishers (nothing to authorize) or MORE THAN ONE
+ *    (the model is one publisher per shared IPNS name; picking one silently
+ *    would be a coin flip),
+ *  - the publisher's own bearer token unset (named env var, as everywhere).
+ *
+ * `--endpoint <url>` is an ASSERTION, and is honest about it: it MINTS a single
+ * synthetic host named `publisher` (`CLI_ENDPOINT_HOST_NAME`) with role
+ * `publisher` (see `../config/config-resolution.ts`), so
+ * the operator is CLAIMING that node is the publisher. pinnace cannot check it
+ * (a box's real role is `NODE_ROLE` in its cloud-init env, unreachable over
+ * Kubo RPC), so the zero/multiple/replica guards cannot fire on that path, and
+ * with one visible box the second-signer guard has nothing to ask either —
+ * exactly as `deploy --endpoint` already works.
+ *
+ * The OTHER configured hosts are handed to the core for the second-signer
+ * guard. A host whose token is unset cannot be asked, so it is reported as
+ * unchecked rather than failing the run: that guard is best-effort by
+ * construction (it is skipped wholesale under `--endpoint`), and a replica's
+ * token is not otherwise this verb's business.
  */
-async function runPromote(
+async function runAuthorize(
 	argv: readonly string[],
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv);
-	if (!refuseBareFlags('pinnace promote', flags, rc)) return 1;
-	const [siteId] = positionals;
-	if (!siteId) {
-		rc.err('pinnace promote: usage: pinnace promote <id> [--host <name>]');
+	if (!refuseBareFlags('pinnace authorize', flags, rc)) return 1;
+	if (flags['host'] !== undefined) {
+		rc.err(
+			`pinnace authorize: --host is not accepted; authorize targets the ` +
+				`host your config DECLARES \`role: publisher\` (there is exactly one ` +
+				`publisher per IPNS name, so there is nothing to choose). Fix the ` +
+				`roles in pinnace.json, or pass --endpoint <url> to assert one node.\n` +
+				AUTHORIZE_USAGE,
+		);
 		return 1;
 	}
+	if (positionals.length > 1) {
+		rc.err(
+			`pinnace authorize: expected at most one site id, got ` +
+				`${positionals.map((p) => `'${p}'`).join(', ')}\n${AUTHORIZE_USAGE}`,
+		);
+		return 1;
+	}
+	const [siteId] = positionals;
 
 	const master = resolveMasterSecret({env: rc.env});
 	if (!master) {
 		rc.err(
-			'pinnace promote: master secret not set — export PINNACE_MASTER (env-only; never read from pinnace.json)',
+			'pinnace authorize: master secret not set — export PINNACE_MASTER ' +
+				'(env-only; never read from pinnace.json). Authorizing IS handing the ' +
+				'publisher the key derived from it, so this is the one verb that ' +
+				'cannot run without it.',
 		);
 		return 1;
 	}
 
 	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
-	const host = pickHost('pinnace promote', flags['host'], cfg, rc);
-	if (!host) return 1;
-	const client = clientForHost('pinnace promote', host, rc, cli);
+	if (cfg.hosts.length === 0) {
+		rc.err(`pinnace authorize: ${NO_HOSTS_HINT}`);
+		return 1;
+	}
+	const publishers = cfg.hosts.filter((h) => h.role === 'publisher');
+	if (publishers.length === 0) {
+		rc.err(
+			`pinnace authorize: no host is declared \`role: publisher\` (configured: ` +
+				`${cfg.hosts.map((h) => `${h.name} (${h.role})`).join(', ')}), so there ` +
+				`is nothing to authorize — only the publisher holds a key, and a ` +
+				`replica is keyless by design.`,
+		);
+		return 1;
+	}
+	if (publishers.length > 1) {
+		rc.err(
+			`pinnace authorize: ${publishers.length} hosts are declared ` +
+				`\`role: publisher\` (${publishers.map((h) => h.name).join(', ')}); ` +
+				`exactly one node per IPNS name may hold the key, since two signers ` +
+				`race the record's sequence numbers. Declare one publisher in ` +
+				`pinnace.json, or pass --endpoint <url> to name the node directly.`,
+		);
+		return 1;
+	}
+	const publisher = publishers[0];
+	const client = clientForHost('pinnace authorize', publisher, rc, cli);
 	if (!client) return 1;
 
-	// The single `id` IS the KDF input (no separate keyId), matching `derive`:
-	// the positional arg verbatim, with no config lookup to normalise it.
-	const derived = rc.deps.deriveIpnsKey({master, keyId: siteId});
-	const result = await rc.deps.promoteReplicaToPublisher({
-		client,
-		currentRole: host.role,
-		keyName: siteId,
-		derived,
-	});
-	rc.out(
-		`promoted ${result.keyName} to ${result.role}${result.ipns ? ` (ipns ${result.ipns})` : ''}`,
-	);
+	// The OTHER hosts, for the second-signer guard. One with no resolvable token
+	// cannot be asked: reported below, never fatal (see the doc above).
+	const others: AuthorizeHost[] = [];
+	const unaskable: string[] = [];
+	for (const host of cfg.hosts) {
+		if (host.name === publisher.name) continue;
+		try {
+			others.push({
+				name: host.name,
+				client: new KuboRpcClient({
+					baseUrl: host.endpoint,
+					token: resolveHostToken({hostName: host.name, env: rc.env, cli}),
+				}),
+			});
+		} catch (error) {
+			if (error instanceof MissingHostTokenError) unaskable.push(host.name);
+			else throw error;
+		}
+	}
+
+	let result: AuthorizeResult;
+	try {
+		result = await rc.deps.authorizePublisher({
+			publisher: {name: publisher.name, client, role: publisher.role},
+			others,
+			// The single `id` IS the KDF input (no separate keyId), matching `derive`:
+			// the positional arg verbatim, with no config lookup to normalise it. No
+			// id at all means the core discovers the publisher's MFS sites.
+			...(siteId ? {ids: [siteId]} : {}),
+			// The master stays in the CLI: the core asks for material per site.
+			deriveKey: (id) => rc.deps.deriveIpnsKey({master, keyId: id}),
+		});
+	} catch (error) {
+		// The two refusals only the NODES can answer: a key for this site already
+		// sits on another configured host, and the key-import seam's standing
+		// refusal to put a key on anything but a publisher (ADR-0003).
+		if (
+			error instanceof AuthorizeSecondSignerError ||
+			error instanceof KeyImportRoleError
+		) {
+			rc.err(`pinnace authorize: ${error.message}`);
+			return 1;
+		}
+		throw error;
+	}
+
+	rc.out(`publisher ${publisher.name} (${publisher.endpoint})`);
+	for (const site of result.sites) {
+		rc.out(
+			`  ${site.id}: ${site.status}${site.ipns ? ` (ipns ${site.ipns})` : ''}`,
+		);
+	}
+	if (result.sites.length === 0) {
+		rc.out(
+			`no sites in MFS on ${publisher.name} to authorize; name one ` +
+				`(\`pinnace authorize <id>\`) to authorize it before its first deploy`,
+		);
+	}
+	const unchecked = [...result.unchecked, ...unaskable];
+	if (unchecked.length > 0) {
+		rc.out(
+			`note: could not check ${unchecked.join(', ')} for an existing key ` +
+				`(unreachable, or no token set); a second node holding this key would ` +
+				`race the record's sequence numbers`,
+		);
+	}
 	return 0;
 }
 
 // ---------------------------------------------------------------------------
-// Host selection + client assembly (shared by site + promote).
+// Host selection + client assembly (shared by the site verbs + authorize).
 // ---------------------------------------------------------------------------
 
 /**

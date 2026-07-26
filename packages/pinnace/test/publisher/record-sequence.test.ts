@@ -12,7 +12,6 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
 import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
-import {deriveIpnsKey} from '../../src/derive/ipns-key-derivation.js';
 import type {
 	DiscoveredSite,
 	NodeCommandContext,
@@ -22,7 +21,6 @@ import {
 	mirrorAndReannounce,
 	makeRepublishOp,
 	makeMirrorOp,
-	promoteReplicaToPublisher,
 	RECORD_LIFETIME,
 	RECORD_TTL,
 } from '../../src/publisher/record-sequence.js';
@@ -50,7 +48,7 @@ function putRecordText(req: {
 	return part ? Buffer.from(part.bytes).toString('utf8') : undefined;
 }
 
-function clientWith(mock: MockKuboApi, token = 'on-box-token') {
+function clientWith(mock: MockKuboApi, token = 'on-box-token'): KuboRpcClient {
 	return new KuboRpcClient({
 		baseUrl: mock.baseUrl,
 		token,
@@ -399,46 +397,32 @@ describe('full sequence: publisher EXPORT -> replica FETCH -> routing/put -> fal
 	});
 });
 
-describe('promoteReplicaToPublisher (story 14) — import key + flip role, reuses key-import seam', () => {
-	const master = 'test-master-secret';
-	const keyId = 'mysite';
-
-	it('imports the derived key via key/import and returns the new publisher role within the validity window', async () => {
-		const mock = new MockKuboApi().on('key/import', {
-			json: {Name: 'alice.eth', Id: 'k51golden'},
-		});
-		const client = clientWith(mock, 'promote-token');
-		const derived = deriveIpnsKey({master, keyId});
-		const result = await promoteReplicaToPublisher({
-			client,
-			currentRole: 'replica',
-			keyName: 'alice.eth',
-			derived,
-		});
-		// It imported the key material via key/import (the key-import-publisher seam).
-		const imports = mock.requestsFor('key/import');
-		expect(imports.length).toBe(1);
-		expect(imports[0].query.get('arg')).toBe('alice.eth');
-		// The role is flipped to publisher.
-		expect(result.role).toBe('publisher');
-		expect(result.keyName).toBe('alice.eth');
-		// Promotion imports a key; it does NOT itself sign a record (no name/publish
-		// here — the promoted node signs on its next republish).
-		expect(mock.requestsFor('name/publish').length).toBe(0);
-	});
-
-	it('is idempotent-safe on a node already publisher (re-imports the key, stays publisher)', async () => {
-		const mock = new MockKuboApi().on('key/import', {
-			json: {Name: 'alice.eth'},
-		});
-		const client = clientWith(mock);
-		const result = await promoteReplicaToPublisher({
-			client,
-			currentRole: 'publisher',
-			keyName: 'alice.eth',
-			derived: deriveIpnsKey({master, keyId}),
-		});
-		expect(result.role).toBe('publisher');
-		expect(mock.requestsFor('key/import').length).toBe(1);
+/**
+ * The record sequence NEVER grants key material: importing a site key onto the
+ * publisher is `authorize` (`../publisher/authorize.ts`, its own tests), which
+ * used to live here as `promoteReplicaToPublisher`. Pinned so nobody re-adds a
+ * key-provisioning path to this module — or re-adds a "role flip" that persists
+ * nothing.
+ */
+describe('the record sequence grants no key material (authorize owns that)', () => {
+	it('never issues key/import on either side of the sequence', async () => {
+		const pubMock = publisherMock();
+		const {ctx, dir} = await tempCtx(pubMock, {role: 'publisher'});
+		try {
+			await republishAndExport(ctx, SITES);
+			await mirrorAndReannounce(
+				{
+					...ctx,
+					role: 'replica',
+					publisherFetch: async (url) =>
+						url.endsWith('.ipns-record') ? 'PUB-RECORD' : 'k51pubid',
+				},
+				SITES,
+			);
+			expect(pubMock.requestsFor('key/import').length).toBe(0);
+			expect(pubMock.requestsFor('key/gen').length).toBe(0);
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
 	});
 });

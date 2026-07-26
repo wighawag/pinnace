@@ -38,7 +38,7 @@ Requires Node >= 22. (The nodes themselves install `pinnace` globally for their 
 ## Mental model
 
 - **node** (box): a self-owned server running the Kubo IPFS daemon, reached ONLY via its Kubo RPC API (`POST /api/v0/...`, bearer-token guarded, fronted by Caddy over HTTPS). Swarm port 4001 is open so public gateways can dial it; the raw RPC (5001) is never exposed.
-- **publisher / replica**: exactly one **publisher** per shared IPNS name holds the derived key, signs + refreshes the record, and exports the raw signed record. Keyless **replicas** pin the same CID and re-announce the publisher's record (falling back to a cached copy if the publisher is down). This is the failover model: the name stays resolvable within the record's validity window even if the publisher dies.
+- **publisher / replica**: exactly one **publisher** per shared IPNS name holds the derived key, signs + refreshes the record, and exports the raw signed record. Keyless **replicas** pin the same CID and re-announce the publisher's record (falling back to a cached copy if the publisher is down), so the name stays resolvable within the record's validity window even if the publisher dies. That window is a GRACE period, not a handover: getting the name signed again beyond it means another box actually signing, and a box's role (`NODE_ROLE`) and a replica's `PUBLISHER_ENDPOINT` are cloud-init env values pinnace cannot change over Kubo RPC. So promoting a replica is today a REPROVISION of that box, not a command.
 - **CID / CAR**: your site is built client-side into a CAR (Content Addressable aRchive) whose root is the site's UnixFS directory; the same CAR is imported into every node so they all serve the identical **CID**.
 - **master key -> per-site IPNS key**: one operator-held secret (env-only, never on a node, never in the config file) deterministically derives each site's IPNS key: `HKDF-SHA256(master, info = "pinnace:ipns:v1:" + id)` -> ed25519 seed -> the `k51...` IPNS name. Names are recoverable from the master alone; provisioning is stateless. This is a frozen contract (see the ADRs).
 - **site `id`**: one value per site, used as BOTH its MFS home (`/sites/<id>/`) AND the key-derivation input. Pick anything stable (e.g. `mysite`, or `ronan.eth`).
@@ -92,7 +92,7 @@ This `.env.local` is loaded automatically from the directory you run `pinnace` i
 
 ## The end-to-end setup
 
-The full flow, from zero to a redundant, failover-capable IPNS site. Values below match the config above; substitute your own domains.
+The full flow, from zero to a redundant IPNS site that survives a publisher outage for the record's validity window. Values below match the config above; substitute your own domains.
 
 ### 1. Pick tokens + an id
 
@@ -158,13 +158,13 @@ pinnace derive mysite
 pinnace --config pinnace.json deploy --set-mode ipns ./site mysite
 ```
 
-That is the whole first deploy: in `ipns` mode `deploy` PROVISIONS its own key. If the publisher's keystore has no key for `mysite`, the key derived from your master + the site id is imported onto it (never generated on the box, never onto a replica) and the name is published. No separate `promote` step is needed for a new site.
+That is the whole first deploy: in `ipns` mode `deploy` PROVISIONS its own key. If the publisher's keystore has no key for `mysite`, the key derived from your master + the site id is imported onto it (never generated on the box, never onto a replica) and the name is published. No separate step is needed for a new site you deploy from your own machine (for a CI-ONLY project, see `authorize` below).
 
-`deploy --set-mode ipns` either produces a working name or fails telling you how to fix it: if the publisher holds no key and no `PINNACE_MASTER` is exported, the deploy REFUSES before writing anything to any node, naming your three options (export the master, run `pinnace promote`, or deploy with `--set-mode ipfs`). It never lands content and quietly leaves the name on the old CID.
+`deploy --set-mode ipns` either produces a working name or fails telling you how to fix it: if the publisher holds no key and no `PINNACE_MASTER` is exported, the deploy REFUSES before writing anything to any node, naming your three options (export the master, run `pinnace authorize`, or deploy with `--set-mode ipfs`). It never lands content and quietly leaves the name on the old CID.
 
 `--set-mode ipns` is stated ONCE: it is written into the site's `metadata.json`, so every later deploy of `mysite` picks it up from there. Later deploys need NO master, because the publisher already holds the key — which is what makes CI deploys (`install-ci`) key-free: they just re-sign the new CID.
 
-After this the on-box timers run the failover loop automatically: the publisher re-signs + exports the record, replicas mirror + re-announce it, and if the publisher goes down the replicas keep the name alive from their cached record within its validity window.
+After this the on-box timers run the record loop automatically: the publisher re-signs + exports the record, replicas mirror + re-announce it, and if the publisher goes down the replicas keep the name alive from their cached record within its validity window. That is a grace window, not a handover — recovering the name beyond it means reprovisioning a box to sign (see the publisher/replica note above).
 
 ### 6. Change a site's metadata (just re-deploy)
 
@@ -195,6 +195,20 @@ pinnace --config pinnace.json status                 # per-site CID / IPNS id / 
 curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the exported signed record
 ```
 
+### 8. CI-only setups: `authorize` once, then deploy forever with no master
+
+`deploy` imports the site key itself, but only when it HAS the master — which bootstraps nothing for a project that only ever deploys from CI, where you do not want `PINNACE_MASTER` at all. Run `authorize` ONCE from your own machine instead:
+
+```sh
+pinnace --config pinnace.json authorize mysite   # or bare: every site the publisher holds
+```
+
+It derives `mysite`'s key from your master and imports it into the keystore of the host your config declares `role: publisher`. From then on CI deploys that name forever, with no master anywhere in the pipeline. It is IDEMPOTENT: the keystore is probed first, so a key already there is reported `already-authorized` and never re-imported — re-running it, or the bare form over every site the publisher holds in MFS, is safe. A named `<id>` does NOT need the site to exist yet, which is the point: authorize before the very first deploy.
+
+`authorize` grants KEY MATERIAL and nothing else. It is not a failover and it changes no role: it does not touch `hosts[].role` in `pinnace.json`, and it cannot touch the box's own `NODE_ROLE` (see the publisher/replica note in the mental model — promotion is a reprovision). It takes no `--host`, because the config already declares which host is the publisher, and it refuses loudly if that config declares zero or several publishers, or if another configured host already holds a key for the site: two nodes signing one name race the record's sequence numbers, so the name would flap between their CIDs.
+
+With `--endpoint <url>` there is no config to read: that flag MINTS a single host named `publisher` with role `publisher`, so you are ASSERTING that this node is the publisher. pinnace cannot verify the claim (a box's real role lives in its cloud-init env, not over Kubo RPC) and, seeing one node, it cannot check for a second signer elsewhere either — exactly as `deploy --endpoint` already works.
+
 ## Command reference
 
 | Command | What it does |
@@ -202,7 +216,7 @@ curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the export
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
 | `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. |
 | `pinnace pin <cid> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows). Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
-| `pinnace promote <id> [--host <name>]` | The deliberate FAILOVER path: derive the per-site key from the master and import it onto the named host, flipping a replica to publisher so it can sign the name (e.g. after losing the original publisher). `deploy`/`pin` provision an existing publisher's key themselves, so this is not a step in a normal first deploy. |
+| `pinnace authorize [<id>]` | Grant the DECLARED publisher the per-site key derived from your master, so CI can deploy that name with no master (its primary job: run once locally, deploy from CI forever). Bare = every site the publisher holds in MFS; `<id>` = just that site, which need not exist yet. Idempotent (a key already held is reported `already-authorized`, never re-imported). No `--host`: the config says which host is the publisher, and zero/several declared publishers, or another host already holding that key, are loud refusals. It grants key MATERIAL only — it changes NO role and is NOT a failover. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName` and the eth.limo name they resolve to, network-announce, gateway-serves. |
 | `pinnace install-ci --system github --build-command <c> --output-dir <d>` | Emit a deploy CI workflow and report the secrets/vars to set. |
@@ -211,7 +225,7 @@ curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the export
 
 Global (either side of the command): `--config <path>` selects the `pinnace.json` (default `./pinnace.json`, whose ABSENCE is fine — a named-but-missing path fails loud), and `--endpoint <url>` supplies one publisher node instead of a config file (token still env-only). `--endpoint` may be given only ONCE: repeating it is a usage error rather than a silent pick.
 
-Every node-touching verb (`deploy`, `pin`, `status`, `site`, `promote`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
+Every node-touching verb (`deploy`, `pin`, `status`, `site`, `authorize`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
 
 A flag you type must never mean nothing: any value-taking flag written with NO value (at the end of the line, or immediately followed by another `--flag`) is a usage error naming it. So a mistyped `pinnace deploy --endpoint --set-mode ipns ./dist mysite` refuses, instead of dropping the endpoint and quietly deploying to every host in `pinnace.json`.
 
