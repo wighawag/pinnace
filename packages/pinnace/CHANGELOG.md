@@ -1,5 +1,53 @@
 # pinnace
 
+## 0.7.0
+
+### Minor Changes
+
+- b0e8c3f: `pinnace.json` is now INFRASTRUCTURE only (`hosts`, `gateways`) and OPTIONAL.
+
+  - **The `sites` array is gone from the config schema** (`SiteConfig` is no longer exported). A site's identity and its per-site metadata (`mode`, `ensName`) live in the node's MFS wrapper `/sites/<id>/{content,metadata.json}`, written at deploy/pin time, so there is no site state in the config to keep in sync by hand. A stale `sites` key in an existing file is simply ignored, exactly as a stray `master`/`token` is.
+  - **BREAKING: `--mode` is renamed `--set-mode`, on BOTH `deploy` and `pin`**, and a site's mode is now RESOLVED rather than restated every time: `--set-mode ipfs|ipns` > the mode STORED in the site's MFS `metadata.json` > `ipfs`. The old "mode from the matching `pinnace.json` site entry" fallback is REMOVED (there are no config sites), and the metadata takes its place as the durable home. OMITTING the flag now PRESERVES — exactly like omitting `--set-ens-name` — so `pinnace deploy ./dist mysite` on a published site still signs and refreshes its IPNS record instead of silently demoting it to `ipfs`; only a site that stores no mode at all (a first deploy/pin) runs as `ipfs`. There is no `--unset-mode` (an absent stored mode simply means `ipfs`); a BARE `--set-mode` is a loud usage error naming the two values, and any other value is the unresolved-mode refusal naming the site. For a multi-node fan-out the mode is resolved ONCE from the PUBLISHER (the node that holds the key and signs) and that one value is written to every node's metadata, so nodes cannot diverge. Update any script or workflow that passes `--mode` (the emitted GitHub workflow now passes `--set-mode "$SITE_MODE"`).
+  - **`derive <id>` and `promote <id>` take the id from the argument verbatim** (there is no config entry to normalise it against); `derive` needs no config file at all.
+  - **NEW `--endpoint <url>`**: supplies ONE publisher node directly on the command line, so `deploy`/`pin`/`status`/`site`/`promote` work with NO `pinnace.json`. Its bearer token stays env-only under the usual convention (`PINNACE_HOST_PUBLISHER_TOKEN`), and a missing one is the same loud, named error. Being the arg tier it replaces the file's hosts for that run (arg > env > file); `--host-endpoint.<name>` still overrides the endpoint OF a configured host.
+
+  Precedence (arg > env > file), the env-only master + tokens, and the `--config <path>` behaviour (a named-but-missing file still fails loud) are unchanged.
+
+- eb67a0e: `deploy` and `pin` now write the REAL per-site metadata into the MFS wrapper's `metadata.json`: the `mode` the operation ran in, plus the site's `ensName` (the eth.limo warming lever the on-box loop reads). Two verb-flags reach every state of that three-valued field, on `deploy` and on BOTH `pin` entry points (`pin <cid>` and `pin --from-ipns`):
+
+  - `--set-ens-name <name>` sets `ensName` to that name (warm `<name>.limo`); the name and the site id do NOT have to be `.eth` (the ENS name is decoupled from the id).
+  - `--set-ens-name` with NO value REMOVES the key, so the on-box rule INFERS the name from a `.eth` id. It fails loud when the id does not end in `.eth` (there would be nothing to infer). Bare = the flag at the end of the args or immediately followed by another `--flag`, the existing no-value convention.
+  - `--unset-ens-name` persists `""`, the opt-out: never warm eth.limo, even for a `.eth` id.
+  - OMITTING both LEAVES the site's `ensName` alone: a first deploy/pin leaves it ABSENT (a `.eth` id then warms by inference), and a re-deploy/re-pin PRESERVES the existing value — including a prior `""` opt-out — via a read-modify-write of the site's current `metadata.json` on each node. Omitting is never a delete, and never authors a name.
+
+  The two flags are mutually exclusive (a usage error), and both refusals happen before any node is touched. Library callers get the same lever through the new `ensName` intent on `deploy()`/`pinExternal()` (`EnsNameIntent`, `resolveSiteMetadataToWrite`, `assertEnsNameIntent`, `EnsNameInferenceError`, exported from the package root). Resolving eth.limo warming FROM this metadata remains the on-box loop's own change.
+
+- 081395d: Store each site in MFS as a WRAPPER directory — `/sites/<id>/content` (the UnixFS root CID, where the site's CID used to sit directly) plus `/sites/<id>/metadata.json` (the per-site metadata `{ensName?, mode}`) — so a site's metadata travels with the site on the node and the on-box loop can read it from the thing it can see. `placeInMfs` now takes a `metadata` argument and writes the whole wrapper (`files/mkdir` the wrapper with `parents`, `files/rm` + `files/cp` the `content` subpath, `files/write` the `metadata.json`), staying idempotent: re-placing replaces content AND metadata. `discoverSites` reads the content CID from `/sites/<id>/content` and the metadata from `/sites/<id>/metadata.json`, and `DiscoveredSite` gains a `metadata` field; absent or malformed metadata reads as empty metadata rather than failing discovery. `site remove` resolves the CONTENT CID before removing the wrapper, so it still unpins the site's content, and `site list` reports the content CID too. `ensName` is preserved three-valued through write and read: a name, `""` (opt out), and absent (infer) stay distinct. `deploy` and `pin` (both entry points) record the `mode` they ran in; writing a real `ensName` and resolving eth.limo warming from it follow in their own changes.
+
+  MIGRATION: sites placed under the OLD flat layout (`/sites/<id>` = the content CID) are not migrated in place — remove the entry (`pinnace site remove <id>`) and re-deploy/re-pin it to get the wrapper.
+
+- 3167239: The on-box `warm` loop now resolves eth.limo warming from each site's MFS `metadata.ensName` instead of the bare "`id` ends in `.eth`" heuristic, so the `ensName` lever the client writes at deploy/pin time actually reaches the box (it reads the metadata that travels with the site in MFS). Per site, in strict precedence order:
+
+  - an explicit NON-EMPTY `ensName` warms `https://<ensName>.limo/` — for any site id, `.eth` or not, and it OVERRIDES a `.eth` id (the name, not the identity, decides);
+  - `ensName: ""` OPTS OUT: no eth.limo warm at all, even for a `.eth` id;
+  - an ABSENT `ensName` on a `.eth` id INFERS the name from the id, so a `.eth`-named site still auto-warms `https://<id>.limo/` with no configuration (unchanged behaviour for existing sites);
+  - an ABSENT `ensName` on a non-`.eth` id warms no ENS name.
+
+  The site's CID is still warmed through every configured gateway in all four cases (opting out of eth.limo is not opting out of warming), and warming failures stay recorded rather than thrown — a cold gateway never fails the run. The rule is exported as `resolveEnsNameToWarm(id, metadata)` from the package root, next to the write-side `resolveSiteMetadataToWrite`, so both sides of the three-valued `ensName` (a name / `""` / absent) are defined in one place.
+
+### Patch Changes
+
+- dded552: Add `filesWrite(path, bytes)` and `filesRead(path)` to `KuboRpcClient`, so the client can create-or-replace and read an MFS file (the channel a site's `/sites/<id>/metadata.json` will travel on). `filesWrite` posts `files/write?arg=<path>&create=true&parents=true&truncate=true` with the bytes as a `multipart/form-data` `file` part (Kubo's file-upload contract), so a re-write fully REPLACES the file rather than appending into it; `filesRead` posts `files/read?arg=<path>` and returns the bytes. Both carry the node's bearer token and raise the loud `KuboRpcError` (endpoint + status) on any non-2xx, including a path that does not exist.
+- 194c749: Add a `pinnace` logo (SVG mark + wordmark lockup, `assets/logo.svg` / `assets/logo-mark.svg`) and document install as a per-project DEV DEPENDENCY instead of a global install. The README now shows `npm install --save-dev pinnace` (`pnpm add -D pinnace`) run via `npx pinnace …` or a `package.json` script, so the version is pinned in `package.json` and CI uses exactly that version; the machine-wide `npm install -g` remains only where it belongs, on the nodes, done for the operator by the generated cloud-init. The `.env`/`.env.local` cwd auto-load note is reworded accordingly (it applies to `npx pinnace …` just the same).
+- d85f969: Bump the cloud-init pinned agent version (`DEFAULT_PINNACE_VERSION`) to `0.7.0`, so a freshly provisioned box installs the release that carries the MFS site-metadata reshape rather than the previous `0.6.0`. A box boot stays reproducible (the version is pinned, never floating `latest`), and it remains overridable per box via `ProvisionInput.pinnaceVersion`.
+- 7749345: Docs: the package README (what npm shows) and the root README now describe the MFS-metadata model instead of the retired config-first one.
+
+  - `pinnace.json` is shown as INFRASTRUCTURE only (`hosts`, `gateways`) in every example; the `sites` array is gone.
+  - The config file is documented as OPTIONAL, with a worked `--endpoint <url>` example (one publisher node on the command line, token still env-only from `PINNACE_HOST_PUBLISHER_TOKEN`), plus the arg-tier note that `--endpoint` replaces the file's hosts while `--host-endpoint.<name>` overrides one declared host.
+  - Per-site `mode` and `ensName` are documented as MFS metadata written at deploy/pin time: `--set-mode ipfs|ipns` > the mode stored in the site's `metadata.json` > `ipfs` (omitting preserves; no `--unset-mode`), and the three ensName states (`--set-ens-name <name>`, bare `--set-ens-name` to restore inference, `--unset-ens-name` to opt out) plus omit-preserves and the `.eth`-id auto-inference. A new walkthrough step shows that changing a site's metadata is just a re-`deploy`.
+  - The MFS wrapper `/sites/<id>/{content,metadata.json}` is described in the mental model as what `status`, gateway warming and the on-box loop discover.
+  - The command reference matches the real CLI (`--set-mode`/ens flags on `deploy` + `pin`, and the `--endpoint`/`--gateways`/`--host-endpoint.<name>`/`--host-token.<name>` globals), and the package README's ADR link is absolute so it is not broken on npm. The post-install smoke test is now `pinnace version` (`pinnace --help` is not a command), and the `--endpoint` examples put the flag after the verb, where the CLI accepts it.
+
 ## 0.6.0
 
 ### Minor Changes
