@@ -387,6 +387,11 @@ interface PinPlan {
  * @throws {PinDerivedKeyRequiredError} in `ipns` mode without the `derived` key.
  * @throws {EnsNameInferenceError} for a bare `--set-ens-name` (the `infer`
  * intent) on a non-`.eth` pin name.
+ * @throws {SiteMetadataUnreadableError} when the PUBLISHER cannot say what the
+ * entry stores and the mode/ensName are being PRESERVED — before anything is
+ * pinned, and before a `fromIpns` source is even resolved. A node that fails
+ * the same read later in the fan-out is that node's `place`-stage failure, and
+ * its stored metadata is left untouched.
  *
  * The `ipns`-mode preconditions are checked BEFORE any node is touched, so a
  * refusal never leaves a half-done pin behind.

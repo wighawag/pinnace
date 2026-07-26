@@ -7,6 +7,7 @@ import {deploy, type DeployTarget} from '../../src/deploy/deploy.js';
 import {
 	parseSiteMetadata,
 	EnsNameInferenceError,
+	SiteMetadataUnreadableError,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
 
@@ -202,9 +203,16 @@ describe('deploy — writes the per-site metadata {ensName?, mode}', () => {
 		return write[0];
 	}
 
-	/** A node whose site already carries `metadata.json` (the re-deploy case). */
+	/**
+	 * A node whose site already carries `metadata.json` (the re-deploy case):
+	 * the wrapper LISTS the file (which is how the write path knows it is there)
+	 * and reading it yields `metadataJson`.
+	 */
 	function nodeHolding(metadataJson: string): MockKuboApi {
 		const mock = mockNode('https://node-a.test');
+		mock.on('files/ls', {
+			json: {Entries: [{Name: 'content'}, {Name: 'metadata.json'}]},
+		});
 		mock.on('files/read', {text: metadataJson});
 		return mock;
 	}
@@ -316,8 +324,7 @@ describe('deploy — writes the per-site metadata {ensName?, mode}', () => {
 	});
 
 	it('preserves PER NODE (each node carries its own metadata)', async () => {
-		const a = mockNode('https://node-a.test');
-		a.on('files/read', {text: '{"ensName":"a.example","mode":"ipfs"}'});
+		const a = nodeHolding('{"ensName":"a.example","mode":"ipfs"}');
 		const b = mockNode('https://node-b.test');
 		b.on('files/read', {status: 500, text: 'file does not exist'});
 		await deploy({
@@ -331,6 +338,76 @@ describe('deploy — writes the per-site metadata {ensName?, mode}', () => {
 			mode: 'ipfs',
 		});
 		expect(metadataOf(writeOf(b))).toEqual({mode: 'ipfs'});
+	});
+});
+
+/**
+ * A no-flag deploy PRESERVES, which means it must first learn what the site
+ * stores. When the node cannot tell it (down, or a stale token answering 401),
+ * the old behaviour read that error as "nothing stored" and wrote `mode: ipfs`
+ * with no `ensName` — silently demoting a published site, and exiting 0. The
+ * write is now REFUSED instead (task `site-metadata-write-path-no-silent-loss`).
+ */
+describe('deploy — REFUSES to write metadata it could not read (no silent loss)', () => {
+	/** A node whose MFS answers nothing at all (down / stale token). */
+	function sickNode(baseUrl: string): MockKuboApi {
+		const mock = mockNode(baseUrl);
+		mock.on('files/ls', {status: 401, text: 'unauthorized'});
+		mock.on('files/read', {status: 401, text: 'unauthorized'});
+		return mock;
+	}
+
+	it('refuses the whole deploy when the PUBLISHER cannot say what it stores', async () => {
+		const a = sickNode('https://node-a.test');
+		const refusal = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		}).catch((e: unknown) => e);
+		expect(refusal).toBeInstanceOf(SiteMetadataUnreadableError);
+		expect((refusal as Error).message).toContain('mysite.eth');
+		expect((refusal as Error).message).toContain('https://node-a.test');
+		// NOTHING was written: no metadata overwritten, no content replaced, and the
+		// mode was never resolved to `ipfs` behind the operator's back.
+		expect(a.requestsFor('files/write').length).toBe(0);
+		expect(a.requestsFor('files/cp').length).toBe(0);
+		expect(a.requestsFor('dag/import').length).toBe(0);
+	});
+
+	it('refuses PER NODE (the sick node writes nothing; the healthy one deploys)', async () => {
+		const a = mockNode('https://node-a.test');
+		const b = sickNode('https://node-b.test');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipfs', // stated, so the fan-out mode needs no node
+			targets: [
+				targetWith(a, 'token-a', {role: 'replica'}),
+				targetWith(b, 'token-b', {role: 'replica'}),
+			],
+		});
+		expect(result.ok.map((n) => n.baseUrl)).toEqual(['https://node-a.test']);
+		expect(result.failed.length).toBe(1);
+		expect(result.failed[0].error).toBeInstanceOf(SiteMetadataUnreadableError);
+		expect(b.requestsFor('files/write').length).toBe(0);
+		expect(a.requestsFor('files/write').length).toBe(1);
+	});
+
+	it('a fully STATED write needs no read, so it goes through a sick node', async () => {
+		// The operator's way past an unreadable node: state the whole record.
+		const a = sickNode('https://node-a.test');
+		const result = await deploy({
+			sourceDir: siteDir,
+			id: 'mysite.eth',
+			mode: 'ipfs',
+			ensName: {kind: 'unset'},
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+		});
+		expect(result.success).toBe(true);
+		expect(metadataOf(a.requestsFor('files/write')[0])).toEqual({
+			ensName: '',
+			mode: 'ipfs',
+		});
 	});
 });
 
@@ -348,8 +425,10 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'dag/import',
 			// The read-modify-write of the metadata: with no ens flag, deploy
-			// PRESERVES whatever ensName the site already carries.
-			'files/read',
+			// PRESERVES whatever ensName the site already carries. This node lists
+			// no metadata.json, which is what makes "it stores nothing" a positive
+			// fact — so there is nothing to read back.
+			'files/ls',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -371,7 +450,7 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 		// The FULL sequence: import + MFS, THEN key/list + name/publish.
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'dag/import',
-			'files/read',
+			'files/ls',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -420,9 +499,12 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
  * value is then written into EVERY target's metadata so nodes cannot diverge.
  */
 describe('deploy — the mode is RESOLVED (stated > stored > ipfs)', () => {
-	/** A node whose site already stores `metadata.json`. */
+	/** A node whose site already stores (and LISTS) `metadata.json`. */
 	function nodeStoring(baseUrl: string, metadataJson: string): MockKuboApi {
 		const mock = mockNode(baseUrl, 'k51mysite');
+		mock.on('files/ls', {
+			json: {Entries: [{Name: 'content'}, {Name: 'metadata.json'}]},
+		});
 		mock.on('files/read', {text: metadataJson});
 		return mock;
 	}
@@ -547,8 +629,10 @@ describe('deploy — the mode is RESOLVED (stated > stored > ipfs)', () => {
 			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
 		});
 		// The publisher's stored metadata answers BOTH the mode question and the
-		// ensName read-modify-write: one files/read, not two.
+		// ensName read-modify-write: one files/read, not two — behind one listing
+		// (the wrapper's, which is where the file's presence is established).
 		expect(a.requestsFor('files/read').length).toBe(1);
+		expect(a.requestsFor('files/ls').length).toBe(1);
 	});
 
 	it('with NO publisher target there is nothing to resolve from: `ipfs`', async () => {

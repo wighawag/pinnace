@@ -14,8 +14,9 @@
  *                  storage is reclaimed.
  *   - **add**    — place an already-imported `/ipfs/<cid>` into MFS
  *                  `/sites/<id>/content` (mkdir parents / rm old / cp) plus the
- *                  wrapper's `metadata.json`. See the DESIGN NOTE below on its
- *                  relationship to `deploy`.
+ *                  wrapper's `metadata.json`, PRESERVING what the site already
+ *                  stores (it states neither `mode` nor `ensName`). See the
+ *                  DESIGN NOTE below on its relationship to `deploy`.
  *
  * A site in MFS is a WRAPPER dir — `/sites/<id>/{content, metadata.json}` (see
  * `./site-wrapper.ts`, which owns those paths). So every content-cid read here
@@ -43,9 +44,12 @@
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import {
 	encodeSiteMetadata,
+	resolveSiteMetadataToWrite,
 	siteContentPath,
 	siteMetadataPath,
 	siteWrapperPath,
+	PRESERVE_ENS_NAME,
+	PRESERVE_SITE_MODE,
 	type SiteMetadata,
 } from './site-wrapper.js';
 
@@ -184,25 +188,47 @@ export async function removeSite(
  * DESIGN NOTE): it does NOT build or import a CAR and does NOT pin (the CID is
  * assumed already imported/pinned on the node).
  *
- * DECISION (`site add` writes `{mode: 'ipfs'}`) — recorded because it sets a
- * USER-VISIBLE default that a sibling task's field (`metadata`) carries.
- * `placeInMfs` always writes the wrapper's `metadata.json`, so `add` must say
- * something; it writes the mode it actually performed. `add` places an existing
- * CID and NEVER touches a key or `name/publish`, which is exactly what `ipfs`
- * mode means (CONTEXT.md `mode`), and it matches `pin`'s own `ipfs` default.
- * Alternatives considered: (a) an `metadata`/`mode` input on `add` — a
- * half-feature with no CLI flag behind it, and `add` has no mode surface today;
- * (b) leaving `metadata.json` untouched when the caller has nothing to say — it
- * would make `placeInMfs` two-behaviour at the seam every writer shares. What it
- * touches: re-`add`ing over an EXISTING ipns-mode site rewrites its metadata to
- * `{mode: 'ipfs'}` (an `ensName` set there is dropped); the site is restored by
- * a `deploy`/`pin` with the intended mode, which is where per-site metadata is
- * authored (task `deploy-pin-write-site-metadata`, whose read-modify-write
- * preserve semantics could later be extended to `add`).
+ * DECISION (`site add` PRESERVES; the `ipfs` it records is a DEFAULT, not a
+ * report) — recorded because it governs a USER-VISIBLE surface. `placeInMfs`
+ * always writes the wrapper's `metadata.json`, so `add` must say something about
+ * both fields, and `add` has no flag for either: it states NOTHING. Stating
+ * nothing is PRESERVE, exactly as it is for `deploy`/`pin` (CONTEXT.md `mode`,
+ * `ensName`), so `add` resolves its metadata through the SAME
+ * {@link resolveSiteMetadataToWrite} seam with both intents preserving. A FIRST
+ * `add` therefore records `{mode: 'ipfs'}` because `ipfs` is the DEFAULT mode of
+ * a site that stores none (`DEFAULT_SITE_MODE` in `./site-wrapper.ts`) — NOT because `add`
+ * performed an ipfs-shaped placement. That earlier reading ("it writes the mode
+ * it actually performed") was true of the placement but licensed destroying the
+ * OTHER field and demoting a mode the operator set deliberately, which is the
+ * silent loss this seam exists to stop.
+ *
+ * CONSEQUENCE to ratify: re-`add`ing over a stored-`ipns` site keeps
+ * `mode: 'ipns'` while `add` itself still signs nothing (it touches no key and
+ * never `name/publish`es). That is correct — `mode` records how the site is
+ * ADDRESSED, and refreshing the name is `deploy`/`pin`'s job — but it does mean
+ * an `add` of a NEWER cid under a published name leaves that name pointing at
+ * the OLD cid until the next `deploy`/`pin`. Alternatives considered: (a)
+ * keeping the hard `{mode:'ipfs'}` — the defect itself; (b) giving `add` its own
+ * mode/ens flags — a wider surface than the task, and still not what an operator
+ * who stated nothing asked for. What it touches: the `site add` CLI verb (which
+ * gains the refusal below), CONTEXT.md's `pin`/`metadata` glossary entries.
+ *
+ * @throws {SiteMetadataUnreadableError} when the node cannot say what the site
+ * already stores (down, or a stale token): nothing is placed, because the
+ * alternative is overwriting stored metadata on a guess.
  */
 export async function addSite(input: AddSiteInput): Promise<AddSiteResult> {
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
-	await placeInMfs(input.client, sitesDir, input.id, input.cid, {mode: 'ipfs'});
+	// `add` states neither field, so BOTH preserve: the same read-modify-write
+	// its sibling verbs do, through the same resolver (no parallel rule).
+	const metadata = await resolveSiteMetadataToWrite({
+		client: input.client,
+		sitesDir,
+		id: input.id,
+		mode: PRESERVE_SITE_MODE,
+		ensName: PRESERVE_ENS_NAME,
+	});
+	await placeInMfs(input.client, sitesDir, input.id, input.cid, metadata);
 	return {id: input.id, cid: input.cid};
 }
 

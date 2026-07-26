@@ -71,12 +71,27 @@ export class MockKuboApi {
 	/** path (no query) → canned response. */
 	private readonly responses = new Map<string, MockResponseSpec>();
 
+	/** `<path>\n<arg>` → canned response (takes precedence over the path one). */
+	private readonly argResponses = new Map<string, MockResponseSpec>();
+
 	/** The base URL this mock pretends to be (only its path/query are used). */
 	constructor(readonly baseUrl: string = 'https://node.example.test') {}
 
 	/** Register a canned response for a Kubo `/api/v0/<path>` (path without query). */
 	on(path: string, spec: MockResponseSpec): this {
 		this.responses.set(path, spec);
+		return this;
+	}
+
+	/**
+	 * Register a canned response for one endpoint AND one `arg` value, so a test
+	 * can model a real MFS TREE — where `files/ls /sites` and `files/ls
+	 * /sites/<id>` answer DIFFERENTLY (one lists, the other may not exist at
+	 * all) — instead of one answer for every path. Takes precedence over the
+	 * endpoint-wide {@link on}, which stays the fallback for every other `arg`.
+	 */
+	onArg(path: string, arg: string, spec: MockResponseSpec): this {
+		this.argResponses.set(argKey(path, arg), spec);
 		return this;
 	}
 
@@ -119,7 +134,9 @@ export class MockKuboApi {
 			url: url.toString(),
 		});
 
-		const spec = this.responses.get(path);
+		const spec =
+			this.argResponses.get(argKey(path, url.searchParams.get('arg') ?? '')) ??
+			this.responses.get(path);
 		const status = spec?.status ?? 200;
 		if (spec?.text !== undefined) {
 			return new Response(spec.text, {status});
@@ -130,6 +147,11 @@ export class MockKuboApi {
 			headers: {'content-type': 'application/json'},
 		});
 	};
+}
+
+/** The key an {@link MockKuboApi.onArg} response is stored under. */
+function argKey(path: string, arg: string): string {
+	return `${path}\n${arg}`;
 }
 
 /**

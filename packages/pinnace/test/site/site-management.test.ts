@@ -10,6 +10,7 @@ import {
 } from '../../src/site/site-management.js';
 import {
 	parseSiteMetadata,
+	SiteMetadataUnreadableError,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
 import {discoverSites} from '../../src/node/node-commands.js';
@@ -180,6 +181,66 @@ describe('site add — place an existing /ipfs/<cid> into the MFS wrapper', () =
 		expect(write.length).toBe(1);
 		expect(write[0].query.get('arg')).toBe('/sites/carol.eth/metadata.json');
 		expect(writtenMetadata(mock)).toEqual({mode: 'ipfs'});
+	});
+
+	/**
+	 * `add` PRESERVES, exactly as its sibling verbs do (task
+	 * `site-metadata-write-path-no-silent-loss`). It states nothing about a site's
+	 * `ensName` or `mode`, and stating nothing is not a licence to destroy them:
+	 * a re-`add` over a live ipns site must not demote it to `ipfs` nor drop the
+	 * eth.limo name the operator set. The `ipfs` a FIRST add records is the
+	 * DEFAULT mode of a site that stores none, not a mode `add` performed.
+	 */
+	it('a FIRST add (nothing stored) records {mode: ipfs} with NO ensName key', async () => {
+		const mock = new MockKuboApi();
+		await addSite({client: clientWith(mock), id: 'carol.eth', cid: 'bafynew'});
+		const metadata = writtenMetadata(mock);
+		expect(metadata).toEqual({mode: 'ipfs'});
+		// Absent, so the on-box warm rule can still INFER from the `.eth` id.
+		expect('ensName' in metadata).toBe(false);
+	});
+
+	it('re-adding an EXISTING site preserves its stored ensName AND mode', async () => {
+		const mock = new MockKuboApi();
+		mock.onArg('files/ls', '/sites/carol.eth', {
+			json: {Entries: [{Name: 'content'}, {Name: 'metadata.json'}]},
+		});
+		mock.onArg('files/read', '/sites/carol.eth/metadata.json', {
+			text: '{"ensName":"x.eth","mode":"ipns"}',
+		});
+		await addSite({client: clientWith(mock), id: 'carol.eth', cid: 'bafynew'});
+		expect(writtenMetadata(mock)).toEqual({ensName: 'x.eth', mode: 'ipns'});
+		// Through the SAME resolver seam deploy/pin use: ONE read, no second pass.
+		expect(mock.requestsFor('files/read').length).toBe(1);
+	});
+
+	it('preserves the `""` opt-out (never silently re-warms a re-added site)', async () => {
+		const mock = new MockKuboApi();
+		mock.onArg('files/ls', '/sites/carol.eth', {
+			json: {Entries: [{Name: 'metadata.json'}]},
+		});
+		mock.onArg('files/read', '/sites/carol.eth/metadata.json', {
+			text: '{"ensName":"","mode":"ipfs"}',
+		});
+		await addSite({client: clientWith(mock), id: 'carol.eth', cid: 'bafynew'});
+		expect(writtenMetadata(mock).ensName).toBe('');
+	});
+
+	it('REFUSES (and writes NOTHING) when the node cannot say what the site stores', async () => {
+		const mock = new MockKuboApi();
+		mock.on('files/ls', {status: 401, text: 'unauthorized'});
+		mock.on('files/read', {status: 401, text: 'unauthorized'});
+		const refusal = await addSite({
+			client: clientWith(mock),
+			id: 'carol.eth',
+			cid: 'bafynew',
+		}).catch((e: unknown) => e);
+		expect(refusal).toBeInstanceOf(SiteMetadataUnreadableError);
+		expect((refusal as Error).message).toContain('carol.eth');
+		// Nothing was placed: no metadata overwritten, no content swapped.
+		expect(mock.requestsFor('files/write').length).toBe(0);
+		expect(mock.requestsFor('files/cp').length).toBe(0);
+		expect(mock.requestsFor('files/rm').length).toBe(0);
 	});
 
 	it('does NOT import a CAR or pin (add is MFS-placement only, not a deploy)', async () => {

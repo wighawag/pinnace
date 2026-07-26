@@ -85,7 +85,13 @@ export interface NamePublishOptions {
 }
 
 export class KuboRpcClient {
-	private readonly baseUrl: string;
+	/**
+	 * The node this client speaks to (normalised: no trailing slash). PUBLIC so
+	 * an error raised ABOUT a node can name WHICH node it was — a per-node client
+	 * is otherwise anonymous, and "the metadata read failed" is useless to an
+	 * operator running a fan-out. Read-only: the target is fixed at construction.
+	 */
+	readonly baseUrl: string;
 	private readonly token: string;
 	private readonly fetchImpl: FetchLike;
 

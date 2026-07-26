@@ -163,6 +163,12 @@ export interface DeployResult {
  * @throws {EnsNameInferenceError} for a bare `--set-ens-name` (the `infer`
  * intent) on a non-`.eth` id — checked BEFORE the CAR is built or any node is
  * touched, so a refusal leaves nothing half-done.
+ * @throws {SiteMetadataUnreadableError} when the PUBLISHER cannot say what the
+ * site stores and the mode/ensName are being PRESERVED: the whole deploy is
+ * refused before the CAR is built, because resolving the fan-out's ONE mode
+ * from an unreadable node would write a demotion to every node. A node that
+ * fails the SAME read later in the fan-out is a per-node failure like any other
+ * ({@link DeployResult.failed}), and that node is left untouched.
  */
 export async function deploy(input: DeployInput): Promise<DeployResult> {
 	const {sourceDir, car, id, targets} = input;

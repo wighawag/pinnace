@@ -13,6 +13,7 @@ import {removeSite} from '../../src/site/site-management.js';
 import {
 	parseSiteMetadata,
 	EnsNameInferenceError,
+	SiteMetadataUnreadableError,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
 import {discoverSites} from '../../src/node/node-commands.js';
@@ -65,6 +66,26 @@ function metadataBytesOf(mock: MockKuboApi): Uint8Array {
 		.fileParts?.find((p) => p.field === 'file');
 	if (!part) throw new Error('files/write carried no `file` part');
 	return part.bytes;
+}
+
+/**
+ * Seed a node so the pinned name ALREADY carries `metadata.json`: the wrapper
+ * LISTS the file (which is how the write path establishes its presence as a
+ * positive fact) and reading it yields `metadataJson`.
+ */
+function holdingMetadata(mock: MockKuboApi, metadataJson: string): MockKuboApi {
+	mock.on('files/ls', {
+		json: {Entries: [{Name: 'content'}, {Name: 'metadata.json'}]},
+	});
+	mock.on('files/read', {text: metadataJson});
+	return mock;
+}
+
+/** A node whose MFS answers NOTHING (down, or a stale token answering 401). */
+function sickMfs(mock: MockKuboApi): MockKuboApi {
+	mock.on('files/ls', {status: 401, text: 'unauthorized'});
+	mock.on('files/read', {status: 401, text: 'unauthorized'});
+	return mock;
 }
 
 /** A pin target backed by its own recording mock (distinct baseUrl + token). */
@@ -161,11 +182,12 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 
 		// The exact call sequence: pin FIRST (the node must hold the bytes), then
 		// the MFS placement that makes status/warm/republish discover it (the
-		// `files/read` is the metadata read-modify-write: with no ens flag the pin
-		// PRESERVES whatever ensName the entry already carries).
+		// `files/ls` is the metadata read-modify-write: with no ens flag the pin
+		// PRESERVES whatever ensName the entry already carries, and this node
+		// positively lists none, so there is nothing to read back).
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
-			'files/read',
+			'files/ls',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -372,11 +394,11 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 			name: GOLDEN_NAME,
 		});
 
-		// With no STATED mode the publisher's stored metadata is read FIRST (it is
-		// what decides the mode this pin runs in); that same read then serves the
-		// node's own metadata write, so it is one read, not two.
+		// With no STATED mode the publisher's stored metadata is resolved FIRST (it
+		// is what decides the mode this pin runs in); that same resolution then
+		// serves the node's own metadata write, so it happens once, not twice.
 		expect(a.requests.map((r) => r.path)).toEqual([
-			'files/read',
+			'files/ls',
 			'pin/add',
 			'files/mkdir',
 			'files/rm',
@@ -415,9 +437,7 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 describe('pinExternal — the mode is RESOLVED (stated > stored > ipfs)', () => {
 	/** A publisher holding the site key whose stored metadata is `metadataJson`. */
 	function storing(baseUrl: string, metadataJson: string): MockKuboApi {
-		const mock = keyedPublisher(baseUrl);
-		mock.on('files/read', {text: metadataJson});
-		return mock;
+		return holdingMetadata(keyedPublisher(baseUrl), metadataJson);
 	}
 
 	it('RE-pin with NO mode on a stored-`ipns` site: publishes, stays ipns', async () => {
@@ -464,7 +484,7 @@ describe('pinExternal — the mode is RESOLVED (stated > stored > ipfs)', () => 
 	it('--from-ipns honours the SAME resolution (both pin entry points)', async () => {
 		const a = resolvingNode('https://publisher.test');
 		a.on('key/list', {json: {Keys: [{Name: GOLDEN_NAME, Id: GOLDEN_IPNS_ID}]}});
-		a.on('files/read', {text: '{"mode":"ipns"}'});
+		holdingMetadata(a, '{"mode":"ipns"}');
 		const result = await pinExternal({
 			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
 			fromIpns: SOURCE_NAME,
@@ -498,8 +518,10 @@ describe('pinExternal — the mode is RESOLVED (stated > stored > ipfs)', () => 
 	});
 
 	it('with no publisher among the targets there is nothing to resolve from: `ipfs`', async () => {
-		const rep = mockNode('https://replica.test');
-		rep.on('files/read', {text: '{"mode":"ipns"}'});
+		const rep = holdingMetadata(
+			mockNode('https://replica.test'),
+			'{"mode":"ipns"}',
+		);
 		const result = await pinExternal({
 			targets: [targetWith(rep, 'token-rep', {role: 'replica'})],
 			cid: EXTERNAL_CID,
@@ -541,7 +563,7 @@ describe('pinExternal — mode ipns ADDS the publish path (publisher only)', () 
 		// key lookup, the import of the missing key, and the publish.
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
-			'files/read',
+			'files/ls',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -737,7 +759,7 @@ describe('pinExternal: fromIpns resolves the SOURCE name, then pins that cid', (
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'name/resolve',
 			'pin/add',
-			'files/read',
+			'files/ls',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -959,9 +981,7 @@ describe('pinExternal — mode ipns REFUSES loudly without a publisher to sign',
 describe('pinExternal — writes the per-site metadata {ensName?, mode}', () => {
 	/** A pinned-site node that already carries `metadata.json` (the re-pin case). */
 	function nodeHolding(metadataJson: string): MockKuboApi {
-		const mock = mockNode('https://node-a.test');
-		mock.on('files/read', {text: metadataJson});
-		return mock;
+		return holdingMetadata(mockNode('https://node-a.test'), metadataJson);
 	}
 
 	/** A node with NO metadata for the name yet (the FIRST pin). */
@@ -1064,8 +1084,10 @@ describe('pinExternal — writes the per-site metadata {ensName?, mode}', () => 
 		});
 		expect(metadataOf(set)).toEqual({ensName: 'migrated.eth', mode: 'ipfs'});
 
-		const preserving = resolvingNode('https://node-b.test');
-		preserving.on('files/read', {text: '{"ensName":"kept.eth","mode":"ipfs"}'});
+		const preserving = holdingMetadata(
+			resolvingNode('https://node-b.test'),
+			'{"ensName":"kept.eth","mode":"ipfs"}',
+		);
 		await pinExternal({
 			targets: [targetWith(preserving, 'token-b', {role: 'publisher'})],
 			fromIpns: SOURCE_NAME,
@@ -1088,5 +1110,79 @@ describe('pinExternal — writes the per-site metadata {ensName?, mode}', () => 
 			}),
 		).rejects.toBeInstanceOf(EnsNameInferenceError);
 		expect(refusing.requests.length).toBe(0);
+	});
+});
+
+/**
+ * A no-flag `pin` PRESERVES, so it must first learn what the entry stores. When
+ * the node cannot tell it (down, or a stale token answering 401), the old
+ * behaviour read that error as "nothing stored" and wrote `mode: ipfs` with no
+ * `ensName` — silently demoting a published entry, and exiting 0. The write is
+ * now REFUSED instead, for BOTH pin entry points (task
+ * `site-metadata-write-path-no-silent-loss`).
+ */
+describe('pinExternal — REFUSES to write metadata it could not read', () => {
+	it('refuses the whole pin when the PUBLISHER cannot say what it stores', async () => {
+		const a = sickMfs(keyedPublisher('https://publisher.test'));
+		const refusal = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			cid: EXTERNAL_CID,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		}).catch((e: unknown) => e);
+		expect(refusal).toBeInstanceOf(SiteMetadataUnreadableError);
+		expect((refusal as Error).message).toContain(GOLDEN_NAME);
+		expect((refusal as Error).message).toContain('https://publisher.test');
+		// The refusal precedes the fan-out: nothing pinned, nothing written.
+		expect(a.requestsFor('pin/add').length).toBe(0);
+		expect(a.requestsFor('files/write').length).toBe(0);
+	});
+
+	it('refuses PER NODE at the `place` stage (the sick node writes nothing)', async () => {
+		const a = mockNode('https://node-a.test');
+		const b = sickMfs(mockNode('https://node-b.test'));
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
+			cid: EXTERNAL_CID,
+			name: 'archive',
+			mode: 'ipfs', // stated, so the fan-out mode needs no node
+		});
+		expect(result.ok.map((n) => n.baseUrl)).toEqual(['https://node-a.test']);
+		expect(result.failed.length).toBe(1);
+		expect(result.failed[0].stage).toBe('place');
+		expect(result.failed[0].error.cause).toBeInstanceOf(
+			SiteMetadataUnreadableError,
+		);
+		expect(b.requestsFor('files/write').length).toBe(0);
+		expect(b.requestsFor('files/cp').length).toBe(0);
+	});
+
+	it('the --from-ipns entry point refuses the SAME way', async () => {
+		const a = sickMfs(resolvingNode('https://publisher.test'));
+		a.on('key/list', {json: {Keys: [{Name: GOLDEN_NAME, Id: GOLDEN_IPNS_ID}]}});
+		const refusal = await pinExternal({
+			targets: [targetWith(a, 'token-a', {role: 'publisher'})],
+			fromIpns: SOURCE_NAME,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		}).catch((e: unknown) => e);
+		expect(refusal).toBeInstanceOf(SiteMetadataUnreadableError);
+		// It refuses BEFORE the source name is even resolved: nothing half-done.
+		expect(a.requestsFor('name/resolve').length).toBe(0);
+		expect(a.requestsFor('pin/add').length).toBe(0);
+		expect(a.requestsFor('files/write').length).toBe(0);
+	});
+
+	it('a fully STATED write needs no read, so it goes through a sick node', async () => {
+		const a = sickMfs(mockNode('https://node-a.test'));
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a')],
+			cid: EXTERNAL_CID,
+			name: 'archive',
+			mode: 'ipfs',
+			ensName: {kind: 'unset'},
+		});
+		expect(result.success).toBe(true);
+		expect(metadataOf(a)).toEqual({ensName: '', mode: 'ipfs'});
 	});
 });

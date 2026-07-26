@@ -249,6 +249,21 @@ describe('site auto-discovery from MFS /sites/* (wrapper layout)', () => {
 		expect(sites.map((s) => s.metadata)).toEqual([{}, {}]);
 	});
 
+	it('tolerates a FAILING metadata read: the site is still discovered', async () => {
+		// Not an absence but an OUTAGE mid-pass (a token that just went stale): the
+		// DISCOVERY side deliberately keeps conflating the two, because the on-box
+		// warm/republish/status pass must act on every site it CAN see rather than
+		// die on one file. Only the destructive WRITE path refuses instead
+		// (`readSiteMetadataForWrite`, task
+		// `site-metadata-write-path-no-silent-loss`) — this test is the other half
+		// of that split, and pins the tolerance in place.
+		const mock = mockWithTwoSites();
+		mock.on('files/read', {status: 401, text: 'unauthorized'});
+		const sites = await discoverSites(clientWith(mock), '/sites');
+		expect(sites.map((s) => s.id)).toEqual(['alice.eth', 'bob']);
+		expect(sites.map((s) => s.metadata)).toEqual([{}, {}]);
+	});
+
 	it('tolerates MALFORMED metadata: empty metadata, never a discovery failure', async () => {
 		const mock = mockWithTwoSites();
 		mock.on('files/read', {text: 'not json at all'});
