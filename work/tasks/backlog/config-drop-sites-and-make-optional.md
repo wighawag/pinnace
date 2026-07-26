@@ -42,3 +42,40 @@ Master + host tokens stay env-only (unchanged). The `--config <path>` behaviour 
 ## Requeue 2026-07-25
 
 Gate 2 (the PR/code review) failed to LAUNCH on the previous run — an infrastructure failure, not a code failure: the acceptance gate was fully green (format:check + build + 336 tests) on the rebased tip. The work on work/task-config-drop-sites-and-make-optional is believed complete. CONTINUE from that branch: re-verify the task's acceptance criteria against what is already there, change only what is actually missing or wrong, and do not redo work that already landed.
+
+## Requeue 2026-07-26
+
+GATE-2 BLOCK RESOLVED — HUMAN DECISION (supersedes the 'arg > a sensible default' wording in What to build above).
+
+The block was correct: as landed, deploy's mode is '--mode > hardcoded ipfs' with NO metadata tier, so re-running 'pinnace deploy ./dist mysite' on a live ipns site silently runs in ipfs mode — deploy skips its own name/publish (the IPNS name keeps pointing at the OLD cid until the next on-box republish tick) AND metadata.mode is clobbered to ipfs. Meanwhile the sibling task preserves ensName with a careful read-modify-write. Fix the asymmetry: mode gets the SAME preserve treatment as ensName.
+
+CONTINUE from the existing work/task-config-drop-sites-and-make-optional branch (its acceptance gate was fully green: format:check + build + 336 tests). Everything else on that branch — dropping SiteConfig/sites from the schema, the derive/promote .find removals, the optional-config CLI endpoint path — is GOOD and must be KEPT. Change ONLY the mode resolution described here.
+
+1. MODE RESOLUTION becomes the spec's 'arg > metadata; no config entry', with a default only when nothing is stored:
+   --set-mode <ipfs|ipns>  >  the site's STORED metadata.mode (read from MFS)  >  'ipfs'
+   So a re-deploy with NO mode flag PRESERVES the site's stored mode and therefore still signs IPNS for an ipns site. A FIRST deploy (nothing stored) is 'ipfs'. Never silently demote.
+
+2. RENAME THE FLAG to mirror the ens flags: '--mode' becomes '--set-mode' on BOTH deploy and pin. Omitting it = PRESERVE (exactly like omitting --set-ens-name). This is a deliberate BREAKING CLI rename; it is fine in 0.x and must be called out in the changeset.
+
+3. NO '--unset-mode'. Unlike ensName, mode has no three-valued opt-out: there is no meaningful empty/absent state an operator would author, because an absent stored mode simply means 'ipfs'. Two states only: stated, or preserved.
+
+4. A BARE '--set-mode' (no value) is a LOUD USAGE ERROR, not an infer. Bare --set-ens-name means 'infer the name from a .eth id'; mode has nothing to infer from, so bare must fail with a message naming the two valid values. Use the same ENS_NAME_BOOLEAN_FLAGS / optional-value parseArgs convention to DETECT the bare form, then reject it.
+
+5. REUSE THE EXISTING SEAM. resolveSiteMetadataToWrite already does the ensName read-modify-write and already reads the stored metadata for the 'preserve' intent. Extend it so MODE flows through the same intent shape (a 'set' vs 'preserve' mode intent) and the preserve branch resolves BOTH fields from the ONE read it already performs — do not add a second read, and do not fork a parallel resolver. The JSDoc line 'The mode is always the one this operation runs in, never the stored one' is now WRONG and must be rewritten.
+
+6. THE MULTI-NODE AMBIGUITY — resolve it explicitly, do not leave it implicit. Metadata is stored PER NODE, but 'does this deploy sign IPNS?' is ONE decision for the whole fan-out. Resolve the effective mode from the PUBLISHER target (the node that holds the key and actually signs), then write that ONE resolved mode into EVERY target's metadata.json, so nodes cannot diverge. If there is no publisher target, fall back to 'ipfs'. Record this in a decisions note under work/notes/observations/ (the sibling tasks each recorded one).
+
+7. THE ACTUAL BUG FIX: deploy's own name/publish decision must follow the RESOLVED mode, not the raw flag — that is the regression that made this a block. Assert it in a test.
+
+8. UPDATE the unresolved-mode error message and every usage string (deploy + PIN_USAGE) to the new flag and the new source order.
+
+TESTS (test-first, at the mock Kubo seam, no live daemon) — add to what is already there:
+  - re-deploy with NO mode flag on a site whose stored metadata says mode ipns -> stays ipns, metadata.json still says ipns, AND deploy performs its IPNS publish;
+  - first deploy (no stored metadata, no flag) -> ipfs, no publish;
+  - --set-mode ipns on a site stored as ipfs -> becomes ipns (an explicit flag always wins);
+  - bare --set-mode -> loud usage error naming ipfs|ipns;
+  - an invalid --set-mode value -> the loud unresolved-mode error;
+  - pin's BOTH entry points (pin <cid> and pin --from-ipns) honour the same resolution;
+  - the resolved mode is written identically to EVERY target in a multi-node fan-out.
+
+The changeset must name the breaking '--mode' -> '--set-mode' rename AND the new arg > stored-metadata > ipfs order.
