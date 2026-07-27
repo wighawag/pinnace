@@ -671,6 +671,7 @@ describe('status — dispatches to core statusReport per site', () => {
 					ensNameToWarm: 'alice.eth',
 					announced: true,
 					gatewayServes: true,
+					ethLimoServes: true,
 				},
 				{
 					id: 'optout.eth',
@@ -690,6 +691,58 @@ describe('status — dispatches to core statusReport per site', () => {
 		// The three ensName values stay apart in the printed line too.
 		expect(printed).toContain('ensName opted-out');
 		expect(printed).toContain('ensName unset');
+	});
+
+	it('prints WHETHER the eth.limo name serves, and n/a when there is none', async () => {
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					announced: true,
+					gatewayServes: true,
+					ethLimoHttp: 200,
+					ethLimoServes: true,
+				},
+				{
+					id: 'cold.eth',
+					cid: 'bafycold',
+					mode: 'ipns',
+					ensNameToWarm: 'cold.eth',
+					announced: true,
+					gatewayServes: true,
+					ethLimoHttp: 504,
+					ethLimoServes: false,
+				},
+				{
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					mode: 'ipfs',
+					ensName: '',
+					announced: true,
+					gatewayServes: true,
+				},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const lines = out.join('\n').split('\n');
+		const lineFor = (id: string) => lines.find((l) => l.includes(`${id}:`))!;
+		expect(lineFor('alice.eth')).toContain(
+			'eth.limo alice.eth.limo ethLimoServes=true',
+		);
+		// A probe that ran and did not serve prints false...
+		expect(lineFor('cold.eth')).toContain(
+			'eth.limo cold.eth.limo ethLimoServes=false',
+		);
+		// ...while a site with NO name to probe is not-applicable, never `false`.
+		expect(lineFor('optout.eth')).toContain('eth.limo none ethLimoServes=n/a');
+		// The CID-side columns are unchanged.
+		expect(lineFor('cold.eth')).toContain('announced=true gatewayServes=true');
 	});
 });
 

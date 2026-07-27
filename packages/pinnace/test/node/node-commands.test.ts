@@ -460,6 +460,26 @@ function withPerSiteMetadata(
 	return mock;
 }
 
+/**
+ * Run `warm` against `mock` with a fake gateway that ANSWERS per URL, returning
+ * the per-site outcomes the verb recorded (the honest report of what happened).
+ */
+async function warmOutcomes(
+	mock: MockKuboApi,
+	answer: (url: string) => number | Promise<number>,
+	overrides: Partial<NodeCommandContext> = {},
+) {
+	const {ctx, dir} = await baseContext(mock, {
+		gatewayFetch: async (url: string) => answer(url),
+		...overrides,
+	});
+	try {
+		return (await runNodeCommand('warm', ctx)).sites;
+	} finally {
+		await rm(dir, {recursive: true, force: true});
+	}
+}
+
 /** Run `warm` against `mock`, returning every URL the fake gateway was asked for. */
 async function warmedUrls(
 	mock: MockKuboApi,
@@ -574,13 +594,78 @@ describe('node warm — eth.limo resolved from metadata.ensName (three-way rule)
 				'optout.eth',
 				'bob',
 			]);
-			expect(res.sites.every((s) => s.status === 'warmed')).toBe(true);
+			// The failure is RECORDED (that is the whole point of not throwing): a
+			// site whose every warm failed must never report `warmed`.
+			expect(res.sites.every((s) => s.status === 'warm-failed')).toBe(true);
 			// Every URL was still attempted — one failure never short-circuits.
 			expect(asked).toContain('https://named.eth.limo/');
 			expect(asked).toContain('https://alice.eth.limo/');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}
+	});
+});
+
+/**
+ * `warm` must report what ACTUALLY happened. It still never throws — a cold or
+ * broken gateway is recorded, not raised (ADR-0002's best-effort warming) — but
+ * the recorded outcome now distinguishes a warm that worked from one that did
+ * not, so the on-box loop can tell an operator whether eth.limo warming works.
+ */
+describe('node warm — the recorded outcome is what actually happened', () => {
+	it('reports `warmed` only when every attempted warm succeeded', async () => {
+		const sites = await warmOutcomes(mockWithFourEnsCases(), () => 200);
+		expect(sites.every((s) => s.status === 'warmed')).toBe(true);
+		// The eth.limo half is called out per site: warmed, or not applicable.
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		expect(byId('blog').ethLimoWarmed).toBe(true);
+		expect(byId('alice.eth').ethLimoWarmed).toBe(true);
+		expect(byId('optout.eth').ethLimoWarmed).toBeUndefined();
+		expect(byId('bob').ethLimoWarmed).toBeUndefined();
+	});
+
+	it('reports `partly-warmed` when the CID gateways warmed but eth.limo did not', async () => {
+		const sites = await warmOutcomes(mockWithFourEnsCases(), (url) =>
+			url.endsWith('.limo/') ? 504 : 200,
+		);
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		// The interesting case for a `.eth` site: the CID is hot, the URL a human
+		// visits is not — and that is now visible.
+		expect(byId('alice.eth').status).toBe('partly-warmed');
+		expect(byId('alice.eth').ethLimoWarmed).toBe(false);
+		expect(byId('blog').status).toBe('partly-warmed');
+		// A site with no eth.limo name to warm is unaffected: it warmed fully.
+		expect(byId('bob').status).toBe('warmed');
+		expect(byId('optout.eth').status).toBe('warmed');
+	});
+
+	it('counts a non-2xx answer as a failed warm, not a silent success', async () => {
+		const sites = await warmOutcomes(mockWithFourEnsCases(), () => 504);
+		// A cold gateway usually ANSWERS (504/404) rather than throwing, so a
+		// status-only failure must be recorded exactly like a thrown one.
+		expect(sites.every((s) => s.status === 'warm-failed')).toBe(true);
+		expect(sites.find((s) => s.id === 'alice.eth')!.ethLimoWarmed).toBe(false);
+	});
+
+	it('never throws, whatever the gateway does (the error policy is unchanged)', async () => {
+		await expect(
+			warmOutcomes(mockWithFourEnsCases(), () => {
+				throw new Error('gateway exploded');
+			}),
+		).resolves.toHaveLength(4);
+	});
+
+	it('reports `nothing-to-warm` rather than success for a site it never warmed', async () => {
+		// No gateways configured and no ens name to resolve: zero attempts, so
+		// `warmed` would claim work that never happened.
+		const sites = await warmOutcomes(mockWithFourEnsCases(), () => 200, {
+			gateways: [],
+		});
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		expect(byId('bob').status).toBe('nothing-to-warm');
+		expect(byId('optout.eth').status).toBe('nothing-to-warm');
+		// The sites that DO resolve a name still warmed it.
+		expect(byId('alice.eth').status).toBe('warmed');
 	});
 });
 
@@ -676,6 +761,9 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 					ipns: 'k51alice',
 					mode: 'ipns',
 					ensNameToWarm: 'alice.eth',
+					// The one site with an eth.limo URL to probe — and it did not serve.
+					ethLimoServes: false,
+					ethLimoHttp: 504,
 				},
 				{
 					id: 'optout.eth',
@@ -696,6 +784,12 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 			const byId = (id: string) => body.sites.find((s) => s['id'] === id)!;
 			expect(byId('alice.eth')['mode']).toBe('ipns');
 			expect(byId('alice.eth')['ensNameToWarm']).toBe('alice.eth');
+			// The eth.limo probe verdict reaches the machine payload...
+			expect(byId('alice.eth')['ethLimoServes']).toBe(false);
+			expect(byId('alice.eth')['ethLimoHttp']).toBe(504);
+			// ...and a site with nothing to probe carries no verdict to mistake for
+			// a failure.
+			expect('ethLimoServes' in byId('optout.eth')).toBe(false);
 			// The opt-out survives the JSON round trip as `""`...
 			expect(byId('optout.eth')['ensName']).toBe('');
 			// ...while a site that stores nothing carries no key at all.
@@ -710,6 +804,13 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 			expect(html).toContain('>ipns<');
 			expect(html).toContain('href="https://alice.eth.limo/"');
 			expect(html).toContain('opted out');
+			// The eth.limo column shows the NAME and whether it serves: alice's row
+			// is the only `no` on the page (the other two probed nothing).
+			const aliceRow = html.slice(
+				html.indexOf('alice.eth'),
+				html.indexOf('optout.eth'),
+			);
+			expect(aliceRow).toContain('>no<');
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}

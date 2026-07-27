@@ -306,6 +306,29 @@ export function resolveEnsNameToWarm(
 	return id.endsWith('.eth') ? id : undefined;
 }
 
+/**
+ * The gateway host that serves an ENS name's content to a browser: a resolved
+ * `ensName` is reachable at `<name>.limo` (CONTEXT.md `gateway warming`).
+ */
+const ETH_LIMO_HOST = 'limo';
+
+/**
+ * The eth.limo URL a resolved ENS name serves at — the URL a HUMAN visits, and
+ * so the ONE thing both sides of the system act on: the on-box `warm` loop
+ * fetches it to keep the cache hot, and `status` PROBES it to report whether
+ * that worked. It lives here, beside {@link resolveEnsNameToWarm} that produces
+ * the name, so the warmer and the prober can never disagree about the URL.
+ *
+ * The dashboard renderer (`../status/status-html.ts`) deliberately builds its
+ * own link instead of calling this: it must URI-encode the name into an `href`,
+ * and it stays a pure, import-free view.
+ *
+ * @param name a RESOLVED ENS name (what {@link resolveEnsNameToWarm} returned).
+ */
+export function ethLimoUrl(name: string): string {
+	return `https://${name}.${ETH_LIMO_HOST}/`;
+}
+
 /** The site's WRAPPER dir, `/sites/<id>` (holds content + metadata). */
 export function siteWrapperPath(sitesDir: string, id: string): string {
 	return `${sitesDir}/${id}`;

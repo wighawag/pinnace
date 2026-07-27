@@ -78,6 +78,16 @@ export interface StatusPageSite {
 	 * The renderer resolves NOTHING itself — it stays a pure view.
 	 */
 	ensNameToWarm?: string;
+	/**
+	 * Whether `https://<ensNameToWarm>.limo/` — the URL a HUMAN visits — served
+	 * when the report probed it. THREE-valued, and the third value is why this is
+	 * not just another indicator column: `true` served, `false` probed and did
+	 * not, ABSENT nothing was probed (the site resolves no name, or the report
+	 * came from a path that does no probing). An absent verdict renders as NO
+	 * verdict rather than `no`, so "nothing to probe" never looks like "eth.limo
+	 * is broken".
+	 */
+	ethLimoServes?: boolean;
 	/** Whether the network announces this node for the CID. */
 	announced?: boolean;
 	/** Whether a cold public gateway served the CID. */
@@ -161,8 +171,8 @@ ${rows}
 
 /**
  * Render one site's table row: id, gateway-linked cid + ipns, what its MFS
- * metadata stores (mode + ensName) and the eth.limo name that resolves to, then
- * the two health indicators.
+ * metadata stores (mode + ensName), the eth.limo name that resolves to AND
+ * whether it serves, then the two CID health indicators.
  */
 function renderSiteRow(site: StatusPageSite): string {
 	const cid = site.cid
@@ -188,11 +198,18 @@ function renderSiteRow(site: StatusPageSite): string {
 			: site.ensName === ''
 				? '<span class="none">opted out</span>'
 				: `<code>${escapeHtml(site.ensName)}</code>`;
+	// The eth.limo cell answers BOTH questions: which name would be warmed, and
+	// does it actually serve? The verdict is appended only when the report HAS
+	// one (see StatusPageSite.ethLimoServes) — a site with no name to probe shows
+	// `none` and no red flag.
 	const ethLimo = site.ensNameToWarm
 		? gatewayLink(
 				`${site.ensNameToWarm}.${ETH_LIMO_HOST}`,
 				`https://${uriPart(site.ensNameToWarm)}.${ETH_LIMO_HOST}/`,
-			)
+			) +
+			(site.ethLimoServes === undefined
+				? ''
+				: ` ${indicator(site.ethLimoServes)}`)
 		: '<span class="none">none</span>';
 	return (
 		`\t\t\t<tr><th scope="row">${escapeHtml(site.id)}</th>` +

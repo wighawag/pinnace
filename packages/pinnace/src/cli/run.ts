@@ -834,6 +834,7 @@ async function runStatus(
 				`  ${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''}` +
 					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site.ensName)}` +
 					` eth.limo ${site.ensNameToWarm ? `${site.ensNameToWarm}.limo` : 'none'}` +
+					` ethLimoServes=${printedEthLimoServes(site.ethLimoServes)}` +
 					` announced=${site.announced} gatewayServes=${site.gatewayServes}`,
 			);
 		}
@@ -851,6 +852,17 @@ async function runStatus(
 function printedEnsName(ensName: string | undefined): string {
 	if (ensName === undefined) return 'unset';
 	return ensName === '' ? 'opted-out' : ensName;
+}
+
+/**
+ * How `status` PRINTS the eth.limo probe verdict, keeping its THREE values
+ * apart: `true`/`false` for a URL that was probed, and `n/a` for a site that
+ * resolves no ENS name and therefore has no `<name>.limo` to probe. Printing
+ * `false` there would report an outage that does not exist (an `ensName: ""`
+ * opt-out is a choice, not a failure).
+ */
+function printedEthLimoServes(serves: boolean | undefined): string {
+	return serves === undefined ? 'n/a' : String(serves);
 }
 
 /**

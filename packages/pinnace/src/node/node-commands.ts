@@ -46,6 +46,7 @@ import {
 	mirrorAndReannounce,
 } from '../publisher/record-sequence.js';
 import {
+	ethLimoUrl,
 	readSiteMetadata,
 	resolveEnsNameToWarm,
 	siteContentPath,
@@ -87,6 +88,27 @@ export interface DiscoveredSite {
 	metadata: SiteMetadata;
 }
 
+/**
+ * What ONE site's `warm` pass actually achieved — the outcome token the `warm`
+ * verb records. Warming stays best-effort (a failure is NEVER thrown, ADR-0002),
+ * so the token is the only place the truth can live:
+ *
+ *  - `warmed`          — every warm attempted for the site succeeded,
+ *  - `partly-warmed`   — some succeeded and some failed (the interesting case
+ *    for a `.eth` site: its CID gateways are hot but `<name>.limo` is not, or
+ *    the reverse),
+ *  - `warm-failed`     — every attempt failed,
+ *  - `nothing-to-warm` — nothing was attempted at all (no gateways configured
+ *    and no ENS name resolved), which is not success and must not read as it.
+ *
+ * A warm counts as SUCCEEDED when the fetch resolves with a 2xx status: a cold
+ * gateway usually ANSWERS (504/404) rather than throwing, so a status-only
+ * failure is recorded exactly like a thrown one. See
+ * work/notes/observations/ethlimo-probe-and-warm-outcome-decisions.md.
+ */
+export type WarmStatus =
+	'warmed' | 'partly-warmed' | 'warm-failed' | 'nothing-to-warm';
+
 /** Per-site outcome line a verb reports (shape is verb-specific but uniform). */
 export interface SiteOutcome {
 	/** The site's single `id` (its MFS entry / KDF input). */
@@ -123,6 +145,21 @@ export interface SiteOutcome {
 	 * is not eth.limo-warmed.
 	 */
 	ensNameToWarm?: string;
+	/**
+	 * `status`-verb only: whether `https://<ensNameToWarm>.limo/` — the URL a
+	 * HUMAN visits — served. THREE-valued: `true` served, `false` probed and did
+	 * not, ABSENT there was nothing to probe (the site resolves no ENS name). A
+	 * `""` opt-out is not an eth.limo failure and never reads as one.
+	 */
+	ethLimoServes?: boolean;
+	/** `status`-verb only: the raw HTTP status the eth.limo probe returned. */
+	ethLimoHttp?: number;
+	/**
+	 * `warm`-verb only: whether the site's eth.limo warm SUCCEEDED. Same three
+	 * values as {@link ethLimoServes}, for the other half of the system: absent
+	 * means the site resolves no ENS name, so no eth.limo warm was attempted.
+	 */
+	ethLimoWarmed?: boolean;
 }
 
 /** The uniform result an op returns: the per-site outcomes it produced. */
@@ -162,7 +199,8 @@ export type PublisherFetch = (url: string) => Promise<string>;
 /**
  * An injectable HTTP fetch for gateway WARMING: fetch the URL (a small range is
  * enough to seat the cache) and return the HTTP status. Tests inject a fake so
- * no live gateway is hit.
+ * no live gateway is hit. The STATUS is read, not discarded: a non-2xx answer
+ * is a warm that did not warm, and is recorded as such ({@link WarmStatus}).
  */
 export type GatewayFetch = (url: string) => Promise<number>;
 
@@ -345,8 +383,15 @@ async function defaultMirror(
 /**
  * Default `warm`. Re-fetch each site's current CID through every configured
  * gateway template (`{cid}` substituted), and ALSO warm the site's eth.limo
- * name when it resolves one. Warming failures are recorded, never thrown (a
- * cold gateway must not fail the whole run).
+ * name when it resolves one.
+ *
+ * Warming failures are RECORDED, never thrown (a cold gateway must not fail the
+ * whole run) — but recorded HONESTLY: the per-site outcome is the
+ * {@link WarmStatus} the pass actually earned, so a site whose every fetch
+ * failed reports `warm-failed`, not `warmed`. The eth.limo half is called out
+ * separately ({@link SiteOutcome.ethLimoWarmed}) because for a `.eth` site that
+ * is the URL humans use, so "CID gateways hot, eth.limo cold" is the outcome
+ * worth seeing rather than averaging away.
  */
 async function defaultWarm(
 	ctx: NodeCommandContext,
@@ -356,21 +401,42 @@ async function defaultWarm(
 	const gateways = ctx.gateways ?? [];
 	const outcomes: SiteOutcome[] = [];
 	for (const site of sites) {
+		let attempted = 0;
+		let failed = 0;
 		for (const template of gateways) {
 			const url = template.replaceAll('{cid}', site.cid);
-			await safeWarm(warm, url);
+			attempted++;
+			if (!(await safeWarm(warm, url))) failed++;
 		}
 		// eth.limo warming is driven by the site's MFS METADATA, not its identity:
 		// an explicit `ensName` names the gateway, `""` opts out, and only an
 		// absent field falls back to inferring from a `.eth` id (the whole rule
 		// lives in `resolveEnsNameToWarm`, beside the write side that fills it in).
 		const ensName = resolveEnsNameToWarm(site.id, site.metadata);
+		let ethLimoWarmed: boolean | undefined;
 		if (ensName !== undefined) {
-			await safeWarm(warm, `https://${ensName}.limo/`);
+			attempted++;
+			ethLimoWarmed = await safeWarm(warm, ethLimoUrl(ensName));
+			if (!ethLimoWarmed) failed++;
 		}
-		outcomes.push({id: site.id, cid: site.cid, status: 'warmed'});
+		const outcome: SiteOutcome = {
+			id: site.id,
+			cid: site.cid,
+			status: warmStatus(attempted, failed),
+		};
+		// A site with no ENS name carries NO verdict (not `false`): nothing was
+		// attempted, which is not an eth.limo failure.
+		if (ethLimoWarmed !== undefined) outcome.ethLimoWarmed = ethLimoWarmed;
+		outcomes.push(outcome);
 	}
 	return {sites: outcomes};
+}
+
+/** The {@link WarmStatus} a site's pass earned, from what it attempted. */
+function warmStatus(attempted: number, failed: number): WarmStatus {
+	if (attempted === 0) return 'nothing-to-warm';
+	if (failed === 0) return 'warmed';
+	return failed === attempted ? 'warm-failed' : 'partly-warmed';
 }
 
 /**
@@ -458,12 +524,20 @@ async function listKeys(client: KuboRpcClient): Promise<Map<string, string>> {
 	return map;
 }
 
-/** Warm one URL, swallowing any error (a cold gateway must not fail the run). */
-async function safeWarm(warm: GatewayFetch, url: string): Promise<void> {
+/**
+ * Warm one URL and REPORT whether it worked — never throwing (a cold gateway
+ * must not fail the run). A thrown error and a non-2xx answer are the SAME
+ * failure: a 504 from a cold gateway warmed nothing, so it may not be counted
+ * as a success just because it answered. (The `status` core's cold-gateway
+ * probe applies the same 2xx test, on its own side of the seam.)
+ */
+async function safeWarm(warm: GatewayFetch, url: string): Promise<boolean> {
 	try {
-		await warm(url);
+		const status = await warm(url);
+		return status >= 200 && status < 300;
 	} catch {
-		// Intentionally ignored: warming is best-effort.
+		// Recorded as a failure by the caller; warming is best-effort, never fatal.
+		return false;
 	}
 }
 

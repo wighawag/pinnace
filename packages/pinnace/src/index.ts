@@ -120,6 +120,7 @@ export {
 	type NodeOpResult,
 	type DiscoveredSite,
 	type SiteOutcome,
+	type WarmStatus,
 	type PublisherFetch,
 	type GatewayFetch,
 } from './node/node-commands.js';
@@ -133,6 +134,7 @@ export {
 	readSiteMetadataForWrite,
 	resolveSiteMetadataToWrite,
 	resolveEnsNameToWarm,
+	ethLimoUrl,
 	assertEnsNameIntent,
 	siteModeIntent,
 	EnsNameInferenceError,
@@ -190,6 +192,7 @@ export {
 	makeStatusOp,
 	defaultProvidersLookup,
 	defaultGatewayProbe,
+	cidGatewayUrl,
 	type StatusReport,
 	type SiteStatus,
 	type StatusReportInput,

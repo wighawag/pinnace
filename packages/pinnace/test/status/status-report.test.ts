@@ -152,6 +152,28 @@ async function metadataReportSites() {
 }
 
 /**
+ * Build the report over {@link mockWithMetadataCases} with a probe that ANSWERS
+ * per URL, returning both the sites and every URL the probe was asked for — the
+ * eth.limo probe must go through the SAME injected {@link GatewayProbe} as the
+ * CID one, so no test ever reaches the live network.
+ */
+async function metadataReportProbed(
+	probe: (url: string) => number | Promise<number>,
+) {
+	const probed: string[] = [];
+	const report = await statusReport({
+		client: clientWith(mockWithMetadataCases()),
+		sitesDir: '/sites',
+		providersLookup: async () => ({Providers: []}),
+		gatewayProbe: async (url) => {
+			probed.push(url);
+			return probe(url);
+		},
+	});
+	return {sites: report.sites, probed};
+}
+
+/**
  * `status` REPORTS what the site's MFS metadata says, so the operator can SEE
  * what the box will do with it: the stored `mode`, the stored `ensName` (all
  * three of its values kept apart), and the eth.limo name the on-box `warm` rule
@@ -202,6 +224,72 @@ describe('status core — reports the site stored metadata (mode + ensName)', ()
 	});
 });
 
+/**
+ * `<name>.limo` is the URL a HUMAN visits, so the report must answer whether it
+ * SERVES, not merely which name would be warmed. It is probed through the very
+ * same injectable {@link GatewayProbe} the CID gateway uses (widened from a cid
+ * to a full URL rather than forked into a second probe), and a site that
+ * resolves NO name has nothing to probe: that reads as NOT APPLICABLE
+ * (`undefined`), never as a failure.
+ */
+describe('status core — probes the eth.limo URL each site resolves', () => {
+	it('probes https://<name>.limo/ for every site with a RESOLVED ens name', async () => {
+		const {probed} = await metadataReportProbed(() => 200);
+		// Exactly the two sites that resolve a name: the `.eth` id by INFERENCE and
+		// the explicit name on a non-`.eth` id.
+		expect(probed.filter((u) => u.endsWith('.limo/'))).toEqual([
+			'https://alice.eth.limo/',
+			'https://named.eth.limo/',
+		]);
+		// The CID gateway probe is unchanged: still one per site, by URL.
+		expect(probed.filter((u) => u.includes('ipfs.dweb.link')).length).toBe(4);
+	});
+
+	it('reports the eth.limo probe status and whether it served', async () => {
+		const {sites} = await metadataReportProbed((url) =>
+			url === 'https://alice.eth.limo/' ? 200 : 504,
+		);
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		expect(byId('alice.eth').ethLimoHttp).toBe(200);
+		expect(byId('alice.eth').ethLimoServes).toBe(true);
+		// A site whose eth.limo answered but did NOT serve: probed, and false.
+		expect(byId('blog').ethLimoHttp).toBe(504);
+		expect(byId('blog').ethLimoServes).toBe(false);
+	});
+
+	it('reports NO resolved name as not-applicable, distinct from a failed probe', async () => {
+		const {sites, probed} = await metadataReportProbed(() => 504);
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		// `""` opts out and a non-`.eth` id infers nothing: neither is a FAILURE,
+		// so neither reports `false` — there was nothing to probe at all.
+		expect(byId('optout.eth').ethLimoServes).toBeUndefined();
+		expect(byId('optout.eth').ethLimoHttp).toBeUndefined();
+		expect(byId('bob').ethLimoServes).toBeUndefined();
+		// ...and a site that WAS probed and failed reads `false`, not absent.
+		expect(byId('blog').ethLimoServes).toBe(false);
+		// Nothing was probed for them (no wasted request, no invented name).
+		expect(probed.some((u) => u.includes('optout'))).toBe(false);
+		expect(probed.some((u) => u.includes('bob.limo'))).toBe(false);
+	});
+
+	it('an eth.limo probe that THROWS is reported, never thrown (report still renders)', async () => {
+		const {sites} = await metadataReportProbed((url) => {
+			if (url.endsWith('.limo/')) throw new Error('eth.limo is down');
+			return 200;
+		});
+		expect(sites).toHaveLength(4);
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		// The probe failed: no status, and NOT serving — but still a report.
+		expect(byId('alice.eth').ethLimoHttp).toBeUndefined();
+		expect(byId('alice.eth').ethLimoServes).toBe(false);
+		// The rest of the report is intact, including the CID-gateway half.
+		expect(byId('alice.eth').gatewayServes).toBe(true);
+		expect(byId('alice.eth').ensNameToWarm).toBe('alice.eth');
+		// A site with nothing to probe is still not-applicable, not false.
+		expect(byId('bob').ethLimoServes).toBeUndefined();
+	});
+});
+
 describe('status core — per-site four-field report shape', () => {
 	it('reports id, cid, ipns, announced, gatewayServes per discovered site', async () => {
 		const mock = withDistinctCids(mockForStatus());
@@ -212,9 +300,9 @@ describe('status core — per-site four-field report shape', () => {
 			Providers:
 				cid === 'bafyalice' ? [{ID: 'peer-self'}] : [{ID: 'peer-other'}],
 		});
-		// Fake cold-gateway probe: alice serves (206), bob is cold (504).
-		const gateway: GatewayProbe = async (cid) =>
-			cid === 'bafyalice' ? 206 : 504;
+		// Fake cold-gateway probe (by URL): alice serves (206), bob is cold (504).
+		const gateway: GatewayProbe = async (url) =>
+			url.includes('bafyalice') ? 206 : 504;
 
 		const report = await statusReport({
 			client,
@@ -242,17 +330,17 @@ describe('status core — per-site four-field report shape', () => {
 		expect(bob.gatewayServes).toBe(false);
 	});
 
-	it('passes the site CID (not the name) to BOTH external checks', async () => {
+	it('passes the site CID to the routing check and its gateway URL to the probe', async () => {
 		const mock = withDistinctCids(mockForStatus());
 		const client = clientWith(mock);
 		const providerCids: string[] = [];
-		const gatewayCids: string[] = [];
+		const gatewayUrls: string[] = [];
 		const providers: ProvidersLookup = async (cid) => {
 			providerCids.push(cid);
 			return {Providers: []};
 		};
-		const gateway: GatewayProbe = async (cid) => {
-			gatewayCids.push(cid);
+		const gateway: GatewayProbe = async (url) => {
+			gatewayUrls.push(url);
 			return 200;
 		};
 		await statusReport({
@@ -261,7 +349,10 @@ describe('status core — per-site four-field report shape', () => {
 			gatewayProbe: gateway,
 		});
 		expect(providerCids.sort()).toEqual(['bafyalice', 'bafybob']);
-		expect(gatewayCids.sort()).toEqual(['bafyalice', 'bafybob']);
+		// The probe takes the full URL (the ONE probe both targets go through), so
+		// the CID one is the dweb.link subdomain URL, spelled once in the core.
+		expect(gatewayUrls).toContain('https://bafyalice.ipfs.dweb.link/');
+		expect(gatewayUrls).toContain('https://bafybob.ipfs.dweb.link/');
 	});
 
 	it('treats a 2xx/206 gateway status as serving and anything else as not', async () => {
@@ -301,6 +392,10 @@ describe('status core — per-site four-field report shape', () => {
 		expect(report.sites.every((s) => s.announced === false)).toBe(true);
 		// A failed gateway probe is `gatewayServes=false`, not a throw.
 		expect(report.sites.every((s) => s.gatewayServes === false)).toBe(true);
+		// alice.eth resolves an eth.limo name, so its probe failed too — reported.
+		expect(report.sites.find((s) => s.id === 'alice.eth')!.ethLimoServes).toBe(
+			false,
+		);
 	});
 
 	it('never hits the live network: only the injected checks + mock Kubo are used', async () => {
@@ -319,9 +414,10 @@ describe('status core — per-site four-field report shape', () => {
 				return 200;
 			},
 		});
-		// Two sites -> exactly two of each external check, through the fakes only.
+		// Two sites -> two routing lookups; the probe additionally covers the ONE
+		// eth.limo name that resolves (alice.eth), all through the fakes only.
 		expect(providerCalls).toBe(2);
-		expect(gatewayCalls).toBe(2);
+		expect(gatewayCalls).toBe(3);
 		// Every Kubo call went to the mock (files/ls, id, key/list, files/stat x2).
 		expect(mock.requestsFor('files/ls').length).toBe(1);
 		expect(mock.requestsFor('id').length).toBe(1);
@@ -338,7 +434,7 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 			providersLookup: async (cid) => ({
 				Providers: cid === 'bafyalice' ? [{ID: 'peer-self'}] : [],
 			}),
-			gatewayProbe: async (cid) => (cid === 'bafyalice' ? 200 : 504),
+			gatewayProbe: async (url) => (url.includes('bafyalice') ? 200 : 504),
 		});
 
 		const sites = await discoverSites(client, '/sites');
@@ -391,6 +487,12 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect(byId('alice.eth').mode).toBe('ipns');
 		expect(byId('alice.eth').ensNameToWarm).toBe('alice.eth');
 		expect(byId('blog').ensName).toBe('named.eth');
+		// The eth.limo probe rides along on the same outcome (the JSON payload the
+		// dashboard reads): probed-and-cold is `false`...
+		expect(byId('alice.eth').ethLimoServes).toBe(false);
+		expect(byId('alice.eth').ethLimoHttp).toBe(504);
+		// ...while a site with nothing to probe carries no verdict at all.
+		expect(byId('bob').ethLimoServes).toBeUndefined();
 
 		// The payload is JSON: `""` must SURVIVE as a key (the opt-out), while an
 		// absent ensName must leave no key at all. Unlike `ipns`, which the payload
@@ -404,5 +506,9 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect('ensName' in bob).toBe(false);
 		expect('mode' in bob).toBe(false);
 		expect('ensNameToWarm' in bob).toBe(false);
+		// Not-applicable carries NO key either, so a consumer cannot mistake it for
+		// a probe that ran and failed.
+		expect('ethLimoServes' in bob).toBe(false);
+		expect('ethLimoHttp' in bob).toBe(false);
 	});
 });

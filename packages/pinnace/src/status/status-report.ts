@@ -14,6 +14,10 @@
  *                           CID contains this node's PeerID (`id`).
  *   4. gateway-serves     — does a COLD public gateway serve it? An HTTP
  *                           range/HEAD result from a public gateway.
+ *   5. eth.limo-serves    — does the URL a HUMAN visits, `https://<name>.limo/`,
+ *                           serve? Probed only for a site that RESOLVES an ENS
+ *                           name; a site that resolves none has nothing to
+ *                           probe and reports NOT APPLICABLE, never a failure.
  *
  * It ALSO reports what the site's MFS **metadata** says about itself — its
  * stored `mode` and `ensName`, plus the eth.limo name the on-box `warm` rule
@@ -22,10 +26,11 @@
  * once by {@link discoverSites} and carried here; this module resolves nothing
  * of its own beyond calling the warm rule.
  *
- * The two checks in (3) and (4) reach OUTSIDE the node. They are INJECTABLE
+ * The checks in (3), (4) and (5) reach OUTSIDE the node. They are INJECTABLE
  * ({@link ProvidersLookup}, {@link GatewayProbe}) so tests run against a fake
  * HTTP layer and never the live network; production supplies the default
- * `fetch`-backed implementations below.
+ * `fetch`-backed implementations below. (4) and (5) share ONE probe seam — the
+ * probe takes a URL, not a cid — so there is a single HTTP surface to fake.
  *
  * Behaviour ported (NOT copied) from the reference prototype
  * `~/searches/ipfs-hetzner/status.sh`: the delegated-routing providers lookup at
@@ -43,14 +48,15 @@
  *
  * A failed external check is a REPORTED outcome, never a throw: a
  * delegated-routing lookup that errors reports `announced=false` (not findable
- * right now) and a gateway probe that errors reports `gatewayServes=false`. One
- * cold gateway or one flaky routing endpoint must not fail the whole report.
+ * right now) and a gateway probe that errors reports the corresponding
+ * `...Serves=false`. One cold gateway, one eth.limo outage or one flaky routing
+ * endpoint must not fail the whole report.
  */
 import {discoverSites, type DiscoveredSite} from '../node/node-commands.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import type {NodeCommandContext, NodeOpResult} from '../node/node-commands.js';
 import type {SiteMode} from '../config/config-resolution.js';
-import {resolveEnsNameToWarm} from '../site/site-wrapper.js';
+import {ethLimoUrl, resolveEnsNameToWarm} from '../site/site-wrapper.js';
 
 /** The delegated-routing providers endpoint (path takes the CID). */
 const DELEGATED_ROUTING_BASE =
@@ -77,15 +83,27 @@ export interface ProvidersResponse {
 export type ProvidersLookup = (cid: string) => Promise<ProvidersResponse>;
 
 /**
- * An injectable cold-gateway probe: given a CID, return the HTTP status a
- * public gateway responds with (a 2xx/206 means it served). Tests inject a
- * fake; production uses {@link defaultGatewayProbe}. Throwing is treated as
- * "did not serve" (gatewayServes=false), never propagated.
+ * An injectable cold-gateway probe: given a full URL, return the HTTP status
+ * that gateway responds with (a 2xx/206 means it served). Tests inject a fake;
+ * production uses {@link defaultGatewayProbe}. Throwing is treated as "did not
+ * serve", never propagated.
+ *
+ * It takes a URL rather than a CID because there are TWO things worth probing —
+ * the CID's public gateway ({@link cidGatewayUrl}) and the site's eth.limo name
+ * ({@link ../site/site-wrapper.js#ethLimoUrl}) — and ONE probe seam is the whole
+ * point: a second probe type would be a second thing to inject, fake and keep
+ * honest. The URL is built by this module (the only place a gateway host is
+ * named), so the probe stays a dumb `url -> status` HTTP call.
  */
-export type GatewayProbe = (cid: string) => Promise<number>;
+export type GatewayProbe = (url: string) => Promise<number>;
+
+/** The cold-gateway URL for a CID: `https://<cid>.ipfs.dweb.link/`. */
+export function cidGatewayUrl(cid: string): string {
+	return `https://${cid}.${DWEB_LINK_HOST}/`;
+}
 
 /**
- * The status of one site: the four report fields, its `id`, and what its MFS
+ * The status of one site: the report fields, its `id`, and what its MFS
  * **metadata** says — so the operator can see not just what the node HAS but
  * what it will DO with the site (its `mode`, its `ensName`, the eth.limo name
  * `warm` resolves from them).
@@ -124,6 +142,28 @@ export interface SiteStatus {
 	gatewayHttp?: number;
 	/** True when the gateway probe status indicates the CID was served (2xx/206). */
 	gatewayServes: boolean;
+	/**
+	 * The HTTP status `https://<ensNameToWarm>.limo/` returned. Undefined when the
+	 * probe itself errored (eth.limo unreachable) OR when there was nothing to
+	 * probe — {@link ethLimoServes} is what tells those apart.
+	 */
+	ethLimoHttp?: number;
+	/**
+	 * Whether the site's eth.limo URL SERVED — THREE-valued, deliberately, and
+	 * unlike {@link gatewayServes} which is always a boolean:
+	 *
+	 *  - `true`  — probed, and it served (2xx),
+	 *  - `false` — probed, and it did NOT (a non-2xx, or the probe threw),
+	 *  - ABSENT  — NOT APPLICABLE: the site resolves no ENS name
+	 *    ({@link ensNameToWarm} is undefined), so there is no such URL. A `""`
+	 *    opt-out and a non-`.eth` id are not eth.limo failures and must never read
+	 *    as one.
+	 *
+	 * The absent-means-not-applicable shape mirrors `ensNameToWarm` itself (and
+	 * the three-valued `ensName` behind it), so the JSON payload simply carries no
+	 * key for a site with nothing to probe.
+	 */
+	ethLimoServes?: boolean;
 }
 
 /** The full status report: this node's PeerID plus a per-site status line. */
@@ -178,7 +218,18 @@ export async function statusReport(
 	const statuses: SiteStatus[] = [];
 	for (const site of sites) {
 		const announced = await checkAnnounced(providersLookup, site.cid, peerId);
-		const gatewayHttp = await probeGateway(gatewayProbe, site.cid);
+		const gatewayHttp = await probeGateway(
+			gatewayProbe,
+			cidGatewayUrl(site.cid),
+		);
+		// The eth.limo probe is driven by the SAME rule `warm` warms by: a site that
+		// resolves no name has no such URL, so it is not probed at all (no wasted
+		// request, and nothing that could read as a failure).
+		const ensNameToWarm = resolveEnsNameToWarm(site.id, site.metadata);
+		const ethLimoHttp =
+			ensNameToWarm === undefined
+				? undefined
+				: await probeGateway(gatewayProbe, ethLimoUrl(ensNameToWarm));
 		statuses.push({
 			id: site.id,
 			cid: site.cid,
@@ -187,10 +238,16 @@ export async function statusReport(
 			// warm target through the loop's own rule.
 			mode: site.metadata.mode,
 			ensName: site.metadata.ensName,
-			ensNameToWarm: resolveEnsNameToWarm(site.id, site.metadata),
+			ensNameToWarm,
 			announced,
 			gatewayHttp,
 			gatewayServes: gatewayHttp !== undefined && servesStatus(gatewayHttp),
+			ethLimoHttp,
+			// NOT APPLICABLE stays absent; a probe that ran (or threw) is a boolean.
+			ethLimoServes:
+				ensNameToWarm === undefined
+					? undefined
+					: ethLimoHttp !== undefined && servesStatus(ethLimoHttp),
 		});
 	}
 
@@ -234,6 +291,15 @@ export function makeStatusOp(
 				announced: s.announced,
 				gatewayServes: s.gatewayServes,
 				gatewayHttp: s.gatewayHttp,
+				// Absent (not applicable) survives as absent: JSON.stringify drops an
+				// undefined value, so a site with no ENS name carries no key at all.
+				ethLimoServes: s.ethLimoServes,
+				ethLimoHttp: s.ethLimoHttp,
+				// The ok/unverified token stays about the CID (is it announced AND
+				// served?), deliberately unchanged: the eth.limo verdict is reported in
+				// its own fields so an existing consumer's `status` keeps meaning what
+				// it meant. See
+				// work/notes/observations/ethlimo-probe-and-warm-outcome-decisions.md.
 				status: s.gatewayServes && s.announced ? 'ok' : 'unverified',
 			})),
 		};
@@ -265,16 +331,17 @@ async function checkAnnounced(
 }
 
 /**
- * Probe a cold public gateway for the CID and return its HTTP status, or
- * undefined if the probe itself errored (network down, DNS, ...). Ports the
- * shell's `curl -r 0-0 -w %{http_code}`.
+ * Probe one gateway URL and return its HTTP status, or undefined if the probe
+ * itself errored (network down, DNS, ...). Ports the shell's
+ * `curl -r 0-0 -w %{http_code}`. Used for BOTH probed URLs (the CID gateway and
+ * the site's eth.limo name) — one fail-soft wrapper, one seam.
  */
 async function probeGateway(
 	probe: GatewayProbe,
-	cid: string,
+	url: string,
 ): Promise<number | undefined> {
 	try {
-		return await probe(cid);
+		return await probe(url);
 	} catch {
 		return undefined;
 	}
@@ -330,13 +397,12 @@ export const defaultProvidersLookup: ProvidersLookup = async (cid) => {
 };
 
 /**
- * The default cold-gateway probe: a single-byte range request to
- * `https://<cid>.ipfs.dweb.link/` returning the HTTP status. (Injected fakes
- * replace this in tests; it is the only place the live gateway is named.)
+ * The default cold-gateway probe: a single-byte range request to the given URL
+ * (the CID's `https://<cid>.ipfs.dweb.link/`, or the site's
+ * `https://<name>.limo/`) returning the HTTP status. It is the ONLY place a
+ * live HTTP request is made for the report; injected fakes replace it in tests.
  */
-export const defaultGatewayProbe: GatewayProbe = async (cid) => {
-	const res = await fetch(`https://${cid}.${DWEB_LINK_HOST}/`, {
-		headers: {range: 'bytes=0-0'},
-	});
+export const defaultGatewayProbe: GatewayProbe = async (url) => {
+	const res = await fetch(url, {headers: {range: 'bytes=0-0'}});
 	return res.status;
 };

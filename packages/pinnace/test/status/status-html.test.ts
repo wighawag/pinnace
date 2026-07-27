@@ -148,6 +148,69 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(html).toContain('href="https://named.eth.limo/"');
 	});
 
+	it('shows WHETHER the eth.limo name serves, beside the name itself', () => {
+		const html = renderStatusHtml({
+			peerId: '12D3KooWpeerself',
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					announced: false,
+					gatewayServes: false,
+					ethLimoServes: true,
+				},
+				{
+					id: 'cold.eth',
+					cid: 'bafycold',
+					mode: 'ipns',
+					ensNameToWarm: 'cold.eth',
+					announced: false,
+					gatewayServes: false,
+					ethLimoServes: false,
+				},
+			],
+		});
+		const aliceRow = html.slice(
+			html.indexOf('alice.eth'),
+			html.indexOf('cold.eth'),
+		);
+		// The column shows the NAME (linked) AND its serving state, so the column
+		// answers "does it serve?" rather than only "what would we warm?".
+		expect(aliceRow).toContain('href="https://alice.eth.limo/"');
+		expect(aliceRow).toContain('>ok<');
+		// The two health columns are untouched: alice is announced=false,
+		// gatewayServes=false, so its only `ok` is the eth.limo one.
+		expect(aliceRow.match(/>ok</g)?.length).toBe(1);
+		const coldRow = html.slice(html.indexOf('cold.eth'));
+		expect(coldRow).toContain('href="https://cold.eth.limo/"');
+		expect(coldRow.match(/>no</g)?.length).toBe(3);
+	});
+
+	it('leaves the eth.limo verdict blank for a site with NO name to probe', () => {
+		const html = renderStatusHtml({
+			peerId: '12D3KooWpeerself',
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					mode: 'ipfs',
+					ensName: '',
+					announced: true,
+					gatewayServes: true,
+				},
+			],
+		});
+		// Nothing to probe is NOT a failed probe: the column says `none` and adds no
+		// red verdict the operator would read as "eth.limo is broken".
+		expect(html).toContain('none');
+		expect(html.match(/>no</g) ?? []).toHaveLength(0);
+		expect(html.match(/>ok</g)?.length).toBe(2);
+	});
+
 	it('says so plainly when the node has no sites yet (fresh box)', () => {
 		const html = renderStatusHtml({
 			peerId: '12D3KooWpeerself',
