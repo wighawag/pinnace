@@ -101,7 +101,7 @@ write_files:
       # pinnace version installed on the box. Both are reproducible: the same
       # cloud-init always installs the same agent on the same runtime.
       NODE_MAJOR="22"
-      PINNACE_VERSION="0.8.1"
+      PINNACE_VERSION="0.9.0"
 
   # -- Kubo installer / initializer -----------------------------------------
   - path: /usr/local/sbin/ipfs-setup.sh
