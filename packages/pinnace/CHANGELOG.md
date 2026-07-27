@@ -1,5 +1,45 @@
 # pinnace
 
+## 0.9.0
+
+### Minor Changes
+
+- f30ee4c: Release as a MINOR: an unknown flag is now a REFUSAL, which changes behaviour for any script passing a stale flag.
+
+  - **Unknown flag names are rejected.** Previously `parseArgs` accepted any `--token` and stored it, so a flag no verb reads was silently ignored. Running `pin ... --mode ipns` after the `--set-mode` rename parsed cleanly, published no IPNS record, and stored `mode: ipfs`, which would have made `republish` skip the name until it lapsed. Each verb now declares its flags, an unknown one is a loud error listing the accepted set, and renamed flags get a hint (`--mode` suggests `--set-mode`).
+  - **eth.limo warming is visible and honest.** `status` and the dashboard now PROBE the resolved `https://<name>.limo/` and report whether it serves, instead of only naming it; and `warm` no longer reports `warmed` for a site whose every fetch failed.
+  - **An inferred `ensName` no longer displays as `none`/`unset`.** A `.eth` site with no stored name showed "none" beside a working eth.limo link; it now shows the inferred name marked as inferred, in both the CLI and the dashboard.
+
+  Also pins the cloud-init agent version to `0.9.0`, the version this release publishes.
+
+### Patch Changes
+
+- 94d6aab: Make eth.limo warming VISIBLE in `status` and HONEST in `warm`: an operator can now see whether `https://<name>.limo/` — the URL a human actually visits — works.
+
+  `status` PROBES the eth.limo URL each site resolves, not just the CID gateway. Every site whose `ensName`/`.eth` id resolves a name (the same `resolveEnsNameToWarm` rule the on-box `warm` loop uses) gets `https://<name>.limo/` probed, and the result appears in all three places the other per-site fields already do: the CLI line (`eth.limo alice.eth.limo ethLimoServes=true`), the `status.json` payload (`ethLimoServes` + `ethLimoHttp`), and the dashboard's `eth.limo` column, which now shows the name AND an ok/no verdict instead of only a name. A site that resolves NO name (an `ensName: ""` opt-out, or a non-`.eth` id with no explicit name) has nothing to probe and reads as NOT APPLICABLE — absent in the payload, `n/a` on the CLI line, no verdict on the dashboard — never as a failure. The `announced` and `gateway` columns are unchanged, as is the `ok`/`unverified` token, which stays about the CID. A probe failure is reported, never thrown: `status` keeps working when eth.limo is down.
+
+  `warm` stops claiming success it does not have. `pinnace node warm` reported `warmed` for every site regardless of what happened — a site whose every fetch failed still reported `warmed`. It now records what actually occurred, per site: `warmed` (every attempt succeeded), `partly-warmed` (some did not — typically the CID gateways are hot but `<name>.limo` is not, the interesting case for a `.eth` site), `warm-failed` (all failed), or `nothing-to-warm` (nothing was attempted: no gateways configured and no ENS name). `ethLimoWarmed` on the per-site outcome says which half failed. A cold gateway that ANSWERS (504/404) counts as a failed warm, exactly like one that throws. The load-bearing error policy is unchanged: warming failures are RECORDED, never raised, so a cold or broken gateway still never fails the verb.
+
+  Library note: the injectable `GatewayProbe` was WIDENED from `(cid) => Promise<number>` to `(url) => Promise<number>` so one probe seam covers both probed URLs rather than forking a second one; the CID's gateway URL is now built by the status core (`cidGatewayUrl`), and `<name>.limo` has a single spelling (`ethLimoUrl`, beside the rule that resolves the name). Anyone injecting a custom `gatewayProbe` receives a full URL instead of a bare cid.
+
+- c4819d8: Refuse an unknown CLI flag instead of ignoring it: the rule "a flag you type must never mean nothing" now covers a flag's NAME, not just its value.
+
+  BEHAVIOUR CHANGE. Every verb declares the flags it accepts, and anything else is a loud error naming the offending flag, listing what that verb does accept, and exiting non-zero WITHOUT performing the operation. Anyone whose scripts pass a stale or misspelled flag will now see a refusal where the flag was previously parsed and silently dropped. That silence was a real, shipped failure: after the `--mode` -> `--set-mode` rename, `pinnace pin --from-ipns <src> --as ronan.eth --mode ipns` parsed, was read by nobody, pinned the site as `ipfs` with no IPNS record published, and stored `mode: ipfs`, which would have made the on-box `republish` skip the name until it lapsed. It was caught only because a human noticed a missing `ipns://` line; a CI or cron run would have failed silently. The same now catches plain typos (`--set-mod ipns`).
+
+  `--mode` gets an explicit RENAME HINT: on `deploy` and `pin` it refuses with "`--mode` was RENAMED: did you mean `--set-mode`?". The hint comes from a small static map of this project's renamed flags, and is only offered when the replacement is a flag that verb actually accepts.
+
+  Nothing valid is refused: the accepted set was enumerated per verb from the code (`provision`, `deploy`, `pin`, `status`, `derive`, `install-ci`, `site`, `authorize`, `node`, `version`), the PREFIX-shaped `--host-endpoint.<name>` / `--host-token.<name>` stay accepted on every node-touching verb (matched by prefix, for any host name), and the globals `--config` / `--endpoint` are stripped before the check so they are never reported as unknown from either side of the command. `authorize` keeps its own tailored `--host` refusal. Three verb surfaces tighten as a consequence: `deploy --host` (a deploy fans out to every node by design), and any flag on `node <verb>` or `version`, are now refusals rather than silent no-ops.
+
+  The bare-flag refusal is unchanged and composes with this one: the name check runs first, so a bare UNKNOWN flag now reports "unknown flag" rather than "needs a value", while a bare KNOWN flag still says "needs a value". `parseArgs` itself is untouched and no arg-parsing dependency was added.
+
+- b9fe50f: Stop telling an operator a site has NO ENS name when it demonstrably has an inferred one.
+
+  Both status renderers described the STORED `ensName` field, but the column is READ as "what is this site's ENS name?". For a `.eth` site that stores none, those two answers differ, so the row contradicted itself: the CLI printed `ronan.eth: ... ensName unset eth.limo ronan.eth.limo`, and the dashboard showed a grey `none` in the `ens name` cell beside a ticked `ronan.eth.limo` link in the next one.
+
+  The `ens name` column now shows FOUR states instead of three, using the `ensNameToWarm` the report had ALREADY resolved: a STORED name prints as itself; an ABSENT name that resolved anyway prints as the name it warms, MARKED inferred (`ronan.eth (inferred)` on the CLI line, `ronan.eth` plus a muted `(inferred)` hint in the dashboard cell) so it stays distinguishable from a stored name that OVERRIDES the id; `""` still reads as `opted-out` / `opted out`; and a site with nothing stored and nothing resolved still reads as `unset` / `none`.
+
+  Display only. Nothing about resolution, warming or storage moves: the three-valued stored field, `resolveEnsNameToWarm` and what the box warms are unchanged, and the `status.json` payload keeps carrying raw, unannotated `ensName`/`ensNameToWarm` (the annotation is presentation, so machine readers see exactly what they saw before). The dashboard renderer still resolves nothing itself — it renders the name the report resolved, and a `.eth` id the report did not resolve still reads as `none`.
+
 ## 0.8.1
 
 ### Patch Changes
