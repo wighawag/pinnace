@@ -14,6 +14,7 @@ import {
 	encodeSiteMetadata,
 	type SiteMetadata,
 } from '../../src/site/site-wrapper.js';
+import {checkAnswer} from '../../src/status/check-outcome.js';
 
 /**
  * These tests ISOLATE the on-box world:
@@ -706,15 +707,15 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 					id: 'alice.eth',
 					cid: 'bafyalice',
 					ipns: 'k51alice',
-					announced: true,
-					gatewayServes: true,
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
 				},
 				{
 					id: 'bob',
 					cid: 'bafybob',
 					ipns: '',
-					announced: false,
-					gatewayServes: false,
+					announced: checkAnswer(false),
+					gatewayServes: checkAnswer(false),
 				},
 			],
 		});
@@ -762,7 +763,7 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 					mode: 'ipns',
 					ensNameToWarm: 'alice.eth',
 					// The one site with an eth.limo URL to probe — and it did not serve.
-					ethLimoServes: false,
+					ethLimoServes: checkAnswer(false),
 					ethLimoHttp: 504,
 				},
 				{
@@ -785,7 +786,7 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 			expect(byId('alice.eth')['mode']).toBe('ipns');
 			expect(byId('alice.eth')['ensNameToWarm']).toBe('alice.eth');
 			// The eth.limo probe verdict reaches the machine payload...
-			expect(byId('alice.eth')['ethLimoServes']).toBe(false);
+			expect(byId('alice.eth')['ethLimoServes']).toEqual({state: 'no'});
 			expect(byId('alice.eth')['ethLimoHttp']).toBe(504);
 			// ...and a site with nothing to probe carries no verdict to mistake for
 			// a failure.
@@ -805,12 +806,14 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 			expect(html).toContain('href="https://alice.eth.limo/"');
 			expect(html).toContain('opted out');
 			// The eth.limo column shows the NAME and whether it serves: alice's row
-			// is the only `no` on the page (the other two probed nothing).
+			// is the only `no` on the page (the other two probed nothing, and the
+			// CID checks this fake op did not run read `unknown`, never `no`).
 			const aliceRow = html.slice(
 				html.indexOf('alice.eth'),
 				html.indexOf('optout.eth'),
 			);
 			expect(aliceRow).toContain('>no<');
+			expect(html.match(/>no</g)?.length).toBe(1);
 		} finally {
 			await rm(dir, {recursive: true, force: true});
 		}

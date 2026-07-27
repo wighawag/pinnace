@@ -36,6 +36,8 @@ Standing per-change rules agents must follow in this repo.
 
 Every change requires a changeset (`pnpm changeset`). For enforcement, wire a check (e.g. `changeset status --since=main`) into the `dorfl.json` `verify` gate.
 
+A check that could not RUN never reports a definitive negative. Distinguish "we asked and the answer is no" from "we could not ask", and say WHICH — with the reason. A swallowed error that becomes `false` / `{}` / "absent" is a bug, not a default. Worked examples: the site **metadata** read, tolerant for DISCOVERY (absent metadata is normal) but strict for WRITES (an unreadable read REFUSES rather than overwrite); and the three external `status` checks (`announced`, the CID-gateway probe, the eth.limo probe), each three-valued `yes` / `no` / `unknown`-with-reason via `src/status/check-outcome.ts`, with `unknown` rendered neutrally and rolled up as `unverified`.
+
 ## Skills this repo uses
 
 - Required: `setup` (onboarding/migration), `to-spec`, `to-task`.

@@ -19,6 +19,10 @@
  *                           name; a site that resolves none has nothing to
  *                           probe and reports NOT APPLICABLE, never a failure.
  *
+ * Each of (3), (4) and (5) answers in THREE values — yes / no / unknown-with-a-
+ * reason ({@link ./check-outcome.js}) — because a check that could not RUN must
+ * never report a definitive negative (see the closing note below).
+ *
  * It ALSO reports what the site's MFS **metadata** says about itself — its
  * stored `mode` and `ensName`, plus the eth.limo name the on-box `warm` rule
  * resolves from them ({@link SiteStatus}) — so the operator can see what the box
@@ -46,13 +50,24 @@
  * seam. The dashboard persistence (`status.json`) is the command layer's job,
  * not this module's: this module PRODUCES the report and stops.
  *
- * A failed external check is a REPORTED outcome, never a throw: a
- * delegated-routing lookup that errors reports `announced=false` (not findable
- * right now) and a gateway probe that errors reports the corresponding
- * `...Serves=false`. One cold gateway, one eth.limo outage or one flaky routing
- * endpoint must not fail the whole report.
+ * A failed external check is a REPORTED outcome, never a throw: one cold
+ * gateway, one eth.limo outage or one flaky routing endpoint must not fail the
+ * whole report. But it is reported HONESTLY: each of the three checks is
+ * THREE-valued ({@link ./check-outcome.js}), so a check that could not RUN
+ * reports `unknown` WITH its reason and never a confident negative. That is the
+ * repo convention (`CONTEXT.md` `## Conventions`) and this module is its worked
+ * example: a live box once reported `announced=false` for a site the delegated
+ * router was, at that moment, listing correctly.
  */
 import {discoverSites, type DiscoveredSite} from '../node/node-commands.js';
+import {
+	checkAnswer,
+	checkUnknown,
+	CheckUnavailableError,
+	isYes,
+	unavailableReason,
+	type CheckOutcome,
+} from './check-outcome.js';
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import type {NodeCommandContext, NodeOpResult} from '../node/node-commands.js';
 import type {SiteMode} from '../config/config-resolution.js';
@@ -77,16 +92,24 @@ export interface ProvidersResponse {
 /**
  * An injectable delegated-routing providers lookup: given a CID, return the
  * providers response (whose `.Providers[].ID` we scan for our PeerID). Tests
- * inject a fake; production uses {@link defaultProvidersLookup}. Throwing is
- * treated as "not findable" (announced=false), never propagated.
+ * inject a fake; production uses {@link defaultProvidersLookup}.
+ *
+ * A lookup RESOLVES only when the router actually answered — an empty
+ * `Providers` list then means "the router answered, and your peer is not in
+ * it", a real negative. A lookup that could NOT be made must THROW (ideally a
+ * {@link CheckUnavailableError} carrying a short reason such as `http 429`):
+ * the throw is caught and reported as `unknown`, never propagated, and never
+ * flattened into an empty list.
  */
 export type ProvidersLookup = (cid: string) => Promise<ProvidersResponse>;
 
 /**
  * An injectable cold-gateway probe: given a full URL, return the HTTP status
  * that gateway responds with (a 2xx/206 means it served). Tests inject a fake;
- * production uses {@link defaultGatewayProbe}. Throwing is treated as "did not
- * serve", never propagated.
+ * production uses {@link defaultGatewayProbe}. A RETURNED non-2xx is the
+ * gateway answering that it did not serve (a real negative); THROWING means the
+ * probe could not be made at all, which is reported as `unknown` and never
+ * propagated.
  *
  * It takes a URL rather than a CID because there are TWO things worth probing —
  * the CID's public gateway ({@link cidGatewayUrl}) and the site's eth.limo name
@@ -136,34 +159,50 @@ export interface SiteStatus {
 	 * of it. `undefined` means this site is not eth.limo-warmed at all.
 	 */
 	ensNameToWarm?: string;
-	/** True when the delegated-routing providers list for the CID has our PeerID. */
-	announced: boolean;
-	/** The HTTP status the cold public gateway probe returned (undefined on error). */
-	gatewayHttp?: number;
-	/** True when the gateway probe status indicates the CID was served (2xx/206). */
-	gatewayServes: boolean;
 	/**
-	 * The HTTP status `https://<ensNameToWarm>.limo/` returned. Undefined when the
-	 * probe itself errored (eth.limo unreachable) OR when there was nothing to
-	 * probe — {@link ethLimoServes} is what tells those apart.
+	 * Does the NETWORK announce this node for the CID? THREE-valued
+	 * ({@link CheckOutcome}): `yes` the delegated-routing providers list contains
+	 * our PeerID, `no` it ANSWERED and does not, `unknown` the lookup could not be
+	 * made at all (rate-limited, unreachable, unparsable, or no PeerID to compare)
+	 * — with the reason. A failed lookup is NOT a negative.
+	 */
+	announced: CheckOutcome;
+	/**
+	 * The HTTP status the cold public gateway ANSWERED with; absent when the probe
+	 * could not be made at all (then {@link gatewayServes} is `unknown`).
+	 */
+	gatewayHttp?: number;
+	/**
+	 * Did a cold public gateway serve the CID? THREE-valued: `yes` (2xx/206),
+	 * `no` (it answered something else — a real negative), `unknown` (the probe
+	 * could not be made, with the reason).
+	 */
+	gatewayServes: CheckOutcome;
+	/**
+	 * The HTTP status `https://<ensNameToWarm>.limo/` ANSWERED with. Absent when
+	 * the probe could not be made (eth.limo unreachable) OR when there was nothing
+	 * to probe — {@link ethLimoServes} is what tells those apart.
 	 */
 	ethLimoHttp?: number;
 	/**
-	 * Whether the site's eth.limo URL SERVED — THREE-valued, deliberately, and
-	 * unlike {@link gatewayServes} which is always a boolean:
+	 * Whether the site's eth.limo URL SERVED — FOUR display states, because the
+	 * three-valued {@link CheckOutcome} sits inside an OPTIONAL field:
 	 *
-	 *  - `true`  — probed, and it served (2xx),
-	 *  - `false` — probed, and it did NOT (a non-2xx, or the probe threw),
-	 *  - ABSENT  — NOT APPLICABLE: the site resolves no ENS name
+	 *  - `{state: 'yes'}`     — probed, and it served (2xx),
+	 *  - `{state: 'no'}`      — probed, it ANSWERED, and it did not serve,
+	 *  - `{state: 'unknown'}` — probed, but the probe could not be MADE (with the
+	 *    reason): eth.limo being unreachable is not eth.limo refusing to serve,
+	 *  - ABSENT               — NOT APPLICABLE: the site resolves no ENS name
 	 *    ({@link ensNameToWarm} is undefined), so there is no such URL. A `""`
 	 *    opt-out and a non-`.eth` id are not eth.limo failures and must never read
 	 *    as one.
 	 *
-	 * The absent-means-not-applicable shape mirrors `ensNameToWarm` itself (and
-	 * the three-valued `ensName` behind it), so the JSON payload simply carries no
-	 * key for a site with nothing to probe.
+	 * "Nothing to check" and "could not check" are DIFFERENT answers, so they stay
+	 * apart: the absent-means-not-applicable shape mirrors `ensNameToWarm` itself
+	 * (and the three-valued `ensName` behind it), so the JSON payload simply
+	 * carries no key for a site with nothing to probe.
 	 */
-	ethLimoServes?: boolean;
+	ethLimoServes?: CheckOutcome;
 }
 
 /** The full status report: this node's PeerID plus a per-site status line. */
@@ -202,7 +241,8 @@ export interface StatusReportInput {
  * Build the per-site status report. Discovers sites (unless supplied), reads
  * this node's PeerID and its keystore once, then for each site runs the two
  * external checks (through the injected/default fakes) to fill the four fields.
- * External-check failures degrade to `false`, never throw.
+ * A failed external check is recorded as `unknown` (with its reason), never as
+ * a negative and never thrown.
  */
 export async function statusReport(
 	input: StatusReportInput,
@@ -218,18 +258,15 @@ export async function statusReport(
 	const statuses: SiteStatus[] = [];
 	for (const site of sites) {
 		const announced = await checkAnnounced(providersLookup, site.cid, peerId);
-		const gatewayHttp = await probeGateway(
-			gatewayProbe,
-			cidGatewayUrl(site.cid),
-		);
+		const gateway = await probeServes(gatewayProbe, cidGatewayUrl(site.cid));
 		// The eth.limo probe is driven by the SAME rule `warm` warms by: a site that
 		// resolves no name has no such URL, so it is not probed at all (no wasted
 		// request, and nothing that could read as a failure).
 		const ensNameToWarm = resolveEnsNameToWarm(site.id, site.metadata);
-		const ethLimoHttp =
+		const ethLimo =
 			ensNameToWarm === undefined
 				? undefined
-				: await probeGateway(gatewayProbe, ethLimoUrl(ensNameToWarm));
+				: await probeServes(gatewayProbe, ethLimoUrl(ensNameToWarm));
 		statuses.push({
 			id: site.id,
 			cid: site.cid,
@@ -240,14 +277,12 @@ export async function statusReport(
 			ensName: site.metadata.ensName,
 			ensNameToWarm,
 			announced,
-			gatewayHttp,
-			gatewayServes: gatewayHttp !== undefined && servesStatus(gatewayHttp),
-			ethLimoHttp,
-			// NOT APPLICABLE stays absent; a probe that ran (or threw) is a boolean.
-			ethLimoServes:
-				ensNameToWarm === undefined
-					? undefined
-					: ethLimoHttp !== undefined && servesStatus(ethLimoHttp),
+			gatewayHttp: gateway.http,
+			gatewayServes: gateway.serves,
+			ethLimoHttp: ethLimo?.http,
+			// NOT APPLICABLE stays absent; a probe that was MADE carries its
+			// three-valued outcome (served / did not / could not be made).
+			ethLimoServes: ethLimo?.serves,
 		});
 	}
 
@@ -300,7 +335,11 @@ export function makeStatusOp(
 				// its own fields so an existing consumer's `status` keeps meaning what
 				// it meant. See
 				// work/notes/observations/ethlimo-probe-and-warm-outcome-decisions.md.
-				status: s.gatewayServes && s.announced ? 'ok' : 'unverified',
+				// Only a definite YES on both counts is `ok`: an UNKNOWN check verifies
+				// nothing, so it rolls up as `unverified` — which is exactly what that
+				// token means — and never as a failure of its own.
+				status:
+					isYes(s.gatewayServes) && isYes(s.announced) ? 'ok' : 'unverified',
 			})),
 		};
 	};
@@ -312,38 +351,62 @@ export function makeStatusOp(
 
 /**
  * Ask delegated routing who provides the CID and answer: is OUR PeerID among
- * them? A lookup error is "not findable right now" -> false, never thrown (one
- * flaky routing endpoint must not fail the report). Ports the shell's
+ * them? THREE-valued, and never thrown (one flaky routing endpoint must not
+ * fail the report):
+ *
+ *  - the lookup ANSWERED and lists us            -> `yes`,
+ *  - the lookup ANSWERED and does not list us    -> `no` (the true negative),
+ *  - the lookup could not be MADE (it threw: a non-2xx, a network/DNS error, an
+ *    unparsable body) or we have no PeerID to compare -> `unknown` + reason.
+ *
+ * The `unknown` branch is the whole point: a rate-limited (429) lookup says
+ * NOTHING about whether the network announces us, and reporting `false` there
+ * is a confident negative we did not earn. Ports the shell's
  * `jq '.Providers[]|select(.ID==$p)'`.
  */
 async function checkAnnounced(
 	lookup: ProvidersLookup,
 	cid: string,
 	peerId: string,
-): Promise<boolean> {
-	if (!peerId) return false;
+): Promise<CheckOutcome> {
+	// We could not even identify this node, so there is nothing to look for: that
+	// is a check we could not run, not a site that is unannounced.
+	if (!peerId) return checkUnknown('no peer id');
 	try {
 		const res = await lookup(cid);
-		return (res.Providers ?? []).some((p) => p?.ID === peerId);
-	} catch {
-		return false;
+		return checkAnswer((res.Providers ?? []).some((p) => p?.ID === peerId));
+	} catch (error) {
+		return checkUnknown(unavailableReason(error));
 	}
 }
 
+/** What one gateway probe produced: the status it ANSWERED with, and the verdict. */
+interface ProbeOutcome {
+	/** The HTTP status the gateway answered with; absent if it never answered. */
+	http?: number;
+	/** yes (2xx), no (answered otherwise), unknown (the probe could not be made). */
+	serves: CheckOutcome;
+}
+
 /**
- * Probe one gateway URL and return its HTTP status, or undefined if the probe
- * itself errored (network down, DNS, ...). Ports the shell's
- * `curl -r 0-0 -w %{http_code}`. Used for BOTH probed URLs (the CID gateway and
- * the site's eth.limo name) — one fail-soft wrapper, one seam.
+ * Probe one gateway URL and report whether it SERVED — fail-soft, never thrown.
+ * Ports the shell's `curl -r 0-0 -w %{http_code}`. Used for BOTH probed URLs
+ * (the CID gateway and the site's eth.limo name) — one wrapper, one seam.
+ *
+ * The distinction that matters: a gateway that ANSWERS a non-2xx (a cold 504, a
+ * 404) has told us it does not serve the content, so that is a real `no`; a
+ * probe that could not be MADE at all (network down, DNS, TLS) tells us nothing
+ * about the gateway, so it is `unknown` with its reason.
  */
-async function probeGateway(
+async function probeServes(
 	probe: GatewayProbe,
 	url: string,
-): Promise<number | undefined> {
+): Promise<ProbeOutcome> {
 	try {
-		return await probe(url);
-	} catch {
-		return undefined;
+		const http = await probe(url);
+		return {http, serves: checkAnswer(servesStatus(http))};
+	} catch (error) {
+		return {serves: checkUnknown(unavailableReason(error))};
 	}
 }
 
@@ -392,7 +455,11 @@ export const defaultProvidersLookup: ProvidersLookup = async (cid) => {
 	const res = await fetch(`${DELEGATED_ROUTING_BASE}/${cid}`, {
 		headers: {accept: 'application/json'},
 	});
-	if (!res.ok) return {Providers: []};
+	// A non-2xx is the router NOT ANSWERING the question (a 429 rate-limit is the
+	// expected case), so it must not be flattened into an empty provider list —
+	// that read as "you are not announced" and produced a false negative on a
+	// live box. It throws with the status, and the caller records `unknown`.
+	if (!res.ok) throw new CheckUnavailableError(`http ${res.status}`);
 	return (await res.json()) as ProvidersResponse;
 };
 

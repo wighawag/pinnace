@@ -45,6 +45,7 @@ import {
 	republishAndExport,
 	mirrorAndReannounce,
 } from '../publisher/record-sequence.js';
+import type {CheckOutcome} from '../status/check-outcome.js';
 import {
 	ethLimoUrl,
 	readSiteMetadata,
@@ -119,13 +120,19 @@ export interface SiteOutcome {
 	status?: string;
 	/**
 	 * `status`-verb only: whether the network announces this node for the CID
-	 * (the delegated-routing providers list contains our PeerID). Owned + filled
-	 * by the `status-report` core op; absent for other verbs.
+	 * (the delegated-routing providers list contains our PeerID). THREE-valued
+	 * ({@link CheckOutcome}): a lookup that could not be MADE reports `unknown`
+	 * with its reason, NEVER a `no` (`CONTEXT.md` `## Conventions`). Owned +
+	 * filled by the `status-report` core op; absent for other verbs.
 	 */
-	announced?: boolean;
-	/** `status`-verb only: whether a cold public gateway served the CID (2xx/206). */
-	gatewayServes?: boolean;
-	/** `status`-verb only: the raw HTTP status the cold-gateway probe returned. */
+	announced?: CheckOutcome;
+	/**
+	 * `status`-verb only: whether a cold public gateway served the CID (2xx/206),
+	 * with the same three states — a gateway that ANSWERED a non-2xx is a `no`, a
+	 * probe that could not be made is `unknown`.
+	 */
+	gatewayServes?: CheckOutcome;
+	/** `status`-verb only: the raw HTTP status the cold-gateway probe answered with. */
 	gatewayHttp?: number;
 	/**
 	 * `status`-verb only: the `mode` the site STORES in its `metadata.json`,
@@ -147,17 +154,20 @@ export interface SiteOutcome {
 	ensNameToWarm?: string;
 	/**
 	 * `status`-verb only: whether `https://<ensNameToWarm>.limo/` — the URL a
-	 * HUMAN visits — served. THREE-valued: `true` served, `false` probed and did
-	 * not, ABSENT there was nothing to probe (the site resolves no ENS name). A
-	 * `""` opt-out is not an eth.limo failure and never reads as one.
+	 * HUMAN visits — served. FOUR states: `yes` served, `no` it answered and did
+	 * not, `unknown` the probe could not be MADE, ABSENT there was nothing to
+	 * probe (the site resolves no ENS name). A `""` opt-out is not an eth.limo
+	 * failure and never reads as one, and neither is an eth.limo outage.
 	 */
-	ethLimoServes?: boolean;
-	/** `status`-verb only: the raw HTTP status the eth.limo probe returned. */
+	ethLimoServes?: CheckOutcome;
+	/** `status`-verb only: the raw HTTP status the eth.limo probe answered with. */
 	ethLimoHttp?: number;
 	/**
-	 * `warm`-verb only: whether the site's eth.limo warm SUCCEEDED. Same three
-	 * values as {@link ethLimoServes}, for the other half of the system: absent
-	 * means the site resolves no ENS name, so no eth.limo warm was attempted.
+	 * `warm`-verb only: whether the site's eth.limo warm SUCCEEDED. A boolean,
+	 * unlike {@link ethLimoServes}: warming is an ACTION, not a check — a warm
+	 * that could not be made simply did not warm anything, which the outcome
+	 * ({@link WarmStatus}) already says. Absent means the site resolves no ENS
+	 * name, so no eth.limo warm was attempted.
 	 */
 	ethLimoWarmed?: boolean;
 }

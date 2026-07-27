@@ -191,7 +191,7 @@ The same four ensName forms, and the same `--set-mode`, apply to `pinnace pin`.
 ### 7. Check it
 
 ```sh
-pinnace --config pinnace.json status                 # per-site CID / IPNS id / stored mode + ensName (a `.eth` site that stores none shows the name it warms, marked `(inferred)`) / eth.limo name AND whether it serves / announce / gateway-serves
+pinnace --config pinnace.json status                 # per-site CID / IPNS id / stored mode + ensName (a `.eth` site that stores none shows the name it warms, marked `(inferred)`) / eth.limo name AND whether it serves / announce / gateway-serves (a check that could not run reads `unknown (<reason>)`, never `false`)
 curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the exported signed record
 ```
 
@@ -218,7 +218,7 @@ With `--endpoint <url>` there is no config to read: that flag MINTS a single hos
 | `pinnace pin <cid> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows). Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace authorize [<id>]` | Grant the DECLARED publisher the per-site key derived from your master, so CI can deploy that name with no master (its primary job: run once locally, deploy from CI forever). Bare = every site the publisher holds in MFS; `<id>` = just that site, which need not exist yet. Idempotent (a key already held is reported `already-authorized`, never re-imported). No `--host`: the config says which host is the publisher, and zero/several declared publishers, or another host already holding that key, are loud refusals. It grants key MATERIAL only — it changes NO role and is NOT a failover. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
-| `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName`, the eth.limo name they resolve to AND whether `https://<name>.limo/` actually serves (`ethLimoServes=true/false`, or `n/a` for a site that resolves no name), network-announce, gateway-serves. |
+| `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName`, the eth.limo name they resolve to AND whether `https://<name>.limo/` actually serves (`ethLimoServes=true/false`, or `n/a` for a site that resolves no name), network-announce, gateway-serves. The three external checks are three-valued: a check that could NOT run prints `unknown (<reason>)` (e.g. `announced=unknown (http 429)`), never `false` — only a check that ANSWERED reports a negative. |
 | `pinnace install-ci --system github --build-command <c> --output-dir <d>` | Emit a deploy CI workflow and report the secrets/vars to set. |
 | `pinnace site <list\|add\|remove> ...` | Manage the sites a node serves (MFS wrappers + pins). |
 | `pinnace node <republish\|mirror\|warm\|status>` | The on-box agent verbs (run by the box's systemd timers; role-gated). |

@@ -4,6 +4,7 @@ import {
 	DEFAULT_STATUS_REFRESH_SECONDS,
 	type StatusPageReport,
 } from '../../src/status/status-html.js';
+import {checkAnswer, checkUnknown} from '../../src/status/check-outcome.js';
 
 /**
  * The renderer is a PURE `StatusPageReport -> html string` function: these tests
@@ -26,15 +27,15 @@ function reportFixture(): StatusPageReport {
 				mode: 'ipns',
 				// ensName ABSENT: the on-box rule infers it from the `.eth` id.
 				ensNameToWarm: 'alice.eth',
-				announced: true,
-				gatewayServes: true,
+				announced: checkAnswer(true),
+				gatewayServes: checkAnswer(true),
 			},
 			{
 				id: 'bob',
 				cid: 'bafybob',
 				mode: 'ipfs',
-				announced: false,
-				gatewayServes: false,
+				announced: checkAnswer(false),
+				gatewayServes: checkAnswer(false),
 			},
 		],
 	};
@@ -239,18 +240,18 @@ describe('renderStatusHtml: per-site row', () => {
 					cid: 'bafyalice',
 					mode: 'ipns',
 					ensNameToWarm: 'alice.eth',
-					announced: false,
-					gatewayServes: false,
-					ethLimoServes: true,
+					announced: checkAnswer(false),
+					gatewayServes: checkAnswer(false),
+					ethLimoServes: checkAnswer(true),
 				},
 				{
 					id: 'cold.eth',
 					cid: 'bafycold',
 					mode: 'ipns',
 					ensNameToWarm: 'cold.eth',
-					announced: false,
-					gatewayServes: false,
-					ethLimoServes: false,
+					announced: checkAnswer(false),
+					gatewayServes: checkAnswer(false),
+					ethLimoServes: checkAnswer(false),
 				},
 			],
 		});
@@ -280,8 +281,8 @@ describe('renderStatusHtml: per-site row', () => {
 					cid: 'bafyoptout',
 					mode: 'ipfs',
 					ensName: '',
-					announced: true,
-					gatewayServes: true,
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
 				},
 			],
 		});
@@ -290,6 +291,80 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(html).toContain('none');
 		expect(html.match(/>no</g) ?? []).toHaveLength(0);
 		expect(html.match(/>ok</g)?.length).toBe(2);
+	});
+
+	it('renders an UNKNOWN check NEUTRALLY, with its reason, never the red cross', () => {
+		// The live-box bug, on the page: a rate-limited providers lookup used to
+		// paint a red `no` for a site the router WAS listing.
+		const html = renderStatusHtml({
+			peerId: '12D3KooWpeerself',
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					announced: checkUnknown('http 429'),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		// The NEGATIVE indicator (the red one) is never used for a check that could
+		// not run — the whole point of the third state.
+		expect(html).not.toContain('class="no"');
+		expect(html).toContain('<span class="unknown">unknown (http 429)</span>');
+		// ...and the reason is styled with the MUTED family, never the red one.
+		expect(html).toContain('.none, .empty, .inferred, .unknown');
+	});
+
+	it('renders a check the report did NOT run as unknown, not as `no`', () => {
+		// A report from a path that runs no external checks (the thin on-box
+		// stand-in) carries no verdict at all; that is "we did not check", and
+		// painting it red would be the same lie.
+		const html = renderStatusHtml({
+			peerId: '12D3KooWpeerself',
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'bob', cid: 'bafybob', mode: 'ipfs'}],
+		});
+		expect(html).not.toContain('class="no"');
+		// The two CID health columns, both unrun: `unknown`, with no reason to give.
+		expect(html.match(/>unknown</g)?.length).toBe(2);
+	});
+
+	it('shows an UNKNOWN eth.limo probe beside the name, distinct from `none`', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+					ethLimoServes: checkUnknown('fetch failed'),
+				},
+				{
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					mode: 'ipfs',
+					ensName: '',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		const aliceRow = html.slice(
+			html.indexOf('alice.eth'),
+			html.indexOf('optout.eth'),
+		);
+		// Could not check: the name is still linked, with a muted verdict.
+		expect(aliceRow).toContain('href="https://alice.eth.limo/"');
+		expect(aliceRow).toContain('unknown (fetch failed)');
+		// Nothing to check stays `none` — a different answer, still.
+		const optoutRow = html.slice(html.indexOf('optout.eth'));
+		expect(optoutRow).toContain('<span class="none">none</span>');
+		expect(optoutRow).not.toContain('unknown');
 	});
 
 	it('says so plainly when the node has no sites yet (fresh box)', () => {
@@ -341,8 +416,8 @@ describe('renderStatusHtml: self-contained + escaped', () => {
 					id: '<script>alert("x")</script>',
 					cid: 'bafy"&<evil>',
 					ipns: "k51'&<evil>",
-					announced: true,
-					gatewayServes: false,
+					announced: checkAnswer(true),
+					gatewayServes: checkUnknown('<script>boom</script>'),
 				},
 			],
 		});

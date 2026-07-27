@@ -188,6 +188,19 @@ export {
 	type PinNodeFailure,
 } from './pin/pin-external.js';
 export {
+	CHECK_YES,
+	CHECK_NO,
+	UNKNOWN_CHECK_REASON,
+	CheckUnavailableError,
+	checkAnswer,
+	checkUnknown,
+	checkState,
+	isYes,
+	unavailableReason,
+	type CheckOutcome,
+	type CheckState,
+} from './status/check-outcome.js';
+export {
 	statusReport,
 	makeStatusOp,
 	defaultProvidersLookup,

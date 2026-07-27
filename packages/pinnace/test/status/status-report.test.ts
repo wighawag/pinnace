@@ -1,12 +1,17 @@
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, vi, afterEach} from 'vitest';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
 import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
 import {
 	statusReport,
 	makeStatusOp,
+	defaultProvidersLookup,
 	type GatewayProbe,
 	type ProvidersLookup,
 } from '../../src/status/status-report.js';
+import {
+	CheckUnavailableError,
+	type CheckOutcome,
+} from '../../src/status/check-outcome.js';
 import {resolveEnsNameToWarm} from '../../src/site/site-wrapper.js';
 import {discoverSites} from '../../src/node/node-commands.js';
 import {
@@ -251,10 +256,10 @@ describe('status core — probes the eth.limo URL each site resolves', () => {
 		);
 		const byId = (id: string) => sites.find((s) => s.id === id)!;
 		expect(byId('alice.eth').ethLimoHttp).toBe(200);
-		expect(byId('alice.eth').ethLimoServes).toBe(true);
-		// A site whose eth.limo answered but did NOT serve: probed, and false.
+		expect(byId('alice.eth').ethLimoServes).toEqual({state: 'yes'});
+		// A site whose eth.limo answered but did NOT serve: probed, and a real no.
 		expect(byId('blog').ethLimoHttp).toBe(504);
-		expect(byId('blog').ethLimoServes).toBe(false);
+		expect(byId('blog').ethLimoServes).toEqual({state: 'no'});
 	});
 
 	it('reports NO resolved name as not-applicable, distinct from a failed probe', async () => {
@@ -265,8 +270,8 @@ describe('status core — probes the eth.limo URL each site resolves', () => {
 		expect(byId('optout.eth').ethLimoServes).toBeUndefined();
 		expect(byId('optout.eth').ethLimoHttp).toBeUndefined();
 		expect(byId('bob').ethLimoServes).toBeUndefined();
-		// ...and a site that WAS probed and failed reads `false`, not absent.
-		expect(byId('blog').ethLimoServes).toBe(false);
+		// ...and a site that WAS probed and failed reads a real `no`, not absent.
+		expect(byId('blog').ethLimoServes).toEqual({state: 'no'});
 		// Nothing was probed for them (no wasted request, no invented name).
 		expect(probed.some((u) => u.includes('optout'))).toBe(false);
 		expect(probed.some((u) => u.includes('bob.limo'))).toBe(false);
@@ -279,11 +284,15 @@ describe('status core — probes the eth.limo URL each site resolves', () => {
 		});
 		expect(sites).toHaveLength(4);
 		const byId = (id: string) => sites.find((s) => s.id === id)!;
-		// The probe failed: no status, and NOT serving — but still a report.
+		// The probe could not be MADE: no status, and UNKNOWN (never a `no`, which
+		// would claim eth.limo answered and refused to serve).
 		expect(byId('alice.eth').ethLimoHttp).toBeUndefined();
-		expect(byId('alice.eth').ethLimoServes).toBe(false);
+		expect(byId('alice.eth').ethLimoServes).toEqual({
+			state: 'unknown',
+			reason: 'eth.limo is down',
+		});
 		// The rest of the report is intact, including the CID-gateway half.
-		expect(byId('alice.eth').gatewayServes).toBe(true);
+		expect(byId('alice.eth').gatewayServes).toEqual({state: 'yes'});
 		expect(byId('alice.eth').ensNameToWarm).toBe('alice.eth');
 		// A site with nothing to probe is still not-applicable, not false.
 		expect(byId('bob').ethLimoServes).toBeUndefined();
@@ -317,17 +326,19 @@ describe('status core — per-site four-field report shape', () => {
 		const alice = report.sites.find((s) => s.id === 'alice.eth')!;
 		expect(alice.cid).toBe('bafyalice');
 		expect(alice.ipns).toBe('k51alice');
-		expect(alice.announced).toBe(true);
+		expect(alice.announced).toEqual({state: 'yes'});
 		expect(alice.gatewayHttp).toBe(206);
-		expect(alice.gatewayServes).toBe(true);
+		expect(alice.gatewayServes).toEqual({state: 'yes'});
 
 		const bob = report.sites.find((s) => s.id === 'bob')!;
 		expect(bob.cid).toBe('bafybob');
 		// bob has NO same-named key -> no IPNS id.
 		expect(bob.ipns).toBeUndefined();
-		expect(bob.announced).toBe(false);
+		// The lookup ANSWERED and our peer was not in it: a real negative.
+		expect(bob.announced).toEqual({state: 'no'});
 		expect(bob.gatewayHttp).toBe(504);
-		expect(bob.gatewayServes).toBe(false);
+		// The gateway ANSWERED (504) and did not serve: also a real negative.
+		expect(bob.gatewayServes).toEqual({state: 'no'});
 	});
 
 	it('passes the site CID to the routing check and its gateway URL to the probe', async () => {
@@ -371,31 +382,12 @@ describe('status core — per-site four-field report shape', () => {
 				providersLookup: providers,
 				gatewayProbe: async () => code,
 			});
-			expect(report.sites.every((s) => s.gatewayServes === serves)).toBe(true);
+			expect(
+				report.sites.every(
+					(s) => s.gatewayServes.state === (serves ? 'yes' : 'no'),
+				),
+			).toBe(true);
 		}
-	});
-
-	it('an external check that THROWS is reported as a failed check, never thrown', async () => {
-		const mock = withDistinctCids(mockForStatus());
-		const client = clientWith(mock);
-		const report = await statusReport({
-			client,
-			providersLookup: async () => {
-				throw new Error('delegated-routing down');
-			},
-			gatewayProbe: async () => {
-				throw new Error('gateway down');
-			},
-		});
-		expect(report.sites).toHaveLength(2);
-		// A failed announce check is `announced=false` (not findable), not a throw.
-		expect(report.sites.every((s) => s.announced === false)).toBe(true);
-		// A failed gateway probe is `gatewayServes=false`, not a throw.
-		expect(report.sites.every((s) => s.gatewayServes === false)).toBe(true);
-		// alice.eth resolves an eth.limo name, so its probe failed too — reported.
-		expect(report.sites.find((s) => s.id === 'alice.eth')!.ethLimoServes).toBe(
-			false,
-		);
 	});
 
 	it('never hits the live network: only the injected checks + mock Kubo are used', async () => {
@@ -426,6 +418,198 @@ describe('status core — per-site four-field report shape', () => {
 	});
 });
 
+/**
+ * The rule this whole module is a worked example of (CONTEXT.md `## Conventions`):
+ * a check that could not RUN never reports a definitive negative. A live box
+ * reported `announced=false` for a site the delegated router WAS listing — the
+ * lookup had failed (rate limiting), and a failed lookup was indistinguishable
+ * from a real negative. All three external checks are three-valued now: yes /
+ * no / unknown-with-reason.
+ */
+describe('status core — a check that could NOT run reports unknown, never a negative', () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	/** The report over the two-site mock, with both checks supplied. */
+	async function reportWith(checks: {
+		providers?: ProvidersLookup;
+		gateway?: GatewayProbe;
+		peerId?: string;
+	}) {
+		const mock = withDistinctCids(mockForStatus());
+		if (checks.peerId !== undefined) {
+			mock.on('id', {json: {ID: checks.peerId}});
+		}
+		return statusReport({
+			client: clientWith(mock),
+			providersLookup: checks.providers ?? (async () => ({Providers: []})),
+			gatewayProbe: checks.gateway ?? (async () => 504),
+		});
+	}
+
+	it('reports UNKNOWN with the status code when the providers lookup answers non-2xx', async () => {
+		// A 429 is the EXPECTED rate-limit case: it says nothing about whether the
+		// router lists us, so it must never read as a red cross.
+		const report = await reportWith({
+			providers: async () => {
+				throw new CheckUnavailableError('http 429');
+			},
+		});
+		for (const site of report.sites) {
+			expect(site.announced).toEqual({state: 'unknown', reason: 'http 429'});
+		}
+	});
+
+	it('the DEFAULT lookup turns a non-2xx into a could-not-check, not an empty provider list', async () => {
+		// The bug at the root of the live-box report: `if (!res.ok) return
+		// {Providers: []}` made a 429 indistinguishable from "the router answered,
+		// you are not in it". The fetch is stubbed — no live network.
+		vi.stubGlobal(
+			'fetch',
+			async () => new Response('slow down', {status: 429}),
+		);
+		await expect(defaultProvidersLookup('bafyalice')).rejects.toBeInstanceOf(
+			CheckUnavailableError,
+		);
+		await expect(defaultProvidersLookup('bafyalice')).rejects.toMatchObject({
+			reason: 'http 429',
+		});
+	});
+
+	it('the DEFAULT lookup still parses a 2xx answer as the providers list', async () => {
+		vi.stubGlobal(
+			'fetch',
+			async () =>
+				new Response(JSON.stringify({Providers: [{ID: 'peer-self'}]}), {
+					status: 200,
+					headers: {'content-type': 'application/json'},
+				}),
+		);
+		await expect(defaultProvidersLookup('bafyalice')).resolves.toEqual({
+			Providers: [{ID: 'peer-self'}],
+		});
+	});
+
+	it('reports UNKNOWN when the providers lookup THROWS (network / DNS / parse)', async () => {
+		const report = await reportWith({
+			providers: async () => {
+				throw new Error('fetch failed');
+			},
+		});
+		for (const site of report.sites) {
+			expect(site.announced).toEqual({
+				state: 'unknown',
+				reason: 'fetch failed',
+			});
+		}
+	});
+
+	it('keeps the TRUE negative: a lookup that ANSWERS without our peer is `no`', async () => {
+		const report = await reportWith({
+			providers: async () => ({Providers: [{ID: 'peer-other'}]}),
+		});
+		for (const site of report.sites) {
+			expect(site.announced).toEqual({state: 'no'});
+		}
+	});
+
+	it('reports YES when the lookup CONTAINS our peer (the live box case)', async () => {
+		// The delegated router WAS listing this node (third of three providers);
+		// the report must say so.
+		const report = await reportWith({
+			providers: async () => ({
+				Providers: [{ID: 'peer-a'}, {ID: 'peer-b'}, {ID: 'peer-self'}],
+			}),
+		});
+		for (const site of report.sites) {
+			expect(site.announced).toEqual({state: 'yes'});
+		}
+	});
+
+	it('reports UNKNOWN when the node PeerID is unavailable (nothing to compare)', async () => {
+		let lookups = 0;
+		const report = await reportWith({
+			peerId: '',
+			providers: async () => {
+				lookups++;
+				return {Providers: [{ID: 'peer-self'}]};
+			},
+		});
+		expect(report.peerId).toBe('');
+		for (const site of report.sites) {
+			expect(site.announced).toEqual({
+				state: 'unknown',
+				reason: 'no peer id',
+			});
+		}
+		// We could not identify the node, so there was nothing to ask about.
+		expect(lookups).toBe(0);
+	});
+
+	it('separates a gateway that could not be PROBED from one that answered and did not serve', async () => {
+		const unreachable = await reportWith({
+			gateway: async () => {
+				throw new Error('gateway down');
+			},
+		});
+		for (const site of unreachable.sites) {
+			expect(site.gatewayServes).toEqual({
+				state: 'unknown',
+				reason: 'gateway down',
+			});
+			// No status: the probe never got an answer to record.
+			expect(site.gatewayHttp).toBeUndefined();
+		}
+		const answered = await reportWith({gateway: async () => 504});
+		for (const site of answered.sites) {
+			expect(site.gatewayServes).toEqual({state: 'no'});
+			expect(site.gatewayHttp).toBe(504);
+		}
+	});
+
+	it('keeps eth.limo NOT-APPLICABLE distinct from UNKNOWN (four states)', async () => {
+		const {sites} = await metadataReportProbed((url) => {
+			if (url === 'https://alice.eth.limo/')
+				throw new Error('eth.limo is down');
+			if (url.endsWith('.limo/')) return 504;
+			return 200;
+		});
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		// Probed, could not be reached -> unknown WITH a reason.
+		expect(byId('alice.eth').ethLimoServes).toEqual({
+			state: 'unknown',
+			reason: 'eth.limo is down',
+		});
+		// Probed, answered, did not serve -> a real no.
+		expect(byId('blog').ethLimoServes).toEqual({state: 'no'});
+		// NOTHING to probe (`""` opt-out / non-`.eth` id) -> absent, still.
+		expect(byId('optout.eth').ethLimoServes).toBeUndefined();
+		expect(byId('bob').ethLimoServes).toBeUndefined();
+	});
+
+	it('renders the FULL report when every external call fails, and throws nothing', async () => {
+		const report = await reportWith({
+			providers: async () => {
+				throw new Error('delegated-routing down');
+			},
+			gateway: async () => {
+				throw new Error('gateway down');
+			},
+		});
+		expect(report.sites).toHaveLength(2);
+		for (const site of report.sites) {
+			expect(site.cid).toBeTruthy();
+			expect(site.announced.state).toBe('unknown');
+			expect(site.gatewayServes.state).toBe('unknown');
+		}
+		// alice.eth resolves an eth.limo name, so that probe failed too — unknown,
+		// never a claim that eth.limo refused to serve.
+		const alice = report.sites.find((s) => s.id === 'alice.eth')!;
+		expect((alice.ethLimoServes as CheckOutcome).state).toBe('unknown');
+	});
+});
+
 describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 	it('produces a NodeOpResult carrying the four fields, injectable into node-commands', async () => {
 		const mock = withDistinctCids(mockForStatus());
@@ -448,8 +632,33 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect(alice.cid).toBe('bafyalice');
 		expect(alice.ipns).toBe('k51alice');
 		// The announce + gateway outcomes are carried on the outcome too.
-		expect(alice.announced).toBe(true);
-		expect(alice.gatewayServes).toBe(true);
+		expect(alice.announced).toEqual({state: 'yes'});
+		expect(alice.gatewayServes).toEqual({state: 'yes'});
+		// Both checks answered YES, so the site rolls up as verified.
+		expect(alice.status).toBe('ok');
+	});
+
+	it('rolls an UNKNOWN check up as unverified, never as ok and never as a failure', async () => {
+		const mock = withDistinctCids(mockForStatus());
+		const client = clientWith(mock);
+		const op = makeStatusOp({
+			// The announce check could not run; the gateway served.
+			providersLookup: async () => {
+				throw new CheckUnavailableError('http 429');
+			},
+			gatewayProbe: async () => 200,
+		});
+		const sites = await discoverSites(client, '/sites');
+		const result = await op(
+			{client, role: 'publisher', sitesDir: '/sites'},
+			sites,
+		);
+		for (const site of result.sites) {
+			// Not `ok` (we do not know), and the report still came back whole.
+			expect(site.status).toBe('unverified');
+			expect(site.announced).toEqual({state: 'unknown', reason: 'http 429'});
+			expect(site.gatewayServes).toEqual({state: 'yes'});
+		}
 	});
 
 	it('carries this node PeerID through, so the dashboard header needs no re-fetch', async () => {
@@ -488,8 +697,8 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect(byId('alice.eth').ensNameToWarm).toBe('alice.eth');
 		expect(byId('blog').ensName).toBe('named.eth');
 		// The eth.limo probe rides along on the same outcome (the JSON payload the
-		// dashboard reads): probed-and-cold is `false`...
-		expect(byId('alice.eth').ethLimoServes).toBe(false);
+		// dashboard reads): probed-and-cold is a real `no`...
+		expect(byId('alice.eth').ethLimoServes).toEqual({state: 'no'});
 		expect(byId('alice.eth').ethLimoHttp).toBe(504);
 		// ...while a site with nothing to probe carries no verdict at all.
 		expect(byId('bob').ethLimoServes).toBeUndefined();
@@ -503,6 +712,8 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		const optout = payload.find((s) => s['id'] === 'optout.eth')!;
 		expect(optout['ensName']).toBe('');
 		const bob = payload.find((s) => s['id'] === 'bob')!;
+		// The three-valued checks survive the JSON round trip, reason and all.
+		expect(bob['announced']).toEqual({state: 'no'});
 		expect('ensName' in bob).toBe(false);
 		expect('mode' in bob).toBe(false);
 		expect('ensNameToWarm' in bob).toBe(false);

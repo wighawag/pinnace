@@ -16,9 +16,15 @@
  * assets, and NO client-side JS (the data is baked in at render time). Its only
  * outbound URLs are the per-site public-gateway links.
  *
- * Its ONE import is {@link ensNameDisplay}, a sibling classifier that resolves
- * nothing (it only reads the two report fields this row already holds); the
- * view stays free of the report/warm cores it must not depend on.
+ * Its imports are two sibling LEAVES that resolve nothing — {@link ensNameDisplay}
+ * (which only reads the two report fields this row already holds) and the
+ * three-valued {@link ./check-outcome.js} vocabulary; the view stays free of the
+ * report/warm cores it must not depend on.
+ *
+ * HONESTY: a health cell shows THREE states, never two. A check that could not
+ * RUN renders as a NEUTRAL `unknown (<reason>)`, never as the red negative —
+ * the standing repo rule (`CONTEXT.md` `## Conventions`). An ABSENT verdict is
+ * read the same way: a report that carries no answer did not check.
  *
  * FRESHNESS: the page cannot push, so it pulls: a
  * `<meta http-equiv="refresh" content="<seconds>">` makes the browser
@@ -31,6 +37,7 @@
  * prominently so a viewer sees the real data age regardless of reload timing.
  */
 import {ensNameDisplay, type EnsNameDisplay} from './ens-name-display.js';
+import {checkState, type CheckOutcome} from './check-outcome.js';
 
 /**
  * How often the rendered page tells the browser to re-request it, in seconds.
@@ -88,18 +95,23 @@ export interface StatusPageSite {
 	ensNameToWarm?: string;
 	/**
 	 * Whether `https://<ensNameToWarm>.limo/` — the URL a HUMAN visits — served
-	 * when the report probed it. THREE-valued, and the third value is why this is
-	 * not just another indicator column: `true` served, `false` probed and did
-	 * not, ABSENT nothing was probed (the site resolves no name, or the report
-	 * came from a path that does no probing). An absent verdict renders as NO
-	 * verdict rather than `no`, so "nothing to probe" never looks like "eth.limo
-	 * is broken".
+	 * when the report probed it. FOUR display states, which is why this is not
+	 * just another indicator column: `yes` served, `no` it answered and did not,
+	 * `unknown` the probe could not be MADE (rendered neutrally, with its reason),
+	 * and ABSENT nothing was probed at all (the site resolves no name, or the
+	 * report came from a path that does no probing). An absent verdict renders as
+	 * NO verdict rather than `no`, so "nothing to probe" never looks like
+	 * "eth.limo is broken", and `unknown` keeps "could not check" apart from it.
 	 */
-	ethLimoServes?: boolean;
-	/** Whether the network announces this node for the CID. */
-	announced?: boolean;
-	/** Whether a cold public gateway served the CID. */
-	gatewayServes?: boolean;
+	ethLimoServes?: CheckOutcome;
+	/**
+	 * Whether the network announces this node for the CID: `yes`/`no`/`unknown`
+	 * with its reason. Absent means the report ran no such check, which renders
+	 * as `unknown` too — never as a negative.
+	 */
+	announced?: CheckOutcome;
+	/** Whether a cold public gateway served the CID (same three states). */
+	gatewayServes?: CheckOutcome;
 }
 
 /**
@@ -254,9 +266,27 @@ function gatewayLink(label: string, href: string): string {
 	return `<a href="${escapeHtml(href)}"><code>${escapeHtml(label)}</code></a>`;
 }
 
-/** An `ok` / `no` health cell (an absent check renders as `no`, never blank). */
-function indicator(value: boolean | undefined): string {
-	return value ? '<span class="ok">ok</span>' : '<span class="no">no</span>';
+/**
+ * A health cell, in THREE states: `ok` (green), `no` (red — the check RAN and
+ * answered no) and a NEUTRAL `unknown (<reason>)` for a check that could not
+ * run. An ABSENT verdict renders as `unknown` too: a report that carries no
+ * answer did not check, and the red cross would claim a negative nobody
+ * measured (the live-box bug: a rate-limited providers lookup painted `no` for
+ * a site the router WAS listing).
+ */
+function indicator(outcome: CheckOutcome | undefined): string {
+	switch (checkState(outcome)) {
+		case 'yes':
+			return '<span class="ok">ok</span>';
+		case 'no':
+			return '<span class="no">no</span>';
+		case 'unknown': {
+			// The reason is report-supplied, so it is escaped like every other string.
+			const reason =
+				outcome?.state === 'unknown' ? ` (${escapeHtml(outcome.reason)})` : '';
+			return `<span class="unknown">unknown${reason}</span>`;
+		}
+	}
 }
 
 /**
@@ -293,4 +323,4 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 	code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
 	.ok { color: #157f3d; font-weight: 600; }
 	.no { color: #b3261e; font-weight: 600; }
-	.none, .empty, .inferred { color: #666; }`;
+	.none, .empty, .inferred, .unknown { color: #666; }`;

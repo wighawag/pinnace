@@ -105,6 +105,7 @@ import {
 	type StatusReportInput,
 	type StatusReport,
 } from '../status/status-report.js';
+import type {CheckOutcome} from '../status/check-outcome.js';
 import {
 	deriveIpnsId as coreDeriveIpnsId,
 	type DeriveIpnsInput,
@@ -839,7 +840,8 @@ async function runStatus(
 					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site)}` +
 					` eth.limo ${site.ensNameToWarm ? `${site.ensNameToWarm}.limo` : 'none'}` +
 					` ethLimoServes=${printedEthLimoServes(site.ethLimoServes)}` +
-					` announced=${site.announced} gatewayServes=${site.gatewayServes}`,
+					` announced=${printedCheck(site.announced)}` +
+					` gatewayServes=${printedCheck(site.gatewayServes)}`,
 			);
 		}
 	}
@@ -874,14 +876,30 @@ function printedEnsName(site: EnsNameDisplayInput): string {
 }
 
 /**
- * How `status` PRINTS the eth.limo probe verdict, keeping its THREE values
- * apart: `true`/`false` for a URL that was probed, and `n/a` for a site that
- * resolves no ENS name and therefore has no `<name>.limo` to probe. Printing
- * `false` there would report an outage that does not exist (an `ensName: ""`
- * opt-out is a choice, not a failure).
+ * How `status` PRINTS an external check's verdict, keeping its THREE states
+ * apart: a check that RAN keeps the `true`/`false` tokens the line always had,
+ * while a check that could NOT run prints `unknown (<reason>)` — an HTTP status
+ * or a short error kind. Printing `false` for a check that never ran is the
+ * confident negative this repo's convention forbids: a rate-limited providers
+ * lookup once made a live box report `announced=false` for a site the router
+ * was listing.
  */
-function printedEthLimoServes(serves: boolean | undefined): string {
-	return serves === undefined ? 'n/a' : String(serves);
+function printedCheck(outcome: CheckOutcome): string {
+	return outcome.state === 'unknown'
+		? `unknown (${outcome.reason})`
+		: String(outcome.state === 'yes');
+}
+
+/**
+ * How `status` PRINTS the eth.limo probe verdict: the three {@link printedCheck}
+ * states plus `n/a` for a site that resolves no ENS name and therefore has no
+ * `<name>.limo` to probe. "Nothing to check" (`n/a`) and "could not check"
+ * (`unknown`) are different answers, and neither may print `false`: an
+ * `ensName: ""` opt-out is a choice, and an eth.limo outage is not eth.limo
+ * refusing to serve.
+ */
+function printedEthLimoServes(serves: CheckOutcome | undefined): string {
+	return serves === undefined ? 'n/a' : printedCheck(serves);
 }
 
 /**

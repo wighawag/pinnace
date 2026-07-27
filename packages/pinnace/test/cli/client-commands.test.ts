@@ -6,6 +6,7 @@ import {
 	DeployPublisherRequiredError,
 } from '../../src/deploy/deploy.js';
 import type {PinnaceConfigFile} from '../../src/config/config-resolution.js';
+import {checkAnswer, checkUnknown} from '../../src/status/check-outcome.js';
 
 /**
  * These tests prove the CLIENT-facing verbs (provision, deploy, install-ci,
@@ -669,17 +670,17 @@ describe('status — dispatches to core statusReport per site', () => {
 					ipns: 'k51alice',
 					mode: 'ipns',
 					ensNameToWarm: 'alice.eth',
-					announced: true,
-					gatewayServes: true,
-					ethLimoServes: true,
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+					ethLimoServes: checkAnswer(true),
 				},
 				{
 					id: 'optout.eth',
 					cid: 'bafyoptout',
 					mode: 'ipfs',
 					ensName: '',
-					announced: false,
-					gatewayServes: false,
+					announced: checkAnswer(false),
+					gatewayServes: checkAnswer(false),
 				},
 			],
 		});
@@ -703,16 +704,29 @@ describe('status — dispatches to core statusReport per site', () => {
 			sites: [
 				// ensName ABSENT but RESOLVED from the `.eth` id: the broken case —
 				// it printed `unset` right beside a working ronan.eth.limo link.
-				{id: 'ronan.eth', cid: 'bafyronan', ensNameToWarm: 'ronan.eth'},
+				{
+					id: 'ronan.eth',
+					cid: 'bafyronan',
+					ensNameToWarm: 'ronan.eth',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
 				// A STORED name prints as itself, with no inferred marker.
 				{
 					id: 'stored',
 					cid: 'bafystored',
 					ensName: 'named.eth',
 					ensNameToWarm: 'named.eth',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
 				},
 				// Nothing stored AND nothing resolved: genuinely unset.
-				{id: 'blog', cid: 'bafyblog'},
+				{
+					id: 'blog',
+					cid: 'bafyblog',
+					announced: checkAnswer(false),
+					gatewayServes: checkAnswer(false),
+				},
 			],
 		});
 		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
@@ -735,28 +749,28 @@ describe('status — dispatches to core statusReport per site', () => {
 					cid: 'bafyalice',
 					mode: 'ipns',
 					ensNameToWarm: 'alice.eth',
-					announced: true,
-					gatewayServes: true,
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
 					ethLimoHttp: 200,
-					ethLimoServes: true,
+					ethLimoServes: checkAnswer(true),
 				},
 				{
 					id: 'cold.eth',
 					cid: 'bafycold',
 					mode: 'ipns',
 					ensNameToWarm: 'cold.eth',
-					announced: true,
-					gatewayServes: true,
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
 					ethLimoHttp: 504,
-					ethLimoServes: false,
+					ethLimoServes: checkAnswer(false),
 				},
 				{
 					id: 'optout.eth',
 					cid: 'bafyoptout',
 					mode: 'ipfs',
 					ensName: '',
-					announced: true,
-					gatewayServes: true,
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
 				},
 			],
 		});
@@ -775,6 +789,47 @@ describe('status — dispatches to core statusReport per site', () => {
 		expect(lineFor('optout.eth')).toContain('eth.limo none ethLimoServes=n/a');
 		// The CID-side columns are unchanged.
 		expect(lineFor('cold.eth')).toContain('announced=true gatewayServes=true');
+	});
+
+	it('prints a check that could NOT run as unknown WITH its reason, never false', async () => {
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				{
+					// The live-box case: the providers lookup was rate-limited, so the
+					// line must not claim the site is not announced.
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					announced: checkUnknown('http 429'),
+					gatewayServes: checkUnknown('fetch failed'),
+					ethLimoServes: checkUnknown('fetch failed'),
+				},
+				{
+					// A real negative still prints as one.
+					id: 'bob',
+					cid: 'bafybob',
+					mode: 'ipfs',
+					announced: checkAnswer(false),
+					gatewayServes: checkAnswer(false),
+				},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const lines = out.join('\n').split('\n');
+		const lineFor = (id: string) => lines.find((l) => l.includes(`${id}:`))!;
+		expect(lineFor('alice.eth')).toContain(
+			'announced=unknown (http 429) gatewayServes=unknown (fetch failed)',
+		);
+		expect(lineFor('alice.eth')).toContain(
+			'ethLimoServes=unknown (fetch failed)',
+		);
+		expect(lineFor('alice.eth')).not.toContain('=false');
+		// The true negative survives untouched.
+		expect(lineFor('bob')).toContain('announced=false gatewayServes=false');
 	});
 });
 
