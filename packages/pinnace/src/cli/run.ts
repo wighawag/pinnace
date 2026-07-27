@@ -25,7 +25,7 @@
  * the site / authorize core.
  */
 import {readFileSync} from 'node:fs';
-import {name} from '../index.js';
+import {name, PINNACE_VERSION} from '../index.js';
 import {
 	NODE_VERBS,
 	runNodeCommand as coreRunNodeCommand,
@@ -368,7 +368,11 @@ export async function run(
 		const {flags} = parseArgs(rest);
 		if (!refuseUnknownFlags('pinnace version', flags, VERB_FLAGS.version, rc))
 			return 1;
-		rc.out(name());
+		// The version ALONE (not `pinnace <version>`): the output is meant to be
+		// usable as `$(pinnace version)` in a script, and nothing parses the old
+		// package-NAME output (it was unfinished scaffolding).
+		// See work/notes/observations/derive-version-from-package-decisions.md.
+		rc.out(PINNACE_VERSION);
 		return 0;
 	}
 	if (command === 'node') {
@@ -559,8 +563,10 @@ function parseArgs(
  * --role <r> [--pinnace-version <v>] [--node-major <n>] [--kubo-version <v>]
  * [...]` -> core {@link ClientDeps.provision}. Purely arg-driven (provisioning
  * inputs are per-box and not stored in `pinnace.json`); prints the generated
- * cloud-init to stdout. The pinned pinnace/Node/Kubo versions default to the
- * generator's named knobs and are overridable per-box via these flags.
+ * cloud-init to stdout. The pinned Node/Kubo versions default to the
+ * generator's named knobs and the pinned `pinnace` agent defaults to the
+ * version of THIS CLI (so a box installs the agent matching its generator);
+ * all three are overridable per-box via these flags.
  */
 function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags} = parseArgs(argv);

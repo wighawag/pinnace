@@ -1,5 +1,5 @@
 import {describe, it, expect} from 'vitest';
-import {name, PINNACE} from '../src/index.js';
+import {name, PINNACE, PINNACE_VERSION} from '../src/index.js';
 import {run, type ClientDeps, type RunContext} from '../src/cli/run.js';
 import type {PinnaceConfigFile} from '../src/config/config-resolution.js';
 
@@ -39,12 +39,21 @@ describe('pinnace core', () => {
 		expect(name()).toEqual('pinnace');
 		expect(PINNACE).toEqual('pinnace');
 	});
+
+	it('exposes the package VERSION as a separate fact from the name', () => {
+		// One source of truth, re-exported from the core (test/version.test.ts
+		// ties it to package.json and proves it resolves from dist too).
+		expect(PINNACE_VERSION).not.toEqual(PINNACE);
+		expect(PINNACE_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+	});
 });
 
 describe('pinnace cli seam', () => {
-	it('dispatches `version` through to the core name (thin-wrapper seam)', async () => {
-		const code = await run(['version']);
+	it('dispatches `version` through to the core version (thin-wrapper seam)', async () => {
+		const lines: string[] = [];
+		const code = await run(['version'], {out: (line) => lines.push(line)});
 		expect(code).toEqual(0);
+		expect(lines).toEqual([PINNACE_VERSION]);
 	});
 
 	it('routes the on-box `node <verb>` namespace and accepts the four verbs', async () => {

@@ -5,6 +5,7 @@ import {
 	HOST_PROVIDERS,
 	type ProvisionInput,
 } from '../../src/provision/cloud-init.js';
+import {PINNACE_VERSION} from '../../src/version.js';
 
 /**
  * The cloud-init generator is a PURE function of its input (no filesystem, no
@@ -20,6 +21,17 @@ import {
  * host later without touching them).
  */
 
+/**
+ * A FIXED FAKE agent pin, injected by every test whose output is asserted or
+ * snapshotted. The DEFAULT pin is now DERIVED from the package version, so
+ * baking the real one into a snapshot would turn every changesets bump into a
+ * red suite on main (trading a once-per-release manual edit for a
+ * once-per-release build break). The default is asserted separately, by
+ * comparing against the shared source ({@link PINNACE_VERSION}), never a
+ * literal.
+ */
+const FAKE_PINNACE_VERSION = '9.9.9';
+
 /** A representative publisher box config: the common case. */
 function baseInput(overrides: Partial<ProvisionInput> = {}): ProvisionInput {
 	return {
@@ -29,8 +41,17 @@ function baseInput(overrides: Partial<ProvisionInput> = {}): ProvisionInput {
 		acmeEmail: 'you@example.com',
 		bearerToken: 'a-long-random-secret',
 		role: 'publisher',
+		pinnaceVersion: FAKE_PINNACE_VERSION,
 		...overrides,
 	};
+}
+
+/** The same config with NO pin stated, so the DERIVED default is exercised. */
+function inputWithoutPin(
+	overrides: Partial<ProvisionInput> = {},
+): ProvisionInput {
+	const {pinnaceVersion: _stated, ...rest} = baseInput(overrides);
+	return rest;
 }
 
 describe('provision: HostProvider seam', () => {
@@ -162,22 +183,41 @@ describe('provision: pinnace install + role-gated timers (NOT bash)', () => {
 	});
 
 	it('installs a PINNED pinnace version (never floating latest) via a named env knob', () => {
-		const {contents} = provision(baseInput()).cloudInit;
+		const {contents} = provision(inputWithoutPin()).cloudInit;
 		// The pinned version is exposed as a named env value, not a literal in the
-		// install line, so a release bump is one obvious edit.
-		expect(contents).toMatch(/PINNACE_VERSION="\d+\.\d+\.\d+"/);
+		// install line.
+		expect(contents).toMatch(/PINNACE_VERSION="\d+\.\d+\.\d+[^"]*"/);
 		// The install line references the pin, NOT a bare floating `pinnace`.
 		expect(contents).toContain('npm install -g "pinnace@${PINNACE_VERSION}"');
 		expect(contents).not.toMatch(/npm install -g pinnace\s*$/m);
-		// Default pin is the current published release.
-		expect(contents).toContain('PINNACE_VERSION="0.10.0"');
+		// EXACT, never a floating tag or a range.
+		expect(contents).not.toMatch(/PINNACE_VERSION="(?:latest|[\^~*])/);
+	});
+
+	it('DERIVES the default pin from the CLI own version (no hand-edited literal)', () => {
+		// The box must install the agent matching the CLI that emitted its
+		// cloud-init. Asserted by comparison against the shared source of truth,
+		// NOT a literal: a changesets bump must never redden this suite (that is
+		// the drift this task closes, see
+		// work/notes/observations/cloud-init-version-pin-trails-the-release.md).
+		const {contents} = provision(inputWithoutPin()).cloudInit;
+		expect(contents).toContain(`PINNACE_VERSION="${PINNACE_VERSION}"`);
+	});
+
+	it('is REPRODUCIBLE for a given build: the derived pin does not vary per call', () => {
+		const a = provision(inputWithoutPin()).cloudInit.contents;
+		const b = provision(inputWithoutPin()).cloudInit.contents;
+		expect(a).toBe(b);
 	});
 
 	it('lets a box pin a different pinnace version (overridable provision input)', () => {
+		// The per-box override still wins over the derived default: a box can be
+		// rolled onto another agent version without rebuilding the CLI.
 		const {contents} = provision(
-			baseInput({pinnaceVersion: '9.9.9'}),
+			baseInput({pinnaceVersion: '1.2.3-rc.4'}),
 		).cloudInit;
-		expect(contents).toContain('PINNACE_VERSION="9.9.9"');
+		expect(contents).toContain('PINNACE_VERSION="1.2.3-rc.4"');
+		expect(contents).not.toContain(`PINNACE_VERSION="${PINNACE_VERSION}"`);
 	});
 
 	it('installs Node via a current LTS major as a named knob (not the stale setup_20.x literal)', () => {
@@ -294,6 +334,9 @@ describe('provision: full cloud-init snapshot (publisher)', () => {
 				acmeEmail: 'you@example.com',
 				bearerToken: 'CHANGE_ME_TO_A_LONG_RANDOM_SECRET',
 				role: 'publisher',
+				// Explicit FAKE pin: the snapshot must never bake the real package
+				// version (a bump would redden it on main).
+				pinnaceVersion: FAKE_PINNACE_VERSION,
 				gateways: [
 					'https://{cid}.ipfs.dweb.link/',
 					'https://ipfs.io/ipfs/{cid}',

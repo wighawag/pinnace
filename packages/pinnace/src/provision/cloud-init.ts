@@ -43,9 +43,10 @@
  *    operator's bearer header straight through to the token-guarded Kubo API.
  *
  * INSTALL CHANNEL + BOOT-SAFETY (task `cloud-init-pinnace-install-channel`):
- *  - The box installs a PINNED `pinnace` ({@link DEFAULT_PINNACE_VERSION}) on a
- *    named current Node LTS ({@link DEFAULT_NODE_MAJOR}), both overridable per
- *    box. Pinned (never floating `latest`) so a boot is reproducible.
+ *  - The box installs a PINNED `pinnace` (the version of the CLI that GENERATED
+ *    this cloud-init, {@link PINNACE_VERSION}) on a named current Node LTS
+ *    ({@link DEFAULT_NODE_MAJOR}), both overridable per box. Pinned (never
+ *    floating `latest`) so a boot is reproducible.
  *  - The install is BOOT-SAFE: `pinnace-setup.sh` is invoked with `|| true`, so
  *    a transient npm/registry failure can NOT abort the boot. Kubo, the
  *    firewall and Caddy come up regardless of the agent install.
@@ -55,6 +56,7 @@
  *    work/notes/observations/cloud-init-first-boot-ipfs-user-race-and-set-e-abort.md).
  */
 import type {HostRole} from '../config/config-resolution.js';
+import {PINNACE_VERSION} from '../version.js';
 
 /** The hosts pinnace can provision for. v1 = Hetzner ONLY. */
 export type HostName = 'hetzner';
@@ -109,8 +111,9 @@ export interface ProvisionInput {
 	kuboVersion?: string;
 	/**
 	 * The `pinnace` version to install on the box (`npm install -g
-	 * pinnace@<this>`). Defaults to {@link DEFAULT_PINNACE_VERSION} (the current
-	 * published release). PINNED, never floating `latest`, so a box boot is
+	 * pinnace@<this>`). Defaults to {@link PINNACE_VERSION}: the version of the
+	 * CLI that generated this cloud-init, so a box runs the agent that matches
+	 * its generator. PINNED, never floating `latest`, so a box boot is
 	 * reproducible. Overridable per-box (e.g. to roll a box onto a newer agent).
 	 */
 	pinnaceVersion?: string;
@@ -156,15 +159,13 @@ export interface HostProvider {
 
 /** Defaults kept in one place so the template + docs never drift. */
 const DEFAULT_KUBO_VERSION = 'v0.38.1';
-/**
- * The pinned `pinnace` version the box installs (`npm install -g
- * pinnace@<this>`). Mirrors {@link DEFAULT_KUBO_VERSION}: a NAMED knob, not a
- * literal, so a release bump is one obvious edit here. PINNED (never floating
- * `latest`) so a box boot is reproducible: the same cloud-init always installs
- * the same agent. Overridable per-box via {@link ProvisionInput.pinnaceVersion}.
- * `pinnace@0.1.0` is the first published release (npm, public, OIDC provenance).
- */
-const DEFAULT_PINNACE_VERSION = '0.10.0';
+// NOTE: there is deliberately no `DEFAULT_PINNACE_VERSION` literal mirroring
+// DEFAULT_KUBO_VERSION. Kubo's version is an EXTERNAL dependency a human
+// chooses; the AGENT's version is OUR OWN, so it is DERIVED from the package
+// (PINNACE_VERSION) rather than hand-typed. The literal had to be predicted and
+// edited before every Version PR, and drifted when that was missed (`0.8.0`
+// shipped pinning `0.7.0`). The pin stays exact and reproducible (a given build
+// is one version) and per-box overridable via ProvisionInput.pinnaceVersion.
 /**
  * The pinned Node.js major the box installs via NodeSource (`setup_<this>.x`).
  * Node 22 is a current active LTS; Node 20 (the old literal) is the OLDEST LTS
@@ -286,7 +287,7 @@ function renderHetznerCloudInit(input: ProvisionInput): string {
 		input.role === 'replica' ? (input.publisherEndpoint ?? '') : '';
 	const gateways = input.gateways ?? DEFAULT_GATEWAYS;
 	const kuboVersion = input.kuboVersion ?? DEFAULT_KUBO_VERSION;
-	const pinnaceVersion = input.pinnaceVersion ?? DEFAULT_PINNACE_VERSION;
+	const pinnaceVersion = input.pinnaceVersion ?? PINNACE_VERSION;
 	const nodeMajor = input.nodeMajor ?? DEFAULT_NODE_MAJOR;
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
 	const warmGateways = gateways.join(' ');

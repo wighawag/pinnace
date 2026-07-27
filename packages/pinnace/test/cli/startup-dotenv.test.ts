@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {main} from '../../src/cli/startup.js';
 import {run, type ClientDeps, type RunContext} from '../../src/cli/run.js';
 import {resolveMasterSecret} from '../../src/config/config-resolution.js';
+import {PINNACE_VERSION} from '../../src/version.js';
 
 /**
  * These tests cover the CLI STARTUP shim ({@link main}): it loads the cwd's
@@ -157,7 +158,9 @@ describe('CLI startup shim — loads cwd .env/.env.local into process.env before
 			console.log = originalLog;
 		}
 		expect(events[0]).toBe('loadEnv');
-		expect(events).toContain('run:pinnace');
+		// `version` prints the resolved version; compared against the shared source
+		// of truth so a package bump never reddens this ordering test.
+		expect(events).toContain(`run:${PINNACE_VERSION}`);
 	});
 
 	it('keeps run() hermetic: an injected env is used verbatim, no real .env read', async () => {

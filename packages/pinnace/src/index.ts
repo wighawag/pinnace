@@ -16,6 +16,13 @@ export function name(): string {
 	return PINNACE;
 }
 
+/**
+ * The package's ONE version source of truth (read from its own `package.json`).
+ * The `version` verb prints it and the cloud-init agent pin defaults to it, so
+ * a provisioned box installs the agent matching the CLI that generated it.
+ */
+export {PINNACE_VERSION} from './version.js';
+
 export {
 	KuboRpcClient,
 	KuboRpcError,
