@@ -46,6 +46,10 @@ import {
 	mirrorAndReannounce,
 } from '../publisher/record-sequence.js';
 import type {CheckOutcome} from '../status/check-outcome.js';
+import type {
+	EthLimoFreshness,
+	EthLimoOrigin,
+} from '../status/ethlimo-resolution.js';
 import {
 	ethLimoUrl,
 	readSiteMetadata,
@@ -162,6 +166,20 @@ export interface SiteOutcome {
 	ethLimoServes?: CheckOutcome;
 	/** `status`-verb only: the raw HTTP status the eth.limo probe answered with. */
 	ethLimoHttp?: number;
+	/**
+	 * `status`-verb only: is the ENS name resolving through THIS site's identity,
+	 * or through another name/cid? ({@link EthLimoOrigin}.) ABSENT means the site
+	 * resolves no ENS name, so nothing was asked — distinct from `unknown`, which
+	 * means the question could not be answered.
+	 */
+	ethLimoOrigin?: EthLimoOrigin;
+	/**
+	 * `status`-verb only: is the root eth.limo served this site's CURRENT cid?
+	 * ({@link EthLimoFreshness}.) `stale` is an attention state, not a failure:
+	 * gateway/IPNS lag shortly after a deploy is normal. Both axes observe what
+	 * eth.limo resolved through its own cache, never the ENS record itself.
+	 */
+	ethLimoFreshness?: EthLimoFreshness;
 	/**
 	 * `warm`-verb only: whether the site's eth.limo warm SUCCEEDED. A boolean,
 	 * unlike {@link ethLimoServes}: warming is an ACTION, not a check — a warm

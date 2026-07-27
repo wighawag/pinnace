@@ -203,10 +203,19 @@ export {
 	checkUnknown,
 	checkState,
 	isYes,
+	shortReason,
 	unavailableReason,
 	type CheckOutcome,
 	type CheckState,
 } from './status/check-outcome.js';
+export {
+	classifyEthLimoResolution,
+	unknownEthLimoResolution,
+	type EthLimoOrigin,
+	type EthLimoFreshness,
+	type EthLimoResolution,
+	type EthLimoResolutionInput,
+} from './status/ethlimo-resolution.js';
 export {
 	statusReport,
 	makeStatusOp,
@@ -219,6 +228,7 @@ export {
 	type ProvidersLookup,
 	type ProvidersResponse,
 	type GatewayProbe,
+	type GatewayProbeResult,
 } from './status/status-report.js';
 export {
 	renderStatusHtml,

@@ -791,6 +791,95 @@ describe('status — dispatches to core statusReport per site', () => {
 		expect(lineFor('cold.eth')).toContain('announced=true gatewayServes=true');
 	});
 
+	it('prints the eth.limo ORIGIN and FRESHNESS axes, naming what is wrong', async () => {
+		const source =
+			'k51qzi5uqu5dlu1ien9spji7pu49mfw97mn0qv4azugqcvenj0dvzq9bgwp1zc';
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				{
+					// The live box: serving, serving OUR cid, through SOMEONE ELSE's name.
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'foreign', path: `/ipns/${source}`},
+					ethLimoFreshness: {state: 'current'},
+				},
+				{
+					// A gateway lagging a fresh deploy: normal, and named.
+					id: 'lagging.eth',
+					cid: 'bafynew',
+					mode: 'ipns',
+					ensNameToWarm: 'lagging.eth',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'ours'},
+					ethLimoFreshness: {state: 'stale', servedCid: 'bafyold'},
+				},
+				{
+					// Could not ask (no header): unknown WITH the reason, never a `no`.
+					id: 'quiet.eth',
+					cid: 'bafyquiet',
+					mode: 'ipns',
+					ensNameToWarm: 'quiet.eth',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {
+						state: 'unknown',
+						reason: 'no x-ipfs-path header',
+					},
+					ethLimoFreshness: {
+						state: 'unknown',
+						reason: 'no x-ipfs-roots header',
+					},
+				},
+				{
+					// No ENS name at all: nothing was asked on either axis.
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					mode: 'ipfs',
+					ensName: '',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const lines = out.join('\n').split('\n');
+		const lineFor = (id: string) => lines.find((l) => l.includes(`${id}:`))!;
+		// The mismatch NAMES the name to fix, right beside the (green) probe.
+		expect(lineFor('alice.eth')).toContain(
+			`ethLimoOrigin=foreign (/ipns/${source}) ethLimoFreshness=current`,
+		);
+		// Lag is reported, with the cid actually being served.
+		expect(lineFor('lagging.eth')).toContain(
+			'ethLimoOrigin=ours ethLimoFreshness=stale (bafyold)',
+		);
+		// Could not ask -> unknown with the reason, on both axes.
+		expect(lineFor('quiet.eth')).toContain(
+			'ethLimoOrigin=unknown (no x-ipfs-path header)',
+		);
+		expect(lineFor('quiet.eth')).toContain(
+			'ethLimoFreshness=unknown (no x-ipfs-roots header)',
+		);
+		// Nothing to ask -> n/a, distinct from unknown and never a negative.
+		expect(lineFor('optout.eth')).toContain(
+			'ethLimoOrigin=n/a ethLimoFreshness=n/a',
+		);
+		// The CID-side columns are untouched by any of it.
+		for (const id of ['alice.eth', 'lagging.eth', 'optout.eth']) {
+			expect(lineFor(id)).toContain('announced=true gatewayServes=true');
+		}
+	});
+
 	it('prints a check that could NOT run as unknown WITH its reason, never false', async () => {
 		const {deps} = recordingDeps();
 		deps.statusReport = async () => ({

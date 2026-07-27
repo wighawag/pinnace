@@ -18,10 +18,22 @@
  *                           serve? Probed only for a site that RESOLVES an ENS
  *                           name; a site that resolves none has nothing to
  *                           probe and reports NOT APPLICABLE, never a failure.
+ *   6. eth.limo ORIGIN +  — and is what it serves OURS, and CURRENT? Read from
+ *      FRESHNESS            that same probe's `x-ipfs-path` / `x-ipfs-roots`
+ *                           headers ({@link ./ethlimo-resolution.js}), because
+ *                           "it responds" was green on a live box whose ENS
+ *                           pointed at somebody else's name entirely.
  *
  * Each of (3), (4) and (5) answers in THREE values — yes / no / unknown-with-a-
  * reason ({@link ./check-outcome.js}) — because a check that could not RUN must
- * never report a definitive negative (see the closing note below).
+ * never report a definitive negative (see the closing note below). (6) is two
+ * INDEPENDENT axes with their own small vocabularies, on the same principle.
+ *
+ * What (6) does NOT do: it does not read the ENS record. It observes what
+ * eth.limo RESOLVED AND SERVED through its own cache, so it cannot tell a wrong
+ * contenthash from a stale gateway cache — see the honesty note in
+ * {@link ./ethlimo-resolution.js}, which every operator-facing wording of these
+ * two axes must respect.
  *
  * It ALSO reports what the site's MFS **metadata** says about itself — its
  * stored `mode` and `ensName`, plus the eth.limo name the on-box `warm` rule
@@ -71,6 +83,13 @@ import {
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
 import type {NodeCommandContext, NodeOpResult} from '../node/node-commands.js';
 import type {SiteMode} from '../config/config-resolution.js';
+import {
+	classifyEthLimoResolution,
+	unknownEthLimoResolution,
+	type EthLimoFreshness,
+	type EthLimoOrigin,
+	type EthLimoResolution,
+} from './ethlimo-resolution.js';
 import {ethLimoUrl, resolveEnsNameToWarm} from '../site/site-wrapper.js';
 
 /** The delegated-routing providers endpoint (path takes the CID). */
@@ -104,21 +123,42 @@ export interface ProvidersResponse {
 export type ProvidersLookup = (cid: string) => Promise<ProvidersResponse>;
 
 /**
- * An injectable cold-gateway probe: given a full URL, return the HTTP status
- * that gateway responds with (a 2xx/206 means it served). Tests inject a fake;
- * production uses {@link defaultGatewayProbe}. A RETURNED non-2xx is the
- * gateway answering that it did not serve (a real negative); THROWING means the
- * probe could not be made at all, which is reported as `unknown` and never
- * propagated.
+ * What ONE gateway probe answered: the HTTP status, plus the response headers
+ * it came with. The headers are part of the SAME answer (an IPFS gateway states
+ * what it resolved and what it served in `x-ipfs-path` / `x-ipfs-roots`), so
+ * they ride on the one result object rather than justifying a second probe.
+ */
+export interface GatewayProbeResult {
+	/** The HTTP status the gateway answered with (a 2xx/206 means it served). */
+	status: number;
+	/**
+	 * The response headers, keyed by header name. `fetch` yields them LOWER-CASE
+	 * and {@link defaultGatewayProbe} passes them through as such; readers look
+	 * them up case-insensitively anyway. Absent from a fake that has nothing to
+	 * say about headers, which reads as "no such header" — an `unknown` on the
+	 * axes that need them, never a negative.
+	 */
+	headers?: Readonly<Record<string, string>>;
+}
+
+/**
+ * An injectable cold-gateway probe: given a full URL, return what that gateway
+ * answered ({@link GatewayProbeResult}: the status, and the headers it came
+ * with). Tests inject a fake; production uses {@link defaultGatewayProbe}. A
+ * RETURNED non-2xx is the gateway answering that it did not serve (a real
+ * negative); THROWING means the probe could not be made at all, which is
+ * reported as `unknown` and never propagated.
  *
  * It takes a URL rather than a CID because there are TWO things worth probing —
  * the CID's public gateway ({@link cidGatewayUrl}) and the site's eth.limo name
  * ({@link ../site/site-wrapper.js#ethLimoUrl}) — and ONE probe seam is the whole
  * point: a second probe type would be a second thing to inject, fake and keep
- * honest. The URL is built by this module (the only place a gateway host is
- * named), so the probe stays a dumb `url -> status` HTTP call.
+ * honest. That is also why the ORIGIN/FRESHNESS axes widened THIS result rather
+ * than adding a header-reading probe beside it. The URL is built by this module
+ * (the only place a gateway host is named), so the probe stays a dumb
+ * `url -> answer` HTTP call that interprets nothing.
  */
-export type GatewayProbe = (url: string) => Promise<number>;
+export type GatewayProbe = (url: string) => Promise<GatewayProbeResult>;
 
 /** The cold-gateway URL for a CID: `https://<cid>.ipfs.dweb.link/`. */
 export function cidGatewayUrl(cid: string): string {
@@ -203,6 +243,27 @@ export interface SiteStatus {
 	 * carries no key for a site with nothing to probe.
 	 */
 	ethLimoServes?: CheckOutcome;
+	/**
+	 * Does the ENS name resolve through THIS site's identity — or is eth.limo
+	 * serving through some OTHER name/cid? ({@link EthLimoOrigin}: `ours`,
+	 * `foreign` naming what it points at, `frozen` for an immutable ENS
+	 * contenthash under a name-publishing site, `unknown` with a reason.) ABSENT
+	 * means NOT APPLICABLE — the site resolves no ENS name, so there was nothing
+	 * to ask — exactly as {@link ethLimoServes} uses absence.
+	 *
+	 * Read from the probe's `x-ipfs-path` header: this is what eth.limo RESOLVED,
+	 * through its cache, NOT a read of the ENS record.
+	 */
+	ethLimoOrigin?: EthLimoOrigin;
+	/**
+	 * Is the root eth.limo served this site's CURRENT cid?
+	 * ({@link EthLimoFreshness}: `current`, `stale` naming the served cid,
+	 * `unknown` with a reason; ABSENT = not applicable.) INDEPENDENT of
+	 * {@link ethLimoOrigin} — the live regression is a foreign origin serving a
+	 * current cid — and `stale` is an ATTENTION state, not a fault: post-deploy
+	 * propagation/cache lag is normal.
+	 */
+	ethLimoFreshness?: EthLimoFreshness;
 }
 
 /** The full status report: this node's PeerID plus a per-site status line. */
@@ -239,8 +300,10 @@ export interface StatusReportInput {
 
 /**
  * Build the per-site status report. Discovers sites (unless supplied), reads
- * this node's PeerID and its keystore once, then for each site runs the two
- * external checks (through the injected/default fakes) to fill the four fields.
+ * this node's PeerID and its keystore once, then for each site runs the three
+ * external checks (through the injected/default implementations) to fill the
+ * report fields — including the two eth.limo resolution axes, which read the
+ * headers the eth.limo probe already answered with rather than probing again.
  * A failed external check is recorded as `unknown` (with its reason), never as
  * a negative and never thrown.
  */
@@ -267,6 +330,18 @@ export async function statusReport(
 			ensNameToWarm === undefined
 				? undefined
 				: await probeServes(gatewayProbe, ethLimoUrl(ensNameToWarm));
+		// The two mismatch axes come out of the SAME answer the probe just gave —
+		// no second request, no second seam. A site with nothing to probe gets no
+		// verdict at all (not applicable), which is not the same as `unknown`.
+		const resolution =
+			ethLimo === undefined
+				? undefined
+				: ethLimoResolutionOf(ethLimo, {
+						cid: site.cid,
+						ipns: keys.get(site.id),
+						mode: site.metadata.mode,
+						ensName: ensNameToWarm,
+					});
 		statuses.push({
 			id: site.id,
 			cid: site.cid,
@@ -283,6 +358,8 @@ export async function statusReport(
 			// NOT APPLICABLE stays absent; a probe that was MADE carries its
 			// three-valued outcome (served / did not / could not be made).
 			ethLimoServes: ethLimo?.serves,
+			ethLimoOrigin: resolution?.origin,
+			ethLimoFreshness: resolution?.freshness,
 		});
 	}
 
@@ -330,6 +407,10 @@ export function makeStatusOp(
 				// undefined value, so a site with no ENS name carries no key at all.
 				ethLimoServes: s.ethLimoServes,
 				ethLimoHttp: s.ethLimoHttp,
+				// The two mismatch axes travel with it, absent-means-not-applicable and
+				// all: a site with no name to probe carries no key for either.
+				ethLimoOrigin: s.ethLimoOrigin,
+				ethLimoFreshness: s.ethLimoFreshness,
 				// The ok/unverified token stays about the CID (is it announced AND
 				// served?), deliberately unchanged: the eth.limo verdict is reported in
 				// its own fields so an existing consumer's `status` keeps meaning what
@@ -386,6 +467,8 @@ interface ProbeOutcome {
 	http?: number;
 	/** yes (2xx), no (answered otherwise), unknown (the probe could not be made). */
 	serves: CheckOutcome;
+	/** The headers it answered with; absent if it never answered (or said none). */
+	headers?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -403,11 +486,30 @@ async function probeServes(
 	url: string,
 ): Promise<ProbeOutcome> {
 	try {
-		const http = await probe(url);
-		return {http, serves: checkAnswer(servesStatus(http))};
+		const {status, headers} = await probe(url);
+		return {http: status, headers, serves: checkAnswer(servesStatus(status))};
 	} catch (error) {
 		return {serves: checkUnknown(unavailableReason(error))};
 	}
+}
+
+/**
+ * The two eth.limo axes for one site, from the probe that ALREADY ran.
+ *
+ * A probe that could not be MADE tells us nothing about either question, so
+ * both axes report `unknown` carrying that probe's own reason. A probe that
+ * ANSWERED is classified from its headers — including a non-2xx answer, whose
+ * missing headers simply read as `unknown` per axis. Nothing here re-probes,
+ * and nothing here reads ENS: see {@link ./ethlimo-resolution.js}.
+ */
+function ethLimoResolutionOf(
+	probed: ProbeOutcome,
+	site: {cid: string; ipns?: string; mode?: SiteMode; ensName?: string},
+): EthLimoResolution {
+	if (probed.serves.state === 'unknown') {
+		return unknownEthLimoResolution(probed.serves.reason);
+	}
+	return classifyEthLimoResolution({...site, headers: probed.headers});
 }
 
 /** A gateway HTTP status counts as "served" iff it is 2xx (including 206). */
@@ -466,10 +568,23 @@ export const defaultProvidersLookup: ProvidersLookup = async (cid) => {
 /**
  * The default cold-gateway probe: a single-byte range request to the given URL
  * (the CID's `https://<cid>.ipfs.dweb.link/`, or the site's
- * `https://<name>.limo/`) returning the HTTP status. It is the ONLY place a
- * live HTTP request is made for the report; injected fakes replace it in tests.
+ * `https://<name>.limo/`) returning the HTTP status AND the response headers.
+ * It is the ONLY place a live HTTP request is made for the report; injected
+ * fakes replace it in tests.
+ *
+ * The headers are handed over WHOLE (lower-cased by `fetch`) rather than
+ * filtered here: which headers mean something is the reader's business
+ * ({@link ./ethlimo-resolution.js}), so this stays a dumb HTTP call and the
+ * header names are spelled in exactly one place.
  */
 export const defaultGatewayProbe: GatewayProbe = async (url) => {
 	const res = await fetch(url, {headers: {range: 'bytes=0-0'}});
-	return res.status;
+	const headers: Record<string, string> = {};
+	// `forEach` rather than spreading the iterator: `Headers` is not typed as
+	// iterable under this project's lib set, and the names are lower-cased here
+	// so every reader sees one spelling.
+	res.headers.forEach((value, key) => {
+		headers[key.toLowerCase()] = value;
+	});
+	return {status: res.status, headers};
 };

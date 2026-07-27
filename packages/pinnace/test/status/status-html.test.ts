@@ -145,6 +145,10 @@ describe('renderStatusHtml: per-site row', () => {
 					mode: 'ipns',
 					// ensName ABSENT, but the report RESOLVED one from the `.eth` id.
 					ensNameToWarm: 'ronan.eth',
+					// ...and the probe answered on both resolution axes, so every cell
+					// below carries a value.
+					ethLimoOrigin: {state: 'ours'},
+					ethLimoFreshness: {state: 'current'},
 				},
 			],
 		});
@@ -365,6 +369,127 @@ describe('renderStatusHtml: per-site row', () => {
 		const optoutRow = html.slice(html.indexOf('optout.eth'));
 		expect(optoutRow).toContain('<span class="none">none</span>');
 		expect(optoutRow).not.toContain('unknown');
+	});
+
+	it('shows the ORIGIN mismatch, naming what the name points at instead', () => {
+		const source =
+			'k51qzi5uqu5dlu1ien9spji7pu49mfw97mn0qv4azugqcvenj0dvzq9bgwp1zc';
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					ethLimoServes: checkAnswer(true),
+					// The live box: it serves, and it serves our bytes, but through
+					// somebody else's name.
+					ethLimoOrigin: {state: 'foreign', path: `/ipns/${source}`},
+					ethLimoFreshness: {state: 'current'},
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		// The actionable detail is on the page: WHICH name it points at.
+		expect(html).toContain(`/ipns/${source}`);
+		expect(html).toContain('foreign');
+		expect(html).toContain('current');
+	});
+
+	it('renders STALE and UNKNOWN neutrally — never the red negative used for a failure', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafynew',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'ours'},
+					// Normal post-deploy propagation lag, not a fault.
+					ethLimoFreshness: {state: 'stale', servedCid: 'bafyold'},
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+				{
+					id: 'blog.eth',
+					cid: 'bafyblog',
+					mode: 'ipns',
+					ensNameToWarm: 'blog.eth',
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'unknown', reason: 'no x-ipfs-path header'},
+					ethLimoFreshness: {
+						state: 'unknown',
+						reason: 'no x-ipfs-roots header',
+					},
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		const aliceRow = html.slice(
+			html.indexOf('alice.eth'),
+			html.indexOf('blog.eth'),
+		);
+		// The served cid is NAMED (that is the actionable bit)...
+		expect(aliceRow).toContain('stale');
+		expect(aliceRow).toContain('bafyold');
+		// ...and nothing on this row is painted as a failure.
+		expect(aliceRow).not.toContain('class="no"');
+		const blogRow = html.slice(html.indexOf('blog.eth'));
+		expect(blogRow).toContain('unknown (no x-ipfs-path header)');
+		expect(blogRow).toContain('unknown (no x-ipfs-roots header)');
+		expect(blogRow).not.toContain('class="no"');
+	});
+
+	it('shows a FROZEN ens record as an attention state, not a green tick', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafycurrent',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'frozen', path: '/ipfs/bafycurrent'},
+					ethLimoFreshness: {state: 'current'},
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		// The cid is current, so freshness is green; the ORIGIN says the record
+		// will not follow the next deploy.
+		expect(html).toContain('frozen');
+		expect(html).toContain('/ipfs/bafycurrent');
+	});
+
+	it('leaves BOTH axes blank for a site with no ENS name to ask about', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'optout.eth',
+					cid: 'bafyoptout',
+					mode: 'ipfs',
+					ensName: '',
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		// Nothing to ask -> no verdict at all, never `unknown` and never a cross.
+		const row = html.slice(html.indexOf('<tbody>'), html.indexOf('</tbody>'));
+		expect(row).not.toContain('unknown');
+		expect(row).not.toContain('class="no"');
+		expect(row).not.toContain('foreign');
+		expect(row).not.toContain('stale');
+		// Both axes read as the muted "nothing to report", like the eth.limo cell.
+		expect(row.match(/<span class="none">none<\/span>/g)?.length).toBe(4);
 	});
 
 	it('says so plainly when the node has no sites yet (fresh box)', () => {

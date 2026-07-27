@@ -106,6 +106,10 @@ import {
 	type StatusReport,
 } from '../status/status-report.js';
 import type {CheckOutcome} from '../status/check-outcome.js';
+import type {
+	EthLimoFreshness,
+	EthLimoOrigin,
+} from '../status/ethlimo-resolution.js';
 import {
 	deriveIpnsId as coreDeriveIpnsId,
 	type DeriveIpnsInput,
@@ -846,6 +850,8 @@ async function runStatus(
 					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site)}` +
 					` eth.limo ${site.ensNameToWarm ? `${site.ensNameToWarm}.limo` : 'none'}` +
 					` ethLimoServes=${printedEthLimoServes(site.ethLimoServes)}` +
+					` ethLimoOrigin=${printedOrigin(site.ethLimoOrigin)}` +
+					` ethLimoFreshness=${printedFreshness(site.ethLimoFreshness)}` +
 					` announced=${printedCheck(site.announced)}` +
 					` gatewayServes=${printedCheck(site.gatewayServes)}`,
 			);
@@ -906,6 +912,50 @@ function printedCheck(outcome: CheckOutcome): string {
  */
 function printedEthLimoServes(serves: CheckOutcome | undefined): string {
 	return serves === undefined ? 'n/a' : printedCheck(serves);
+}
+
+/**
+ * How `status` PRINTS the eth.limo ORIGIN axis — is the name resolving through
+ * THIS site? `ours`; `foreign (<path>)` NAMING what it points at instead (the
+ * actionable detail: the operator must see the wrong name to fix their ENS
+ * record); `frozen (<path>)` for an immutable ENS contenthash under a
+ * name-publishing site (valid today, will not follow the next deploy);
+ * `unknown (<reason>)` for a question we could not ask; and `n/a` for a site
+ * that resolves no ENS name, so there was nothing to ask.
+ *
+ * It reports what ETH.LIMO RESOLVED through its own cache, NOT the ENS record
+ * (pinnace reads no Ethereum RPC), so the wording never claims otherwise.
+ */
+function printedOrigin(origin: EthLimoOrigin | undefined): string {
+	if (origin === undefined) return 'n/a';
+	switch (origin.state) {
+		case 'ours':
+			return 'ours';
+		case 'foreign':
+			return `foreign (${origin.path})`;
+		case 'frozen':
+			return `frozen (${origin.path})`;
+		case 'unknown':
+			return `unknown (${origin.reason})`;
+	}
+}
+
+/**
+ * How `status` PRINTS the eth.limo FRESHNESS axis: `current`, `stale (<cid>)`
+ * NAMING the root actually served, `unknown (<reason>)`, or `n/a` when the site
+ * resolves no ENS name. `stale` is an ATTENTION state, never a failure token —
+ * a gateway lagging a fresh deploy is normal propagation.
+ */
+function printedFreshness(freshness: EthLimoFreshness | undefined): string {
+	if (freshness === undefined) return 'n/a';
+	switch (freshness.state) {
+		case 'current':
+			return 'current';
+		case 'stale':
+			return `stale (${freshness.servedCid})`;
+		case 'unknown':
+			return `unknown (${freshness.reason})`;
+	}
 }
 
 /**

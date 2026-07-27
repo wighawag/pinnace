@@ -38,6 +38,7 @@
  */
 import {ensNameDisplay, type EnsNameDisplay} from './ens-name-display.js';
 import {checkState, type CheckOutcome} from './check-outcome.js';
+import type {EthLimoFreshness, EthLimoOrigin} from './ethlimo-resolution.js';
 
 /**
  * How often the rendered page tells the browser to re-request it, in seconds.
@@ -105,6 +106,20 @@ export interface StatusPageSite {
 	 */
 	ethLimoServes?: CheckOutcome;
 	/**
+	 * Whether the ENS name resolves through THIS site's identity, or through some
+	 * other name/cid ({@link ./ethlimo-resolution.js#EthLimoOrigin}). ABSENT means
+	 * the report asked nothing (no ENS name to resolve, or a path that does no
+	 * probing), and renders as no verdict rather than a negative.
+	 */
+	ethLimoOrigin?: EthLimoOrigin;
+	/**
+	 * Whether the root eth.limo served is this site's CURRENT cid
+	 * ({@link ./ethlimo-resolution.js#EthLimoFreshness}). `stale` is an ATTENTION
+	 * state, deliberately NOT the red negative: a gateway lagging a fresh deploy
+	 * is normal propagation, not a fault. ABSENT again means nothing was asked.
+	 */
+	ethLimoFreshness?: EthLimoFreshness;
+	/**
 	 * Whether the network announces this node for the CID: `yes`/`no`/`unknown`
 	 * with its reason. Absent means the report ran no such check, which renders
 	 * as `unknown` too — never as a negative.
@@ -158,7 +173,7 @@ export function renderStatusHtml(
 	const rows =
 		report.sites.length > 0
 			? report.sites.map(renderSiteRow).join('\n')
-			: `\t\t\t<tr><td class="empty" colspan="8">no sites yet (nothing under the node's MFS sites dir)</td></tr>`;
+			: `\t\t\t<tr><td class="empty" colspan="10">no sites yet (nothing under the node's MFS sites dir)</td></tr>`;
 
 	return `<!doctype html>
 <html lang="en">
@@ -177,13 +192,13 @@ ${PAGE_CSS}
 	<p class="meta">generated <time datetime="${generated}">${generated}</time>, reloading every ${refresh}s</p>
 	<table>
 		<thead>
-			<tr><th>site</th><th>cid</th><th>ipns</th><th>mode</th><th>ens name</th><th>eth.limo</th><th>announced</th><th>gateway</th></tr>
+			<tr><th>site</th><th>cid</th><th>ipns</th><th>mode</th><th>ens name</th><th>eth.limo</th><th>origin</th><th>freshness</th><th>announced</th><th>gateway</th></tr>
 		</thead>
 		<tbody>
 ${rows}
 		</tbody>
 	</table>
-	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites.</p>
+	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites. The <em>origin</em> and <em>freshness</em> columns report what eth.limo resolved and served through its own cache, not a read of the ENS record: a <em>stale</em> cid shortly after a deploy is normal propagation lag.</p>
 </body>
 </html>
 `;
@@ -193,7 +208,8 @@ ${rows}
  * Render one site's table row: id, gateway-linked cid + ipns, the `mode` its
  * MFS metadata stores, its ENS name (stored or inferred, see
  * {@link renderEnsName}), the eth.limo name that resolves to AND whether it
- * serves, then the two CID health indicators.
+ * serves, the two eth.limo resolution axes (origin + freshness), then the two
+ * CID health indicators.
  */
 function renderSiteRow(site: StatusPageSite): string {
 	const cid = site.cid
@@ -233,8 +249,70 @@ function renderSiteRow(site: StatusPageSite): string {
 		`\t\t\t<tr><th scope="row">${escapeHtml(site.id)}</th>` +
 		`<td>${cid}</td><td>${ipns}</td>` +
 		`<td>${mode}</td><td>${ensName}</td><td>${ethLimo}</td>` +
+		`<td>${renderOrigin(site.ethLimoOrigin)}</td>` +
+		`<td>${renderFreshness(site.ethLimoFreshness)}</td>` +
 		`<td>${indicator(site.announced)}</td><td>${indicator(site.gatewayServes)}</td></tr>`
 	);
+}
+
+/**
+ * The `origin` cell: is the ENS name resolving through THIS site?
+ *
+ *  - `ours`    — green, like any other answered-yes,
+ *  - `foreign` — the RED negative, NAMING what it points at instead: this is
+ *    the one state that is a genuine "we asked, and the answer is no", and the
+ *    whole reason the column exists (a live box was green everywhere while
+ *    eth.limo served through another publisher's name),
+ *  - `frozen`  — ATTENTION (not red): the record is a valid immutable cid, it
+ *    just will not follow the next deploy,
+ *  - `unknown` — NEUTRAL, with its reason,
+ *  - ABSENT    — nothing was asked (the site resolves no ENS name), so no
+ *    verdict at all.
+ *
+ * It reports what ETH.LIMO RESOLVED (through its cache), never a read of the
+ * ENS record — the column header stays `origin` for that reason, and the page's
+ * footer note says so.
+ */
+function renderOrigin(origin: EthLimoOrigin | undefined): string {
+	if (origin === undefined) return '<span class="none">none</span>';
+	switch (origin.state) {
+		case 'ours':
+			return '<span class="ok">ours</span>';
+		case 'foreign':
+			return (
+				'<span class="no">foreign</span> ' +
+				`<code>${escapeHtml(origin.path)}</code>`
+			);
+		case 'frozen':
+			return (
+				'<span class="warn">frozen</span> ' +
+				`<code>${escapeHtml(origin.path)}</code>`
+			);
+		case 'unknown':
+			return `<span class="unknown">unknown (${escapeHtml(origin.reason)})</span>`;
+	}
+}
+
+/**
+ * The `freshness` cell: is the served root this site's CURRENT cid? `current`
+ * is green; `stale` NAMES the served cid in a NEUTRAL attention style, never
+ * the red negative (a gateway lagging a fresh deploy is normal propagation, and
+ * cids that differ only in encoding read as stale too); `unknown` carries its
+ * reason; ABSENT means nothing was asked.
+ */
+function renderFreshness(freshness: EthLimoFreshness | undefined): string {
+	if (freshness === undefined) return '<span class="none">none</span>';
+	switch (freshness.state) {
+		case 'current':
+			return '<span class="ok">current</span>';
+		case 'stale':
+			return (
+				'<span class="warn">stale</span> ' +
+				`<code>${escapeHtml(freshness.servedCid)}</code>`
+			);
+		case 'unknown':
+			return `<span class="unknown">unknown (${escapeHtml(freshness.reason)})</span>`;
+	}
 }
 
 /**
@@ -323,4 +401,7 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 	code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
 	.ok { color: #157f3d; font-weight: 600; }
 	.no { color: #b3261e; font-weight: 600; }
+	/* ATTENTION, deliberately NOT the .no red: a stale cid or a frozen ENS record
+	   is something to look at, not a failed check. */
+	.warn { color: #8a6100; font-weight: 600; }
 	.none, .empty, .inferred, .unknown { color: #666; }`;

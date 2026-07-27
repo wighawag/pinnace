@@ -819,6 +819,60 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 		}
 	});
 
+	it('carries the eth.limo origin + freshness axes into BOTH views', async () => {
+		const source =
+			'k51qzi5uqu5dlu1ien9spji7pu49mfw97mn0qv4azugqcvenj0dvzq9bgwp1zc';
+		const mock = mockWithTwoSites();
+		const statusOp: NodeCommandOps['status'] = async () => ({
+			peerId: '12D3KooWpeerself',
+			sites: [
+				{
+					// The live regression: it serves, it serves OUR cid, and it does so
+					// through somebody else's name.
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					ipns: 'k51alice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'foreign', path: `/ipns/${source}`},
+					ethLimoFreshness: {state: 'current'},
+				},
+				{id: 'bob', cid: 'bafybob', ipns: ''},
+			],
+		});
+		const {ctx, dir} = await baseContext(mock, {ops: {status: statusOp}});
+		try {
+			await runNodeCommand('status', ctx);
+			const body = JSON.parse(
+				await readFile(join(ctx.dashboardDir!, 'status.json'), 'utf8'),
+			) as {sites: Array<Record<string, unknown>>};
+			const byId = (id: string) => body.sites.find((s) => s['id'] === id)!;
+			// The machine payload carries both axes, naming what to fix.
+			expect(byId('alice.eth')['ethLimoOrigin']).toEqual({
+				state: 'foreign',
+				path: `/ipns/${source}`,
+			});
+			expect(byId('alice.eth')['ethLimoFreshness']).toEqual({
+				state: 'current',
+			});
+			// A site with no name to ask about carries no key for either.
+			expect('ethLimoOrigin' in byId('bob')).toBe(false);
+			expect('ethLimoFreshness' in byId('bob')).toBe(false);
+
+			// ...and the human view says the same thing, source name included.
+			const html = await readFile(
+				join(ctx.dashboardDir!, 'index.html'),
+				'utf8',
+			);
+			expect(html).toContain('foreign');
+			expect(html).toContain(`/ipns/${source}`);
+			expect(html).toContain('current');
+		} finally {
+			await rm(dir, {recursive: true, force: true});
+		}
+	});
+
 	it('writes neither output when no dashboard dir is configured', async () => {
 		const mock = mockWithTwoSites();
 		const {ctx, dir} = await baseContext(mock, {dashboardDir: undefined});

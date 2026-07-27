@@ -132,8 +132,14 @@ export function unavailableReason(error: unknown): string {
 	return UNKNOWN_CHECK_REASON;
 }
 
-/** Collapse whitespace, trim, truncate; empty becomes {@link UNKNOWN_CHECK_REASON}. */
-function shortReason(reason: string): string {
+/**
+ * Collapse whitespace, trim, truncate; empty becomes {@link UNKNOWN_CHECK_REASON}.
+ * EXPORTED because it is the repo's ONE definition of "a reason fit for a status
+ * line": the eth.limo resolution axes ({@link ./ethlimo-resolution.js}) carry
+ * their own `unknown` reasons outside a {@link CheckOutcome}, and a second
+ * normaliser would drift from this one.
+ */
+export function shortReason(reason: string): string {
 	const collapsed = reason.replaceAll(/\s+/g, ' ').trim();
 	if (collapsed === '') return UNKNOWN_CHECK_REASON;
 	return collapsed.length > MAX_REASON_LENGTH

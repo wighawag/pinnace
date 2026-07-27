@@ -5,7 +5,9 @@ import {
 	statusReport,
 	makeStatusOp,
 	defaultProvidersLookup,
+	defaultGatewayProbe,
 	type GatewayProbe,
+	type GatewayProbeResult,
 	type ProvidersLookup,
 } from '../../src/status/status-report.js';
 import {
@@ -151,7 +153,7 @@ async function metadataReportSites() {
 		client: clientWith(mockWithMetadataCases()),
 		sitesDir: '/sites',
 		providersLookup: async () => ({Providers: []}),
-		gatewayProbe: async () => 504,
+		gatewayProbe: async () => ({status: 504}),
 	});
 	return report.sites;
 }
@@ -163,7 +165,9 @@ async function metadataReportSites() {
  * CID one, so no test ever reaches the live network.
  */
 async function metadataReportProbed(
-	probe: (url: string) => number | Promise<number>,
+	probe: (
+		url: string,
+	) => number | GatewayProbeResult | Promise<number | GatewayProbeResult>,
 ) {
 	const probed: string[] = [];
 	const report = await statusReport({
@@ -172,7 +176,10 @@ async function metadataReportProbed(
 		providersLookup: async () => ({Providers: []}),
 		gatewayProbe: async (url) => {
 			probed.push(url);
-			return probe(url);
+			// The seam answers with a RESULT OBJECT (status + headers); a test that
+			// only cares about the status may say so with a bare number.
+			const answer = await probe(url);
+			return typeof answer === 'number' ? {status: answer} : answer;
 		},
 	});
 	return {sites: report.sites, probed};
@@ -299,7 +306,217 @@ describe('status core — probes the eth.limo URL each site resolves', () => {
 	});
 });
 
-describe('status core — per-site four-field report shape', () => {
+/**
+ * The MISMATCH axes: `status` must be able to say "your ENS name is not
+ * pointing at this site" and "eth.limo is serving an older CID". Both are read
+ * from the headers the eth.limo probe already receives, through the SAME single
+ * probe seam (now widened to carry them), so no test touches the network.
+ *
+ * The live regression: eth.limo answered `x-ipfs-path: /ipns/<SOURCE name>` for
+ * a site pinnace publishes under a DIFFERENT name, while serving OUR cid — so
+ * every existing indicator was green and the site was one old-publisher outage
+ * away from going dark.
+ */
+describe('status core — eth.limo origin + freshness from the probe headers', () => {
+	/** The SOURCE publisher's name, as the live box's header spelled it. */
+	const SOURCE_NAME =
+		'k51qzi5uqu5dlu1ien9spji7pu49mfw97mn0qv4azugqcvenj0dvzq9bgwp1zc';
+
+	it('reports FOREIGN naming the source name while freshness stays CURRENT (the live box)', async () => {
+		const {sites} = await metadataReportProbed((url) =>
+			url.endsWith('.limo/')
+				? {
+						status: 200,
+						headers: {
+							'x-ipfs-path': `/ipns/${SOURCE_NAME}/`,
+							// The mock's sites all stat to `bafysite`, so the roots header
+							// IS our current cid: the bytes are ours, the NAME is not.
+							'x-ipfs-roots': 'bafysite',
+						},
+					}
+				: {status: 200},
+		);
+		const alice = sites.find((s) => s.id === 'alice.eth')!;
+		// Green on every old indicator...
+		expect(alice.ethLimoServes).toEqual({state: 'yes'});
+		expect(alice.ethLimoFreshness).toEqual({state: 'current'});
+		// ...and the mismatch is finally visible, naming what to fix.
+		expect(alice.ethLimoOrigin).toEqual({
+			state: 'foreign',
+			path: `/ipns/${SOURCE_NAME}`,
+		});
+	});
+
+	it('reports OURS + STALE naming the served cid when the gateway lags a deploy', async () => {
+		const {sites} = await metadataReportProbed((url) =>
+			url.endsWith('.limo/')
+				? {
+						status: 200,
+						headers: {
+							// alice.eth is ipns-mode with key `k51alice`: the name IS ours.
+							'x-ipfs-path': '/ipns/k51alice/',
+							'x-ipfs-roots': 'bafyprevious',
+						},
+					}
+				: {status: 200},
+		);
+		const alice = sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.ethLimoOrigin).toEqual({state: 'ours'});
+		// Post-deploy lag is normal: reported, named, and never a red negative.
+		expect(alice.ethLimoFreshness).toEqual({
+			state: 'stale',
+			servedCid: 'bafyprevious',
+		});
+	});
+
+	it('reports UNKNOWN with a reason on BOTH axes when the headers are missing', async () => {
+		const {sites} = await metadataReportProbed(() => ({status: 200}));
+		const alice = sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.ethLimoServes).toEqual({state: 'yes'});
+		expect(alice.ethLimoOrigin).toEqual({
+			state: 'unknown',
+			reason: 'no x-ipfs-path header',
+		});
+		expect(alice.ethLimoFreshness).toEqual({
+			state: 'unknown',
+			reason: 'no x-ipfs-roots header',
+		});
+	});
+
+	it('reports UNKNOWN with the PROBE reason on both axes when the probe could not be made', async () => {
+		const {sites} = await metadataReportProbed((url) => {
+			if (url.endsWith('.limo/')) throw new Error('eth.limo is down');
+			return {status: 200};
+		});
+		const alice = sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.ethLimoOrigin).toEqual({
+			state: 'unknown',
+			reason: 'eth.limo is down',
+		});
+		expect(alice.ethLimoFreshness).toEqual({
+			state: 'unknown',
+			reason: 'eth.limo is down',
+		});
+	});
+
+	it('reports NOT-APPLICABLE (absent) on both axes for a site that resolves NO ens name', async () => {
+		const {sites} = await metadataReportProbed(() => ({
+			status: 200,
+			headers: {'x-ipfs-path': '/ipfs/bafysite', 'x-ipfs-roots': 'bafysite'},
+		}));
+		const byId = (id: string) => sites.find((s) => s.id === id)!;
+		// `""` opts out and a non-`.eth` id infers nothing: there was no
+		// `<name>.limo` to ask about, which is NOT the same as "could not ask".
+		for (const id of ['optout.eth', 'bob']) {
+			expect(byId(id).ethLimoOrigin).toBeUndefined();
+			expect(byId(id).ethLimoFreshness).toBeUndefined();
+		}
+		// ...while a site that WAS probed carries both verdicts.
+		expect(byId('blog').ethLimoOrigin).toBeDefined();
+		expect(byId('blog').ethLimoFreshness).toBeDefined();
+	});
+
+	it('surfaces an ipns-mode site whose ENS holds an immutable cid as FROZEN', async () => {
+		const {sites} = await metadataReportProbed((url) =>
+			url.endsWith('.limo/')
+				? {
+						status: 200,
+						headers: {
+							// The CURRENT cid, but as an immutable ENS contenthash: it will
+							// never follow the next deploy of this ipns-mode site.
+							'x-ipfs-path': '/ipfs/bafysite',
+							'x-ipfs-roots': 'bafysite',
+						},
+					}
+				: {status: 200},
+		);
+		const alice = sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.ethLimoFreshness).toEqual({state: 'current'});
+		expect(alice.ethLimoOrigin).toEqual({
+			state: 'frozen',
+			path: '/ipfs/bafysite',
+		});
+	});
+
+	it('carries both axes into the makeStatusOp payload the dashboard reads', async () => {
+		const client = clientWith(mockWithMetadataCases());
+		const op = makeStatusOp({
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async (url) =>
+				url.endsWith('.limo/')
+					? {
+							status: 200,
+							headers: {
+								'x-ipfs-path': `/ipns/${SOURCE_NAME}`,
+								'x-ipfs-roots': 'bafyold',
+							},
+						}
+					: {status: 200},
+		});
+		const result = await op(
+			{client, role: 'publisher', sitesDir: '/sites'},
+			await discoverSites(client, '/sites'),
+		);
+		const byId = (id: string) => result.sites.find((s) => s.id === id)!;
+		expect(byId('alice.eth').ethLimoOrigin).toEqual({
+			state: 'foreign',
+			path: `/ipns/${SOURCE_NAME}`,
+		});
+		expect(byId('alice.eth').ethLimoFreshness).toEqual({
+			state: 'stale',
+			servedCid: 'bafyold',
+		});
+		// A mismatch is NOT a failed check: the CID-side roll-up token is untouched.
+		expect(byId('alice.eth').status).toBe('unverified');
+		// Nothing to probe -> no keys at all in the payload (JSON stays key-free).
+		const bob = JSON.parse(JSON.stringify(byId('bob')));
+		expect('ethLimoOrigin' in bob).toBe(false);
+		expect('ethLimoFreshness' in bob).toBe(false);
+	});
+});
+
+describe('status core — the ONE probe seam carries status AND headers', () => {
+	it('sends the CID gateway and the eth.limo name through the SAME probe', async () => {
+		const {sites, probed} = await metadataReportProbed((url) => ({
+			status: url.includes('ipfs.dweb.link') ? 206 : 200,
+			headers: {'x-ipfs-path': '/ipfs/bafysite', 'x-ipfs-roots': 'bafysite'},
+		}));
+		// One CID probe per site, plus the two sites that resolve an ENS name.
+		expect(probed.filter((u) => u.includes('ipfs.dweb.link')).length).toBe(4);
+		expect(probed.filter((u) => u.endsWith('.limo/')).length).toBe(2);
+		// The CID half still reads the status out of the widened result...
+		for (const site of sites) {
+			expect(site.gatewayHttp).toBe(206);
+			expect(site.gatewayServes).toEqual({state: 'yes'});
+		}
+		// ...and the CID probe's headers are not mistaken for the eth.limo ones:
+		// `blog` is ipfs-mode and its ENS serves our own cid, so it reads `ours`.
+		expect(sites.find((s) => s.id === 'blog')!.ethLimoOrigin).toEqual({
+			state: 'ours',
+		});
+	});
+
+	it('the DEFAULT probe returns the status AND the response headers, lower-cased', async () => {
+		vi.stubGlobal(
+			'fetch',
+			async () =>
+				new Response('a', {
+					status: 206,
+					headers: {
+						'X-Ipfs-Path': '/ipns/k51alice/',
+						'X-Ipfs-Roots': 'bafysite',
+					},
+				}),
+		);
+		const result = await defaultGatewayProbe('https://alice.eth.limo/');
+		vi.unstubAllGlobals();
+		expect(result.status).toBe(206);
+		expect(result.headers?.['x-ipfs-path']).toBe('/ipns/k51alice/');
+		expect(result.headers?.['x-ipfs-roots']).toBe('bafysite');
+	});
+});
+
+describe('status core — per-site report shape', () => {
 	it('reports id, cid, ipns, announced, gatewayServes per discovered site', async () => {
 		const mock = withDistinctCids(mockForStatus());
 		const client = clientWith(mock);
@@ -310,8 +527,9 @@ describe('status core — per-site four-field report shape', () => {
 				cid === 'bafyalice' ? [{ID: 'peer-self'}] : [{ID: 'peer-other'}],
 		});
 		// Fake cold-gateway probe (by URL): alice serves (206), bob is cold (504).
-		const gateway: GatewayProbe = async (url) =>
-			url.includes('bafyalice') ? 206 : 504;
+		const gateway: GatewayProbe = async (url) => ({
+			status: url.includes('bafyalice') ? 206 : 504,
+		});
 
 		const report = await statusReport({
 			client,
@@ -352,7 +570,7 @@ describe('status core — per-site four-field report shape', () => {
 		};
 		const gateway: GatewayProbe = async (url) => {
 			gatewayUrls.push(url);
-			return 200;
+			return {status: 200};
 		};
 		await statusReport({
 			client,
@@ -380,7 +598,7 @@ describe('status core — per-site four-field report shape', () => {
 			const report = await statusReport({
 				client,
 				providersLookup: providers,
-				gatewayProbe: async () => code,
+				gatewayProbe: async () => ({status: code}),
 			});
 			expect(
 				report.sites.every(
@@ -403,7 +621,7 @@ describe('status core — per-site four-field report shape', () => {
 			},
 			gatewayProbe: async () => {
 				gatewayCalls++;
-				return 200;
+				return {status: 200};
 			},
 		});
 		// Two sites -> two routing lookups; the probe additionally covers the ONE
@@ -444,7 +662,7 @@ describe('status core — a check that could NOT run reports unknown, never a ne
 		return statusReport({
 			client: clientWith(mock),
 			providersLookup: checks.providers ?? (async () => ({Providers: []})),
-			gatewayProbe: checks.gateway ?? (async () => 504),
+			gatewayProbe: checks.gateway ?? (async () => ({status: 504})),
 		});
 	}
 
@@ -561,7 +779,7 @@ describe('status core — a check that could NOT run reports unknown, never a ne
 			// No status: the probe never got an answer to record.
 			expect(site.gatewayHttp).toBeUndefined();
 		}
-		const answered = await reportWith({gateway: async () => 504});
+		const answered = await reportWith({gateway: async () => ({status: 504})});
 		for (const site of answered.sites) {
 			expect(site.gatewayServes).toEqual({state: 'no'});
 			expect(site.gatewayHttp).toBe(504);
@@ -618,7 +836,9 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 			providersLookup: async (cid) => ({
 				Providers: cid === 'bafyalice' ? [{ID: 'peer-self'}] : [],
 			}),
-			gatewayProbe: async (url) => (url.includes('bafyalice') ? 200 : 504),
+			gatewayProbe: async (url) => ({
+				status: url.includes('bafyalice') ? 200 : 504,
+			}),
 		});
 
 		const sites = await discoverSites(client, '/sites');
@@ -646,7 +866,7 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 			providersLookup: async () => {
 				throw new CheckUnavailableError('http 429');
 			},
-			gatewayProbe: async () => 200,
+			gatewayProbe: async () => ({status: 200}),
 		});
 		const sites = await discoverSites(client, '/sites');
 		const result = await op(
@@ -666,7 +886,7 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		const client = clientWith(mock);
 		const op = makeStatusOp({
 			providersLookup: async () => ({Providers: []}),
-			gatewayProbe: async () => 504,
+			gatewayProbe: async () => ({status: 504}),
 		});
 
 		const sites = await discoverSites(client, '/sites');
@@ -684,7 +904,7 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		const client = clientWith(mockWithMetadataCases());
 		const op = makeStatusOp({
 			providersLookup: async () => ({Providers: []}),
-			gatewayProbe: async () => 504,
+			gatewayProbe: async () => ({status: 504}),
 		});
 		const sites = await discoverSites(client, '/sites');
 		const result = await op(
