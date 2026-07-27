@@ -358,6 +358,11 @@ export async function run(
 		return 0;
 	}
 	if (command === 'version' || command === '--version' || command === '-v') {
+		// It takes no flags of its own; a typed one is refused rather than printed
+		// over (the globals were stripped above, so they never reach here).
+		const {flags} = parseArgs(rest);
+		if (!refuseUnknownFlags('pinnace version', flags, VERB_FLAGS.version, rc))
+			return 1;
 		rc.out(name());
 		return 0;
 	}
@@ -554,6 +559,8 @@ function parseArgs(
  */
 function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags} = parseArgs(argv);
+	if (!refuseUnknownFlags('pinnace provision', flags, VERB_FLAGS.provision, rc))
+		return 1;
 	if (!refuseBareFlags('pinnace provision', flags, rc)) return 1;
 	const host = flags['host'];
 	const apiDomain = flags['api-domain'];
@@ -635,6 +642,8 @@ async function runDeploy(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv, ENS_NAME_BOOLEAN_FLAGS);
+	if (!refuseUnknownFlags('pinnace deploy', flags, VERB_FLAGS.deploy, rc))
+		return 1;
 	if (!refuseBareFlags('pinnace deploy', flags, rc)) return 1;
 	const [dir, siteId] = positionals;
 	if (!dir || !siteId) {
@@ -738,6 +747,15 @@ async function runDeploy(
  */
 function runInstallCi(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags} = parseArgs(argv);
+	if (
+		!refuseUnknownFlags(
+			'pinnace install-ci',
+			flags,
+			VERB_FLAGS['install-ci'],
+			rc,
+		)
+	)
+		return 1;
 	if (!refuseBareFlags('pinnace install-ci', flags, rc)) return 1;
 	const system = flags['system'];
 	const buildCommand = flags['build-command'];
@@ -786,6 +804,8 @@ async function runStatus(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags} = parseArgs(argv);
+	if (!refuseUnknownFlags('pinnace status', flags, VERB_FLAGS.status, rc))
+		return 1;
 	if (!refuseBareFlags('pinnace status', flags, rc)) return 1;
 	const cli = cliOverridesFromFlags(flags, rc.endpoint);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
@@ -844,6 +864,8 @@ function printedEnsName(ensName: string | undefined): string {
  */
 function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 	const {flags, positionals} = parseArgs(argv);
+	if (!refuseUnknownFlags('pinnace derive', flags, VERB_FLAGS.derive, rc))
+		return 1;
 	if (!refuseBareFlags('pinnace derive', flags, rc)) return 1;
 	const [siteId] = positionals;
 	if (!siteId) {
@@ -925,6 +947,7 @@ async function runPin(
 		'no-recursive',
 		...ENS_NAME_BOOLEAN_FLAGS,
 	]);
+	if (!refuseUnknownFlags('pinnace pin', flags, VERB_FLAGS.pin, rc)) return 1;
 	if (!refuseBareFlags('pinnace pin', flags, rc)) return 1;
 	const [cid] = positionals;
 	const fromIpns = flags['from-ipns'];
@@ -1243,12 +1266,14 @@ const OPTIONAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
  * every verb right after {@link parseArgs} (the global `--endpoint` is refused
  * earlier still, in {@link takeEndpointFlag}, since it never reaches a verb).
  *
- * It knows nothing of which flags a verb understands, so a bare UNKNOWN flag is
- * refused too while an unknown flag WITH a value stays ignored as before: the
- * question here is only whether a TYPED flag carries what it needs, and
- * rejecting unknown flags is a separate surface decision (recorded, with the
- * exemption reasoning, in
- * `work/notes/observations/endpoint-flag-loud-and-global-decisions.md`).
+ * It knows nothing of which flags a verb understands: the question here is only
+ * whether a TYPED flag carries what it needs. Its sibling
+ * {@link refuseUnknownFlags} owns the flag's NAME and runs FIRST, so an unknown
+ * flag is reported as unknown (bare or not) and this guard only ever judges
+ * flags the verb really has. (The exemption reasoning is recorded in
+ * `work/notes/observations/endpoint-flag-loud-and-global-decisions.md`, the
+ * name-check decisions in
+ * `work/notes/observations/reject-unknown-cli-flags-decisions.md`.)
  */
 function refuseBareFlags(
 	prefix: string,
@@ -1265,6 +1290,221 @@ function refuseBareFlags(
 			`pass ${bare.map((key) => `'--${key} <value>'`).join(', ')}, or drop ` +
 			`${bare.length === 1 ? 'the flag' : 'them'} (a flag with no value is ` +
 			'never read as its default)',
+	);
+	return false;
+}
+
+// ---------------------------------------------------------------------------
+// The per-verb flag NAME allow-list (the other half of "a flag you type must
+// never mean nothing").
+// ---------------------------------------------------------------------------
+
+/**
+ * The flag NAMES one verb accepts. Two shapes, because the CLI has both: exact
+ * names, and PREFIX-shaped families whose suffix is operator-chosen
+ * (`--host-endpoint.<name>`), which an exact list could never enumerate.
+ */
+interface AcceptedFlags {
+	/** Exact flag names, WITHOUT the leading `--`, in the order they are listed. */
+	readonly exact: readonly string[];
+	/** Flag-name PREFIXES (each ending in `.`), matched against the typed name. */
+	readonly prefixes?: readonly string[];
+}
+
+/** `--host-endpoint.<name> <url>`: override the endpoint OF a configured host. */
+const HOST_ENDPOINT_PREFIX = 'host-endpoint.';
+/** `--host-token.<name> <t>`: override the bearer token OF a configured host. */
+const HOST_TOKEN_PREFIX = 'host-token.';
+
+/**
+ * The PREFIX-shaped per-host override flags, accepted by every NODE-TOUCHING
+ * verb (the ones that resolve a config: {@link cliOverridesFromFlags} reads
+ * exactly these). Their suffix is a host name from the operator's config, so
+ * they are matched by prefix rather than by exact name.
+ */
+const HOST_OVERRIDE_PREFIXES = [
+	HOST_ENDPOINT_PREFIX,
+	HOST_TOKEN_PREFIX,
+] as const;
+
+/**
+ * The other flag {@link cliOverridesFromFlags} reads, so it is accepted
+ * wherever the per-host overrides are.
+ */
+const CONFIG_OVERRIDE_FLAGS = ['gateways'] as const;
+
+/**
+ * EVERY verb's accepted flag set, enumerated from the verbs themselves: this
+ * table IS the allow-list {@link refuseUnknownFlags} judges against, so a flag
+ * missing from it becomes a FALSE refusal of a valid command. Adding a flag to
+ * a verb means adding it HERE too (the one maintenance cost of the check, and
+ * why each set is annotated with the reason it exists).
+ *
+ * The two GLOBAL flags (`--config`, `--endpoint`) are deliberately absent: they
+ * are stripped from the argv before any verb parses ({@link takeConfigFlag},
+ * {@link takeEndpointFlag}), so they can never reach this check from either
+ * side of the command.
+ */
+const VERB_FLAGS = {
+	/** Purely arg-driven: five required, then the domain/pinned-version knobs. */
+	provision: {
+		exact: [
+			'host',
+			'api-domain',
+			'acme-email',
+			'bearer-token',
+			'role',
+			'dashboard-domain',
+			'publisher-endpoint',
+			'kubo-version',
+			'pinnace-version',
+			'node-major',
+		],
+	},
+	/**
+	 * The site-metadata intents plus the config overrides. NO `--host`: a deploy
+	 * fans out to every configured node by design (narrow it with `--endpoint`).
+	 */
+	deploy: {
+		exact: [
+			'set-mode',
+			'set-ens-name',
+			'unset-ens-name',
+			...CONFIG_OVERRIDE_FLAGS,
+		],
+		prefixes: HOST_OVERRIDE_PREFIXES,
+	},
+	/** The source (`--from-ipns`) + name, the site-metadata intents, `--host`. */
+	pin: {
+		exact: [
+			'as',
+			'from-ipns',
+			'host',
+			'no-recursive',
+			'set-mode',
+			'set-ens-name',
+			'unset-ens-name',
+			...CONFIG_OVERRIDE_FLAGS,
+		],
+		prefixes: HOST_OVERRIDE_PREFIXES,
+	},
+	/** Reports every configured node, so it takes only the config overrides. */
+	status: {
+		exact: [...CONFIG_OVERRIDE_FLAGS],
+		prefixes: HOST_OVERRIDE_PREFIXES,
+	},
+	/** `derive <id>` is a local KDF over env: no flags at all, and no node. */
+	derive: {exact: []},
+	/** The CI workflow inputs. */
+	'install-ci': {
+		exact: ['system', 'build-command', 'output-dir', 'branch', 'node-version'],
+	},
+	/** `--host` SELECTS the one node the site verbs act on. */
+	site: {
+		exact: ['host', ...CONFIG_OVERRIDE_FLAGS],
+		prefixes: HOST_OVERRIDE_PREFIXES,
+	},
+	/**
+	 * `host` is listed so the verb's OWN tailored refusal still fires (it
+	 * explains that the config DECLARES the publisher, and points at
+	 * `--endpoint`); a generic "unknown flag" would throw that explanation away.
+	 */
+	authorize: {
+		exact: ['host', ...CONFIG_OVERRIDE_FLAGS],
+		prefixes: HOST_OVERRIDE_PREFIXES,
+	},
+	/** The on-box verbs read the box env (/etc/pinnace-node.env), never flags. */
+	node: {exact: []},
+	/** Prints the version and nothing else. */
+	version: {exact: []},
+} satisfies Record<string, AcceptedFlags>;
+
+/**
+ * Flags this project has RENAMED, mapped to their replacement, so the refusal
+ * can say WHERE the flag went instead of only that it is gone. This is the
+ * shape of mistake that motivated the whole check: `--mode` became `--set-mode`
+ * on `deploy` and `pin`, and until now a stale `pin ... --mode ipns` parsed,
+ * was read by nobody, and pinned as `ipfs` with no IPNS record published.
+ *
+ * A hint is only offered when the replacement is a flag THAT verb accepts, so
+ * `status --mode` is not told to type a flag `status` does not have either. A
+ * generic nearest-match suggestion is deliberately not attempted: the renames
+ * are the case worth being precise about.
+ */
+const RENAMED_FLAGS: Readonly<Record<string, string | undefined>> = {
+	mode: 'set-mode',
+};
+
+/** Does this verb accept a typed flag name (exactly, or by its prefix family)? */
+function isAcceptedFlag(key: string, accepted: AcceptedFlags): boolean {
+	return (
+		accepted.exact.includes(key) ||
+		(accepted.prefixes ?? []).some((prefix) => key.startsWith(prefix))
+	);
+}
+
+/** How a verb's accepted set is PRINTED back to the operator. */
+function listAcceptedFlags(accepted: AcceptedFlags): string {
+	const names = [
+		...accepted.exact.map((key) => `--${key}`),
+		...(accepted.prefixes ?? []).map((prefix) => `--${prefix}<name>`),
+	];
+	return names.length === 0
+		? 'accepts no flags of its own'
+		: `accepts: ${names.join(', ')}`;
+}
+
+/**
+ * Refuse every flag whose NAME the verb does not accept, loudly (returns false
+ * after emitting, so the verb can `return 1` without dispatching).
+ *
+ * This is the second half of A FLAG YOU TYPE MUST NEVER MEAN NOTHING:
+ * {@link refuseBareFlags} guards a flag's VALUE, this guards its NAME. Before
+ * it, {@link parseArgs} accepted ANY `--token` and stored it, so a flag no verb
+ * reads was silently ignored and the operator's instruction evaporated. That
+ * shipped a real, silent failure (see {@link RENAMED_FLAGS}), and it is exactly
+ * the class of bug a CI or cron run never notices.
+ *
+ * Ordering, in every verb: this check runs FIRST, then {@link refuseBareFlags}.
+ * So a bare unknown flag is reported as UNKNOWN (the truer message) rather than
+ * as needing a value, and the bare guard only ever judges flags the verb really
+ * has. Both run AFTER the global flags are stripped, so `--config`/`--endpoint`
+ * are never mis-reported here from either side of the command.
+ *
+ * Being an allow-list, it is only as good as {@link VERB_FLAGS}: refusing a
+ * VALID command is worse than the silence being fixed, which is why that table
+ * is enumerated from the verbs and covered flag-by-flag by
+ * `test/cli/unknown-flag.test.ts`.
+ */
+function refuseUnknownFlags(
+	prefix: string,
+	flags: Record<string, string>,
+	accepted: AcceptedFlags,
+	rc: ResolvedRunContext,
+): boolean {
+	const unknown = Object.keys(flags).filter(
+		(key) => !isAcceptedFlag(key, accepted),
+	);
+	if (unknown.length === 0) return true;
+	const named = unknown.map((key) => `'--${key}'`).join(', ');
+	const renamed = unknown
+		.map((key) => ({key, to: RENAMED_FLAGS[key]}))
+		.filter(
+			(hint): hint is {key: string; to: string} =>
+				hint.to !== undefined && isAcceptedFlag(hint.to, accepted),
+		)
+		.map(
+			(hint) => `\n  '--${hint.key}' was RENAMED: did you mean '--${hint.to}'?`,
+		)
+		.join('');
+	rc.err(
+		`${prefix}: unknown flag${unknown.length === 1 ? '' : 's'} ${named}; ` +
+			`nothing reads ${unknown.length === 1 ? 'it' : 'them'}, and a flag you ` +
+			'type must never mean nothing, so nothing ran.' +
+			renamed +
+			`\n${prefix} ${listAcceptedFlags(accepted)}` +
+			'\n(plus the globals --config <path> and --endpoint <url>, on either ' +
+			'side of the command)',
 	);
 	return false;
 }
@@ -1298,10 +1538,10 @@ function cliOverridesFromFlags(
 	const hostToken: Record<string, string> = {};
 	const hostEndpoint: Record<string, string> = {};
 	for (const [key, value] of Object.entries(flags)) {
-		if (key.startsWith('host-token.'))
-			hostToken[key.slice('host-token.'.length)] = value;
-		else if (key.startsWith('host-endpoint.'))
-			hostEndpoint[key.slice('host-endpoint.'.length)] = value;
+		if (key.startsWith(HOST_TOKEN_PREFIX))
+			hostToken[key.slice(HOST_TOKEN_PREFIX.length)] = value;
+		else if (key.startsWith(HOST_ENDPOINT_PREFIX))
+			hostEndpoint[key.slice(HOST_ENDPOINT_PREFIX.length)] = value;
 	}
 	if (Object.keys(hostToken).length > 0) cli.hostToken = hostToken;
 	if (Object.keys(hostEndpoint).length > 0) cli.hostEndpoint = hostEndpoint;
@@ -1330,6 +1570,7 @@ async function runSiteCli(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv);
+	if (!refuseUnknownFlags('pinnace site', flags, VERB_FLAGS.site, rc)) return 1;
 	if (!refuseBareFlags('pinnace site', flags, rc)) return 1;
 	const [verb, ...verbArgs] = positionals;
 	if (!verb) {
@@ -1415,6 +1656,18 @@ async function runNodeCli(
 		);
 		return 1;
 	}
+	// The on-box verbs take NO flags: everything they need is env (the box's
+	// /etc/pinnace-node.env), so a typed flag can only be a mistake. Parsed only
+	// to be judged — the verb itself is read as a positional, above.
+	if (
+		!refuseUnknownFlags(
+			'pinnace node',
+			parseArgs(argv).flags,
+			VERB_FLAGS.node,
+			rc,
+		)
+	)
+		return 1;
 
 	const env = rc.env;
 	const token = env['RPC_BEARER_TOKEN'];
@@ -1516,6 +1769,8 @@ async function runAuthorize(
 	rc: ResolvedRunContext,
 ): Promise<number> {
 	const {flags, positionals} = parseArgs(argv);
+	if (!refuseUnknownFlags('pinnace authorize', flags, VERB_FLAGS.authorize, rc))
+		return 1;
 	if (!refuseBareFlags('pinnace authorize', flags, rc)) return 1;
 	if (flags['host'] !== undefined) {
 		rc.err(

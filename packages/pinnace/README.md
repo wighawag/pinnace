@@ -227,7 +227,7 @@ Global (either side of the command): `--config <path>` selects the `pinnace.json
 
 Every node-touching verb (`deploy`, `pin`, `status`, `site`, `authorize`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
 
-A flag you type must never mean nothing: any value-taking flag written with NO value (at the end of the line, or immediately followed by another `--flag`) is a usage error naming it. So a mistyped `pinnace deploy --endpoint --set-mode ipns ./dist mysite` refuses, instead of dropping the endpoint and quietly deploying to every host in `pinnace.json`.
+A flag you type must never mean nothing, and that covers its NAME as well as its value. Any value-taking flag written with NO value (at the end of the line, or immediately followed by another `--flag`) is a usage error naming it, so a mistyped `pinnace deploy --endpoint --set-mode ipns ./dist mysite` refuses instead of dropping the endpoint and quietly deploying to every host in `pinnace.json`. And any flag a verb does not accept is refused too, naming it and listing what that verb does accept, before anything runs: `pinnace pin --from-ipns <src> --as mysite --mode ipns` fails with "`--mode` was RENAMED: did you mean `--set-mode`?" rather than parsing, being read by nobody, and pinning as `ipfs` with no IPNS record published. The two globals above are stripped first, so they are accepted on either side of every command and never reported as unknown.
 
 ## Library use
 
