@@ -688,9 +688,41 @@ describe('status — dispatches to core statusReport per site', () => {
 		const printed = out.join('\n');
 		expect(printed).toContain('mode ipns');
 		expect(printed).toContain('eth.limo alice.eth.limo');
-		// The three ensName values stay apart in the printed line too.
+		// The ensName states stay apart in the printed line too: the opt-out reads
+		// as a CHOICE, and alice's absent-but-inferred name reads as the name it
+		// actually warms, never as `unset`.
 		expect(printed).toContain('ensName opted-out');
-		expect(printed).toContain('ensName unset');
+		expect(printed).toContain('ensName alice.eth (inferred)');
+		expect(printed).not.toContain('ensName unset');
+	});
+
+	it('prints an INFERRED ensName as the name, a STORED one bare, none `unset`', async () => {
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				// ensName ABSENT but RESOLVED from the `.eth` id: the broken case —
+				// it printed `unset` right beside a working ronan.eth.limo link.
+				{id: 'ronan.eth', cid: 'bafyronan', ensNameToWarm: 'ronan.eth'},
+				// A STORED name prints as itself, with no inferred marker.
+				{
+					id: 'stored',
+					cid: 'bafystored',
+					ensName: 'named.eth',
+					ensNameToWarm: 'named.eth',
+				},
+				// Nothing stored AND nothing resolved: genuinely unset.
+				{id: 'blog', cid: 'bafyblog'},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const lines = out.join('\n').split('\n');
+		const lineFor = (id: string) => lines.find((l) => l.includes(`${id}:`))!;
+		expect(lineFor('ronan.eth')).toContain('ensName ronan.eth (inferred)');
+		expect(lineFor('stored')).toContain('ensName named.eth eth.limo');
+		expect(lineFor('stored')).not.toContain('inferred');
+		expect(lineFor('blog')).toContain('ensName unset');
 	});
 
 	it('prints WHETHER the eth.limo name serves, and n/a when there is none', async () => {

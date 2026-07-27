@@ -55,6 +55,10 @@ import {
 } from '../site/site-wrapper.js';
 import {makeStatusOp} from '../status/status-report.js';
 import {
+	ensNameDisplay,
+	type EnsNameDisplayInput,
+} from '../status/ens-name-display.js';
+import {
 	authorizePublisher as coreAuthorizePublisher,
 	AuthorizeSecondSignerError,
 	type AuthorizeInput,
@@ -832,7 +836,7 @@ async function runStatus(
 		for (const site of report.sites) {
 			rc.out(
 				`  ${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''}` +
-					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site.ensName)}` +
+					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site)}` +
 					` eth.limo ${site.ensNameToWarm ? `${site.ensNameToWarm}.limo` : 'none'}` +
 					` ethLimoServes=${printedEthLimoServes(site.ethLimoServes)}` +
 					` announced=${site.announced} gatewayServes=${site.gatewayServes}`,
@@ -843,15 +847,30 @@ async function runStatus(
 }
 
 /**
- * How `status` PRINTS the three-valued stored `ensName`, keeping all three
- * apart on one line: a stored name prints as itself, `""` prints `opted-out`
- * (never warm, even a `.eth` id) and an absent field prints `unset` (the box
- * infers from a `.eth` id). Printing `""` as a bare empty string would read as
- * a rendering bug and erase the very distinction the metadata preserves.
+ * How `status` PRINTS a site's ENS name, keeping the FOUR states
+ * ({@link ensNameDisplay}) apart on one line: a STORED name prints as itself,
+ * an INFERRED one prints as the name it warms plus `(inferred)` (the site
+ * stores none, so it is not an override), `""` prints `opted-out` (never warm,
+ * even a `.eth` id) and a site with no name either way prints `unset`.
+ *
+ * Printing `""` as a bare empty string would read as a rendering bug and erase
+ * the distinction the metadata preserves; printing an inferred name as `unset`
+ * described the stored FIELD while the operator reads the line as the site's
+ * ENS name, and contradicted the `eth.limo <name>.limo` printed right beside
+ * it.
  */
-function printedEnsName(ensName: string | undefined): string {
-	if (ensName === undefined) return 'unset';
-	return ensName === '' ? 'opted-out' : ensName;
+function printedEnsName(site: EnsNameDisplayInput): string {
+	const display = ensNameDisplay(site);
+	switch (display.kind) {
+		case 'stored':
+			return display.name;
+		case 'inferred':
+			return `${display.name} (inferred)`;
+		case 'opted-out':
+			return 'opted-out';
+		case 'none':
+			return 'unset';
+	}
 }
 
 /**

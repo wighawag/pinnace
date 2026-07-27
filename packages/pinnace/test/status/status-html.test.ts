@@ -131,6 +131,87 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(html).not.toContain('optout.eth.limo');
 	});
 
+	it('shows an INFERRED ensName as the name, marked inferred (never `none`)', () => {
+		// The bug this replaces: a `.eth` site with no STORED name showed `none` in
+		// the ens-name cell beside a working ronan.eth.limo link in the next one.
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'ronan.eth',
+					cid: 'bafyronan',
+					ipns: 'k51ronan',
+					mode: 'ipns',
+					// ensName ABSENT, but the report RESOLVED one from the `.eth` id.
+					ensNameToWarm: 'ronan.eth',
+				},
+			],
+		});
+		expect(html).toContain('<code>ronan.eth</code>');
+		expect(html).toContain('(inferred)');
+		// Every cell of this row has a value, so NOTHING in it reads as absent.
+		expect(html).not.toContain('class="none"');
+		expect(html).not.toContain('opted out');
+	});
+
+	it('keeps a STORED ensName visually distinct from an inferred one', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'stored.eth',
+					cid: 'bafystored',
+					mode: 'ipfs',
+					ensName: 'stored.eth',
+					ensNameToWarm: 'stored.eth',
+				},
+				{
+					id: 'inferred.eth',
+					cid: 'bafyinferred',
+					mode: 'ipfs',
+					ensNameToWarm: 'inferred.eth',
+				},
+			],
+		});
+		const storedRow = html.slice(
+			html.indexOf('stored.eth'),
+			html.indexOf('inferred.eth'),
+		);
+		// A STORED name is the site's own override, so it carries no hint at all.
+		expect(storedRow).toContain('<code>stored.eth</code>');
+		expect(storedRow).not.toContain('inferred');
+		const inferredRow = html.slice(html.indexOf('>inferred.eth<'));
+		expect(inferredRow).toContain('<code>inferred.eth</code>');
+		expect(inferredRow).toContain('(inferred)');
+	});
+
+	it('still shows none for a non-`.eth` id that resolves no name at all', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'blog', cid: 'bafyblog', ipns: 'k51blog', mode: 'ipfs'}],
+		});
+		// Nothing stored AND nothing resolved: genuinely none, and it keeps the
+		// muted `.none` styling rather than borrowing the inferred one.
+		expect(html).toContain('<span class="none">none</span>');
+		expect(html).not.toContain('(inferred)');
+		expect(html).not.toContain('<span class="inferred">');
+	});
+
+	it('infers NOTHING itself: a `.eth` id the report did not resolve reads none', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			// A `.eth` id, no stored ensName, and NO resolved ensNameToWarm (a report
+			// from a path that resolves none). The renderer must not apply the
+			// `.eth` rule on its own — it renders what the report resolved.
+			sites: [{id: 'ronan.eth', cid: 'bafyronan', mode: 'ipns'}],
+		});
+		// Nothing stored AND nothing resolved: genuinely none, and it keeps the
+		// muted `.none` styling rather than borrowing the inferred one.
+		expect(html).toContain('<span class="none">none</span>');
+		expect(html).not.toContain('(inferred)');
+		expect(html).not.toContain('<span class="inferred">');
+	});
+
 	it('shows an explicit ensName, and links the name it warms', () => {
 		const html = renderStatusHtml({
 			generated: '2026-07-25T10:11:12.000Z',

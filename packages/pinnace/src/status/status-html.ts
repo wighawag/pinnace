@@ -16,6 +16,10 @@
  * assets, and NO client-side JS (the data is baked in at render time). Its only
  * outbound URLs are the per-site public-gateway links.
  *
+ * Its ONE import is {@link ensNameDisplay}, a sibling classifier that resolves
+ * nothing (it only reads the two report fields this row already holds); the
+ * view stays free of the report/warm cores it must not depend on.
+ *
  * FRESHNESS: the page cannot push, so it pulls: a
  * `<meta http-equiv="refresh" content="<seconds>">` makes the browser
  * re-request it periodically and pick up whatever the on-box `status` timer last
@@ -26,6 +30,7 @@
  * just re-fetch identical bytes. The rendered `generated` timestamp is shown
  * prominently so a viewer sees the real data age regardless of reload timing.
  */
+import {ensNameDisplay, type EnsNameDisplay} from './ens-name-display.js';
 
 /**
  * How often the rendered page tells the browser to re-request it, in seconds.
@@ -69,7 +74,10 @@ export interface StatusPageSite {
 	/**
 	 * The `ensName` the site stores, three-valued: a name, `""` (the opt-out) or
 	 * absent (infer from a `.eth` id). The three render DIFFERENTLY — an opt-out
-	 * must not look like a site that simply never set one.
+	 * must not look like a site that simply never set one. An ABSENT one is read
+	 * TOGETHER with {@link ensNameToWarm}, so a `.eth` site with no stored name
+	 * shows the INFERRED name it warms instead of `none` (see
+	 * {@link ./ens-name-display.js#ensNameDisplay}).
 	 */
 	ensName?: string;
 	/**
@@ -170,9 +178,10 @@ ${rows}
 }
 
 /**
- * Render one site's table row: id, gateway-linked cid + ipns, what its MFS
- * metadata stores (mode + ensName), the eth.limo name that resolves to AND
- * whether it serves, then the two CID health indicators.
+ * Render one site's table row: id, gateway-linked cid + ipns, the `mode` its
+ * MFS metadata stores, its ENS name (stored or inferred, see
+ * {@link renderEnsName}), the eth.limo name that resolves to AND whether it
+ * serves, then the two CID health indicators.
  */
 function renderSiteRow(site: StatusPageSite): string {
 	const cid = site.cid
@@ -190,14 +199,11 @@ function renderSiteRow(site: StatusPageSite): string {
 	const mode = site.mode
 		? `<code>${escapeHtml(site.mode)}</code>`
 		: '<span class="none">none</span>';
-	// The THREE ensName states read differently on the page: a stored name, the
-	// explicit opt-out, and a site that simply stores none.
-	const ensName =
-		site.ensName === undefined
-			? '<span class="none">none</span>'
-			: site.ensName === ''
-				? '<span class="none">opted out</span>'
-				: `<code>${escapeHtml(site.ensName)}</code>`;
+	// The FOUR ensName states read differently on the page (ensNameDisplay): a
+	// stored name, an INFERRED one (the name the box warms, marked so it is not
+	// mistaken for an override the site stores), the explicit opt-out, and a site
+	// with no name at all.
+	const ensName = renderEnsName(ensNameDisplay(site));
 	// The eth.limo cell answers BOTH questions: which name would be warmed, and
 	// does it actually serve? The verdict is appended only when the report HAS
 	// one (see StatusPageSite.ethLimoServes) — a site with no name to probe shows
@@ -217,6 +223,30 @@ function renderSiteRow(site: StatusPageSite): string {
 		`<td>${mode}</td><td>${ensName}</td><td>${ethLimo}</td>` +
 		`<td>${indicator(site.announced)}</td><td>${indicator(site.gatewayServes)}</td></tr>`
 	);
+}
+
+/**
+ * Render the `ens name` cell from its display state: the NAME in `<code>` when
+ * there is one, with an inferred name carrying a muted `(inferred)` hint so it
+ * stays visually distinct from a stored one (an inferred name FOLLOWS the
+ * `.eth` id, a stored one OVERRIDES it — not the same thing). The two nameless
+ * states keep the muted `.none` styling that already tells an opt-out apart
+ * from a site that simply has none.
+ */
+function renderEnsName(display: EnsNameDisplay): string {
+	switch (display.kind) {
+		case 'stored':
+			return `<code>${escapeHtml(display.name)}</code>`;
+		case 'inferred':
+			return (
+				`<code>${escapeHtml(display.name)}</code> ` +
+				'<span class="inferred">(inferred)</span>'
+			);
+		case 'opted-out':
+			return '<span class="none">opted out</span>';
+		case 'none':
+			return '<span class="none">none</span>';
+	}
 }
 
 /** A gateway link: escaped label, escaped href (already URI-encoded). */
@@ -263,4 +293,4 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 	code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
 	.ok { color: #157f3d; font-weight: 600; }
 	.no { color: #b3261e; font-weight: 600; }
-	.none, .empty { color: #666; }`;
+	.none, .empty, .inferred { color: #666; }`;

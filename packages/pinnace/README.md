@@ -191,7 +191,7 @@ The same four ensName forms, and the same `--set-mode`, apply to `pinnace pin`.
 ### 7. Check it
 
 ```sh
-pinnace --config pinnace.json status                 # per-site CID / IPNS id / stored mode + ensName / eth.limo name AND whether it serves / announce / gateway-serves
+pinnace --config pinnace.json status                 # per-site CID / IPNS id / stored mode + ensName (a `.eth` site that stores none shows the name it warms, marked `(inferred)`) / eth.limo name AND whether it serves / announce / gateway-serves
 curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the exported signed record
 ```
 
