@@ -1,1 +1,4 @@
-protocol synced from ~/.agents/skills/setup/protocol on 2026-07-23
+protocol-version: 2026-07-30
+synced-from: skills/setup/protocol/
+synced-at: 2026-07-30T07:08:34.551Z
+source-commit: dorfl sync
