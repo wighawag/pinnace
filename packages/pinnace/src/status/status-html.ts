@@ -248,7 +248,7 @@ function renderSiteRow(site: StatusPageSite): string {
 			? '<span class="none">none</span>'
 			: site.sequence.state === 'known'
 				? `<code>${escapeHtml(printedSequence(site.sequence))}</code>`
-				: `<span class="unknown">${escapeHtml(printedSequence(site.sequence))}</span>`;
+				: reasonCell('unknown', printedSequence(site.sequence));
 	const mode = site.mode
 		? `<code>${escapeHtml(site.mode)}</code>`
 		: '<span class="none">none</span>';
@@ -306,15 +306,15 @@ function renderOrigin(origin: EthLimoOrigin | undefined): string {
 		case 'foreign':
 			return (
 				'<span class="no">foreign</span> ' +
-				`<code>${escapeHtml(origin.path)}</code>`
+				`<code title="${escapeHtml(origin.path)}">${escapeHtml(abbreviate(origin.path))}</code>`
 			);
 		case 'frozen':
 			return (
 				'<span class="warn">frozen</span> ' +
-				`<code>${escapeHtml(origin.path)}</code>`
+				`<code title="${escapeHtml(origin.path)}">${escapeHtml(abbreviate(origin.path))}</code>`
 			);
 		case 'unknown':
-			return `<span class="unknown">unknown (${escapeHtml(origin.reason)})</span>`;
+			return reasonCell('unknown', `unknown (${origin.reason})`);
 	}
 }
 
@@ -333,10 +333,10 @@ function renderFreshness(freshness: EthLimoFreshness | undefined): string {
 		case 'stale':
 			return (
 				'<span class="warn">stale</span> ' +
-				`<code>${escapeHtml(freshness.servedCid)}</code>`
+				`<code title="${escapeHtml(freshness.servedCid)}">${escapeHtml(abbreviate(freshness.servedCid))}</code>`
 			);
 		case 'unknown':
-			return `<span class="unknown">unknown (${escapeHtml(freshness.reason)})</span>`;
+			return reasonCell('unknown', `unknown (${freshness.reason})`);
 	}
 }
 
@@ -366,7 +366,57 @@ function renderEnsName(display: EnsNameDisplay): string {
 
 /** A gateway link: escaped label, escaped href (already URI-encoded). */
 function gatewayLink(label: string, href: string): string {
-	return `<a href="${escapeHtml(href)}"><code>${escapeHtml(label)}</code></a>`;
+	return (
+		`<a href="${escapeHtml(href)}" title="${escapeHtml(label)}">` +
+		`<code>${escapeHtml(abbreviate(label))}</code></a>`
+	);
+}
+
+/**
+ * How many characters of a long opaque identifier are shown before it is
+ * middle-elided. A CIDv1 is ~59 characters and an IPNS id ~62; at eleven columns
+ * that is far more than a cell can hold, and since `code` breaks anywhere the
+ * browser shreds them into a one-character-per-line ribbon that makes the whole
+ * table unreadable (observed live, 2026-07-30).
+ *
+ * The head is what distinguishes one identifier from another at a glance
+ * (`bafybei...` vs `k51qzi5...` and the divergence just after), and the tail is
+ * what an operator compares when checking two values match, so BOTH ends are
+ * kept and only the indistinct middle goes.
+ */
+const ABBREV_HEAD = 10;
+const ABBREV_TAIL = 6;
+
+/**
+ * Middle-elide a long identifier for DISPLAY only. The full value always
+ * survives in the link's `href` and its `title` tooltip, and in `status.json`,
+ * so nothing is actually lost: this is a rendering concern, not a data one.
+ *
+ * Short values pass through untouched (eliding them would cost more characters
+ * than it saves), and the ellipsis is a real … so a copied string is visibly
+ * truncated rather than looking like a valid-but-wrong id.
+ */
+function abbreviate(value: string): string {
+	if (value.length <= ABBREV_HEAD + ABBREV_TAIL + 1) return value;
+	return `${value.slice(0, ABBREV_HEAD)}\u2026${value.slice(-ABBREV_TAIL)}`;
+}
+
+/**
+ * A long free-text reason (a Kubo error, an eth.limo path) rendered in a narrow
+ * cell: abbreviated to one line, with the FULL text in a `title` tooltip.
+ * Reasons are already length-capped by `shortReason`, but 120 characters is
+ * still far more than a cell can show.
+ */
+function reasonCell(cssClass: string, text: string, full?: string): string {
+	return (
+		`<span class="${cssClass}" title="${escapeHtml(full ?? text)}">` +
+		`${escapeHtml(abbreviateText(text))}</span>`
+	);
+}
+
+/** Tail-elide free text (unlike an id, its END is not the identifying part). */
+function abbreviateText(value: string): string {
+	return value.length <= 32 ? value : `${value.slice(0, 31)}\u2026`;
 }
 
 /**
@@ -384,10 +434,10 @@ function indicator(outcome: CheckOutcome | undefined): string {
 		case 'no':
 			return '<span class="no">no</span>';
 		case 'unknown': {
-			// The reason is report-supplied, so it is escaped like every other string.
-			const reason =
-				outcome?.state === 'unknown' ? ` (${escapeHtml(outcome.reason)})` : '';
-			return `<span class="unknown">unknown${reason}</span>`;
+			// The reason is report-supplied, so it is escaped like every other string
+			// (inside reasonCell) and abbreviated, with the full text in the tooltip.
+			const reason = outcome?.state === 'unknown' ? ` (${outcome.reason})` : '';
+			return reasonCell('unknown', `unknown${reason}`);
 		}
 	}
 }
@@ -423,7 +473,14 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 	table { border-collapse: collapse; width: 100%; margin-top: 1.5rem; }
 	th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #8883; }
 	thead th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: #666; }
-	code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
+	/* Identifiers are middle-elided for display (see abbreviate()), so they no
+	   longer need break-all, which is what shredded a 59-character CID into a
+	   one-character-per-line ribbon when eleven columns squeezed the cell. */
+	code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; white-space: nowrap; }
+	td { white-space: nowrap; }
+	/* The site id is the row's label and may be long; let it wrap rather than
+	   widen the table. */
+	th[scope="row"] { white-space: normal; word-break: break-word; }
 	.ok { color: #157f3d; font-weight: 600; }
 	.no { color: #b3261e; font-weight: 600; }
 	/* ATTENTION, deliberately NOT the .no red: a stale cid or a frozen ENS record

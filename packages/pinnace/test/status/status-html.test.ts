@@ -107,8 +107,10 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(html).toContain('>ipfs<');
 		// The resolved eth.limo target is linked; bob resolves none.
 		expect(html).toContain('href="https://alice.eth.limo/"');
-		// Exactly the one warmed site: its href + its label. bob resolves none.
-		expect(html.match(/alice\.eth\.limo/g)?.length).toBe(2);
+		// Exactly the one warmed site: its href, its title tooltip and its label
+		// (links carry the FULL value in `title`, so an elided label loses nothing).
+		// bob resolves none.
+		expect(html.match(/alice\.eth\.limo/g)?.length).toBe(3);
 		expect(html).not.toContain('bafybob.limo');
 	});
 
@@ -319,7 +321,9 @@ describe('renderStatusHtml: per-site row', () => {
 		// The NEGATIVE indicator (the red one) is never used for a check that could
 		// not run — the whole point of the third state.
 		expect(html).not.toContain('class="no"');
-		expect(html).toContain('<span class="unknown">unknown (http 429)</span>');
+		expect(html).toContain(
+			'<span class="unknown" title="unknown (http 429)">unknown (http 429)</span>',
+		);
 		// ...and the reason is styled with the MUTED family, never the red one.
 		expect(html).toContain('.none, .empty, .inferred, .unknown');
 	});
@@ -610,5 +614,75 @@ describe('renderStatusHtml: the record sequence column', () => {
 		// The neutral class, NOT the negative indicator: we could not ask.
 		expect(row).toContain('class="unknown"');
 		expect(row).not.toContain('class="no"');
+	});
+});
+
+describe('renderStatusHtml: long identifiers stay readable in narrow columns', () => {
+	// The live defect (2026-07-30): eleven columns squeezed the cid/ipns cells and
+	// `word-break: break-all` shredded a 59-character CIDv1 into a
+	// one-character-per-line ribbon, making the whole table unreadable.
+	const CID = 'bafybeigbxdgiqmsxwsuocolyhfhlgxf4dgqtfxd4gorw45gcvh5vmdakey';
+	const IPNS = 'k51qzi5uqu5dlqzk68fn2fkxlm774pc2qotnpwno7c8lt5d2b3rbqx82lweflz';
+
+	function html() {
+		return renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'ronan.eth', cid: CID, ipns: IPNS}],
+		});
+	}
+
+	it('middle-elides the cid and ipns in the VISIBLE label', () => {
+		const out = html();
+		expect(out).toContain('bafybeigbx\u2026mdakey');
+		expect(out).toContain('k51qzi5uqu\u2026lweflz');
+		// The full opaque string is not rendered as visible text any more.
+		expect(out).not.toContain(`<code>${CID}</code>`);
+	});
+
+	it('keeps the FULL value in the href and the title, so nothing is lost', () => {
+		const out = html();
+		expect(out).toContain(`https://${CID}.ipfs.dweb.link/`);
+		expect(out).toContain(`title="${CID}"`);
+		expect(out).toContain(`https://${IPNS}.ipns.dweb.link/`);
+		expect(out).toContain(`title="${IPNS}"`);
+	});
+
+	it('no longer breaks identifiers character-by-character', () => {
+		expect(html()).not.toContain('word-break: break-all');
+	});
+
+	it('leaves a SHORT value untouched (eliding it would cost more than it saves)', () => {
+		const out = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'x', cid: 'bafyshort', ipns: 'k51short'}],
+		});
+		expect(out).toContain('<code>bafyshort</code>');
+		expect(out).not.toContain('\u2026');
+	});
+
+	it('abbreviates a long unknown REASON but keeps the full text in the tooltip', () => {
+		// A long reason WITHOUT quotes: escaping is covered elsewhere, and this test
+		// is about truncation, so the raw text can be asserted directly.
+		const reason =
+			'Kubo RPC name/inspect failed with status 500 and a malformed record';
+		const out = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'ronan.eth',
+					cid: CID,
+					ipns: IPNS,
+					sequence: {state: 'unknown', reason},
+				},
+			],
+		});
+		expect(out).toContain(`title="unknown (${reason})"`);
+		// ...but the visible text is one short line, not a wall in a narrow cell.
+		const cell = out.slice(out.indexOf('<tbody>'), out.indexOf('</tbody>'));
+		const visible = /<span class="unknown"[^>]*>([^<]*)<\/span>/.exec(
+			cell,
+		)![1]!;
+		expect(visible.length).toBeLessThanOrEqual(32);
+		expect(visible.endsWith('\u2026')).toBe(true);
 	});
 });
