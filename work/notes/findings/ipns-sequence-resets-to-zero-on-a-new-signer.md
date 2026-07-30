@@ -75,6 +75,6 @@ Semantics worth knowing before using it:
 
 ## What this does NOT say
 
-It does not say failover is broken in general: when the new signer's DHT lookup succeeds, boxo continues the sequence correctly and failover works, which is consistent with the successful live run recorded in `live-end-to-end-validated-clean-boot-onbox-failover.md` (that run validated a FIRST publish plus replica mirroring, not a second signer taking over an already-live name).
+It does not say failover is broken in general: when the new signer's DHT lookup succeeds, boxo continues the sequence correctly and failover works. The 2026-07-25 live run (now `notes/observations/live-end-to-end-validated-clean-boot-onbox-failover.md`, reclassified because its REPLICA half turned out to be unconfirmed) exercised a FIRST publish, not a second signer taking over an already-live name, so it neither confirms nor contradicts this.
 
 It says the mechanism has a silent failure branch that pinnace neither avoids, detects, nor reports, and that this is a property of the failover PRIMITIVE, so it applies identically whether the new signer arrives by reprovisioning a box or by any future in-place role change.

@@ -1,5 +1,5 @@
 ---
-title: Live end-to-end validation — clean-boot provisioning + on-box IPNS failover, DHT-resolved
+title: 'UNCONFIRMED (replica half): live run of clean-boot provisioning + on-box IPNS failover, DHT-resolved'
 source: 'live run 2026-07-25 against 2 fresh Debian 13 Hetzner boxes provisioned from pinnace@0.3.4/0.3.5 cloud-init (ipfs-publisher.ska.sh @ 62.238.33.85 + ipfs-replica-01.ska.sh @ 77.42.66.93, dashboard ipfs-dash.ska.sh); site id "basic", IPNS id k51qzi5uqu5dlqzk68fn2fkxlm774pc2qotnpwno7c8lt5d2b3rbqx82lweflz, CID bafybeigtg7thgwnqbnp575fcyhr6un4qmregyibjqnqb756lxwaztxukxi'
 ---
 
@@ -52,3 +52,28 @@ bridge is no longer needed; the on-box transport is real).
   npm installs to `/usr/bin/pinnace` (203/EXEC). Fixed in 0.3.5
   (`ExecStart=/usr/bin/env pinnace` + explicit PATH); a fresh 0.3.5 reprovision
   needs no symlink. (Bin path bug, fixed.)
+
+## Update 2026-07-30: RECLASSIFIED from `findings/` to `observations/`; the REPLICA half is unconfirmed and probably wrong
+
+Moved here, and the title marked, because part of what this note claims as validated cannot have been true as written. The body above is left exactly as recorded (this bucket is append-only, and what was observed at the time is the point).
+
+Original title, for the record: "Live end-to-end validation: clean-boot provisioning + on-box IPNS failover, DHT-resolved".
+
+**Why it is in doubt.** `KuboRpcClient.routingGet` has returned Kubo's JSON `QueryEvent` envelope (`{"ID":"","Type":5,"Extra":"<base64>"}`) rather than the raw signed record since the day it was written (`f647e3f`, the original kubo-rpc-client commit), which PREDATES this 2026-07-25 run. So on the day of this run the publisher was exporting an envelope to `/records/<id>.ipns-record`, and the replica was fetching that envelope and handing it to `routing/put`, which validates IPNS records. See `notes/findings/kubo-routing-get-returns-a-json-envelope-not-the-record.md`.
+
+That makes step 5 ("On-box replica ... journal `basic (re-announced)`") inconsistent with the code that was running. Either the `routing/put` was accepted without validation and the replica announced a non-record, or the journal line was read as success when it was not. **This note does not say which, because nobody knows.** That uncertainty is exactly why it is an observation now and not a finding.
+
+**What is NOT in doubt** (publisher-side and network-side, none of which touches the broken export):
+
+1. clean-boot provisioning from cloud-init with zero SSH,
+2. deploy importing the same CID into both nodes,
+3. key import onto the publisher,
+4. the publisher signing (`name/publish`) on its timer,
+6. DHT resolution of the name to the deployed CID from an INDEPENDENT third node, which is the strongest single result here and stands,
+7. both nodes serving the CID.
+
+**It cannot be re-verified right now:** there is no replica in the fleet any more (operator, 2026-07-30), only the publisher. So the replica half stays open rather than being re-run.
+
+**What would settle it,** whenever a replica exists again: run `pinnace node mirror` on it against a publisher running >= 0.13.1 (the release that fixes the export), and confirm the journal reports `re-announced` AND that an independent node resolves the name through that replica. Re-running it against an OLDER publisher would only reproduce the bug.
+
+Discharge test: this note is deletable once a replica has been observed re-announcing a correctly-exported record, since at that point the claim is either confirmed by a fresh run or superseded by it.
