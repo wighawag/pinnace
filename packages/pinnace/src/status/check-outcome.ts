@@ -48,6 +48,47 @@ export type CheckOutcome =
 /** The three states, for renderers that switch on them. */
 export type CheckState = CheckOutcome['state'];
 
+/**
+ * The SAME convention where the positive answer is a VALUE rather than a yes:
+ * an IPNS record's SEQUENCE number, which decides which record wins (highest
+ * unexpired sequence).
+ *
+ * It cannot be a {@link CheckOutcome} because `yes` carries nothing, and it is
+ * NOT modelled as `number | undefined` because the failure this exists to expose
+ * is a spurious 0: a node that cannot see a live record silently signs sequence
+ * 0 and loses (see
+ * `work/notes/findings/ipns-sequence-resets-to-zero-on-a-new-signer.md`). A
+ * reader that defaulted "could not read" to 0 would reproduce that exact bug in
+ * the reporting layer, so "we could not read it" is its own state, with a reason,
+ * exactly as `unknown` is for a yes/no check.
+ *
+ * It lives HERE, in the pure leaf, for the same reason {@link CheckOutcome}
+ * does: the reader is publisher machinery but the renderers (`status-html`, the
+ * CLI line) must not import core to display it.
+ */
+export type RecordSequence =
+	/** We read the record and this is its sequence. */
+	| {state: 'known'; sequence: number}
+	/** We could NOT read it; `reason` says why. */
+	| {state: 'unknown'; reason: string};
+
+/** The canonical "could not read the sequence" outcome (reason normalised). */
+export function sequenceUnknown(reason: string): RecordSequence {
+	return {state: 'unknown', reason: shortReason(reason)};
+}
+
+/**
+ * How a {@link RecordSequence} PRINTS on a status line or in a dashboard cell:
+ * the number when known, else `unknown (<reason>)`. Shared so the CLI and the
+ * dashboard cannot drift, and so neither invents a number for an unknown.
+ */
+export function printedSequence(sequence: RecordSequence | undefined): string {
+	if (sequence === undefined) return 'n/a';
+	return sequence.state === 'known'
+		? String(sequence.sequence)
+		: `unknown (${sequence.reason})`;
+}
+
 /** The canonical `yes` outcome (checks that ran and answered yes). */
 export const CHECK_YES: CheckOutcome = Object.freeze({state: 'yes'});
 

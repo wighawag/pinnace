@@ -943,3 +943,84 @@ describe('makeStatusOp — the NodeCommandOps.status adapter', () => {
 		expect('ethLimoHttp' in bob).toBe(false);
 	});
 });
+
+describe('status core — the record SEQUENCE (which record wins)', () => {
+	/** Seed a readable record + inspect result on a status mock. */
+	function withSequence(mock: MockKuboApi, sequence: number): MockKuboApi {
+		return mock
+			.on('routing/get', {text: 'raw-record'})
+			.on('name/inspect', {json: {Entry: {Sequence: sequence}}});
+	}
+
+	it('reports the sequence for a site this node holds the key for', async () => {
+		const mock = withSequence(withDistinctCids(mockForStatus()), 9);
+		const report = await statusReport({
+			client: clientWith(mock),
+			sitesDir: '/sites',
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => ({status: 200}),
+		});
+		const alice = report.sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.sequence).toEqual({state: 'known', sequence: 9});
+	});
+
+	it('leaves the sequence ABSENT (not applicable) for a site with no key here', async () => {
+		// bob has no keystore key, so there is no name of OURS to ask about. That
+		// is not the same as a check that failed, and must not read as one.
+		const mock = withSequence(withDistinctCids(mockForStatus()), 9);
+		const report = await statusReport({
+			client: clientWith(mock),
+			sitesDir: '/sites',
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => ({status: 200}),
+		});
+		const bob = report.sites.find((s) => s.id === 'bob')!;
+		expect(bob.ipns).toBeUndefined();
+		expect(bob.sequence).toBeUndefined();
+	});
+
+	it('reports UNKNOWN with a reason when the record cannot be read — never 0', async () => {
+		// The whole point: a spurious 0 is the failure mode being surfaced, so the
+		// REPORT must never manufacture one. routing/get is left unseeded, so the
+		// read fails exactly as it would on a node that cannot see the record.
+		const mock = withDistinctCids(mockForStatus());
+		const report = await statusReport({
+			client: clientWith(mock),
+			sitesDir: '/sites',
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => ({status: 200}),
+		});
+		const alice = report.sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.sequence?.state).toBe('unknown');
+		expect(alice.sequence).not.toMatchObject({sequence: 0});
+	});
+
+	it('a sequence read that fails does not fail the whole report', async () => {
+		const mock = withDistinctCids(mockForStatus());
+		const report = await statusReport({
+			client: clientWith(mock),
+			sitesDir: '/sites',
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => ({status: 200}),
+		});
+		// Every other field still reported for both sites.
+		expect(report.sites).toHaveLength(2);
+		expect(report.sites.every((s) => s.cid !== '')).toBe(true);
+	});
+
+	it('carries the sequence into the status.json payload via makeStatusOp', async () => {
+		const mock = withSequence(withDistinctCids(mockForStatus()), 4);
+		const client = clientWith(mock);
+		const sites = await discoverSites(client, '/sites');
+		const op = makeStatusOp({
+			providersLookup: async () => ({Providers: []}),
+			gatewayProbe: async () => ({status: 200}),
+		});
+		const result = await op({client, role: 'publisher'}, sites);
+		const alice = result.sites.find((s) => s.id === 'alice.eth')!;
+		expect(alice.sequence).toEqual({state: 'known', sequence: 4});
+		// Absent stays absent in the payload: JSON.stringify drops the key entirely.
+		const bob = result.sites.find((s) => s.id === 'bob')!;
+		expect(JSON.stringify(bob)).not.toContain('sequence');
+	});
+});

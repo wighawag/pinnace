@@ -91,6 +91,10 @@ import {
 	type EthLimoResolution,
 } from './ethlimo-resolution.js';
 import {ethLimoUrl, resolveEnsNameToWarm} from '../site/site-wrapper.js';
+import {
+	readRecordSequence,
+	type RecordSequence,
+} from '../publisher/ipns-sequence.js';
 
 /** The delegated-routing providers endpoint (path takes the CID). */
 const DELEGATED_ROUTING_BASE =
@@ -178,6 +182,22 @@ export interface SiteStatus {
 	cid: string;
 	/** The IPNS id, if a same-named keystore key exists (else undefined). */
 	ipns?: string;
+	/**
+	 * The SEQUENCE number of the record this node currently holds/sees for
+	 * {@link ipns} — the number that decides which record WINS (highest unexpired
+	 * sequence), and therefore the one fact that tells an operator whether a
+	 * failover actually took or whether two boxes are racing one name.
+	 *
+	 * ABSENT means NOT APPLICABLE (this node has no key for the site, so there is
+	 * no name of ours to ask about), exactly as {@link ethLimoServes} uses
+	 * absence. When present it is {@link RecordSequence}: `known` with the number,
+	 * or `unknown` WITH THE REASON — never a fallback 0, because a spurious 0 is
+	 * precisely the failure this field exists to expose.
+	 *
+	 * Meaningful mainly when COMPARED ACROSS NODES: one node's number proves
+	 * nothing on its own about who is winning in the DHT.
+	 */
+	sequence?: RecordSequence;
 	/**
 	 * The `mode` the site STORES in its `metadata.json` — reported as stored, so
 	 * ABSENT (a site placed before metadata existed) stays absent rather than
@@ -333,19 +353,29 @@ export async function statusReport(
 		// The two mismatch axes come out of the SAME answer the probe just gave —
 		// no second request, no second seam. A site with nothing to probe gets no
 		// verdict at all (not applicable), which is not the same as `unknown`.
+		// Only a site this node holds a key for has a name of OURS to ask about; for
+		// anything else there is no question to answer (absent, not `unknown`).
+		const ipns = keys.get(site.id);
+		const sequence =
+			ipns === undefined
+				? undefined
+				: await readRecordSequence(input.client, ipns);
 		const resolution =
 			ethLimo === undefined
 				? undefined
 				: ethLimoResolutionOf(ethLimo, {
 						cid: site.cid,
-						ipns: keys.get(site.id),
+						ipns,
 						mode: site.metadata.mode,
 						ensName: ensNameToWarm,
 					});
 		statuses.push({
 			id: site.id,
 			cid: site.cid,
-			ipns: keys.get(site.id),
+			ipns,
+			// Absent when there is no key here (nothing to ask); otherwise the
+			// three-valued read, whose `unknown` never collapses to a number.
+			sequence,
 			// Reported AS STORED (`undefined` stays `undefined`), then the resolved
 			// warm target through the loop's own rule.
 			mode: site.metadata.mode,
@@ -400,6 +430,9 @@ export function makeStatusOp(
 				mode: s.mode,
 				ensName: s.ensName,
 				ensNameToWarm: s.ensNameToWarm,
+				// Absent-means-not-applicable survives into the payload, and an
+				// `unknown` travels WITH its reason rather than as a bare number.
+				sequence: s.sequence,
 				announced: s.announced,
 				gatewayServes: s.gatewayServes,
 				gatewayHttp: s.gatewayHttp,

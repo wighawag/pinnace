@@ -82,6 +82,43 @@ export interface NamePublishOptions {
 	ttl?: string;
 	/** Publish even with no online peers (`allow-offline=true`). */
 	allowOffline?: boolean;
+	/**
+	 * An EXPLICIT record sequence number, for the one case Kubo cannot get right
+	 * on its own: a NEW signer taking over a name that is already live.
+	 *
+	 * Kubo picks the sequence by looking for the name's existing record, first in
+	 * its local datastore and then (only then) in the routing system. On a node
+	 * that has never signed this name the local lookup misses, and if the routing
+	 * lookup ALSO fails — not-found, a network error, or its 30s timeout — boxo
+	 * cannot tell that apart from a genuinely new name and SILENTLY starts at
+	 * sequence 0. Higher sequence wins in IPNS, so that record loses to the old
+	 * publisher's for the remainder of its ~72h validity while every indicator
+	 * reads green. See
+	 * `work/notes/findings/ipns-sequence-resets-to-zero-on-a-new-signer.md`.
+	 *
+	 * Kubo REFUSES a sequence that is not strictly higher than the existing
+	 * record's (and refuses 0 outright when there is no existing record), so this
+	 * is a safe upper bound rather than a footgun: it either applies or errors,
+	 * and can never silently regress a name.
+	 */
+	sequence?: number;
+}
+
+/**
+ * The subset of Kubo's `name/inspect` result pinnace reads: the decoded IPNS
+ * record `Entry`. Every field is optional because the endpoint is marked
+ * EXPERIMENTAL in Kubo and its shape is not ours to guarantee — the caller
+ * treats a missing `Sequence` as "could not read", never as 0.
+ */
+export interface NameInspectResult {
+	Entry?: {
+		/** The `/ipfs/<cid>` path the record points at. */
+		Value?: string;
+		/** The record's sequence number. Higher wins among unexpired records. */
+		Sequence?: number;
+		/** The record's expiry (RFC3339). */
+		Validity?: string;
+	};
 }
 
 export class KuboRpcClient {
@@ -344,7 +381,35 @@ export class KuboRpcClient {
 		if (options.lifetime) q.set('lifetime', options.lifetime);
 		if (options.ttl) q.set('ttl', options.ttl);
 		if (options.allowOffline) q.set('allow-offline', 'true');
+		// Sent only when STATED: omitting it leaves Kubo's own sequence logic
+		// untouched (continue from the existing record, ++ only if the value
+		// changed), which is right for every publish by a node that already signs
+		// this name. `0` is NOT a meaningful override (Kubo rejects it outright), so
+		// it is not sent either.
+		if (options.sequence) q.set('sequence', String(options.sequence));
 		return this.requestJson<T>('name/publish', q);
+	}
+
+	/**
+	 * `name/inspect` — decode a raw signed IPNS record into its fields (notably
+	 * the SEQUENCE number). Takes the record as a `multipart/form-data` `file`
+	 * part, exactly like the other upload endpoints (Kubo declares it as a
+	 * `FileArg`), so it goes through {@link fileUpload} rather than a raw body.
+	 *
+	 * `dump=false` suppresses the full hex dump of the protobuf, which Kubo
+	 * includes BY DEFAULT and which pinnace never reads — a status pass over
+	 * every site would otherwise haul a hex blob per site for nothing.
+	 *
+	 * Pairs with {@link routingGet}: fetch the raw record, then inspect it. Kubo
+	 * marks this endpoint EXPERIMENTAL, so callers must treat an unexpected shape
+	 * as "could not read", never as a value.
+	 */
+	nameInspect<T = NameInspectResult>(record: Uint8Array): Promise<T> {
+		return this.fileUpload<T>(
+			'name/inspect',
+			new URLSearchParams({dump: 'false'}),
+			record,
+		);
 	}
 
 	/**

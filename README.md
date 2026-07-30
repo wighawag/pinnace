@@ -42,6 +42,7 @@ A site's own state lives with the site, on the node: MFS holds each one as a wra
 The full setup guide (mental model, config + secrets, and the end-to-end provision -> deploy -> failover flow) is in the package README:
 
 - **[packages/pinnace/README.md](packages/pinnace/README.md)** — install, configure, provision Hetzner nodes, deploy an `ipns` site, and verify failover.
+- **[docs/failover.md](docs/failover.md)** — the failover runbook: recovering a name when the publisher dies (the replicas follow a DNS change; the record-sequence check tells you whether the handover took).
 
 ## Repository layout
 

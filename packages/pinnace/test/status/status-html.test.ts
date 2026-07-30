@@ -143,6 +143,9 @@ describe('renderStatusHtml: per-site row', () => {
 					cid: 'bafyronan',
 					ipns: 'k51ronan',
 					mode: 'ipns',
+					// A published site whose record this node could read, so the seq cell
+					// carries a value like every other cell in this row.
+					sequence: {state: 'known', sequence: 3},
 					// ensName ABSENT, but the report RESOLVED one from the `.eth` id.
 					ensNameToWarm: 'ronan.eth',
 					// ...and the probe answered on both resolution axes, so every cell
@@ -488,8 +491,11 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(row).not.toContain('class="no"');
 		expect(row).not.toContain('foreign');
 		expect(row).not.toContain('stale');
-		// Both axes read as the muted "nothing to report", like the eth.limo cell.
-		expect(row.match(/<span class="none">none<\/span>/g)?.length).toBe(4);
+		// Both axes read as the muted "nothing to report", like the eth.limo cell
+		// and, for this keyless ipfs-mode site, the ipns and seq cells: an
+		// ipfs-addressed site has no name of ours, so there is no sequence to ask
+		// about and the cell must read as not-applicable, never as a failed read.
+		expect(row.match(/<span class="none">none<\/span>/g)?.length).toBe(5);
 	});
 
 	it('says so plainly when the node has no sites yet (fresh box)', () => {
@@ -559,5 +565,50 @@ describe('renderStatusHtml: self-contained + escaped', () => {
 		expect(renderStatusHtml(reportFixture())).toBe(
 			renderStatusHtml(reportFixture()),
 		);
+	});
+});
+
+describe('renderStatusHtml: the record sequence column', () => {
+	function rowFor(site: Parameters<typeof renderStatusHtml>[0]['sites'][0]) {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [site],
+		});
+		return html.slice(html.indexOf('<tbody>'), html.indexOf('</tbody>'));
+	}
+
+	it('shows a known sequence as the number', () => {
+		const row = rowFor({
+			id: 'alice.eth',
+			cid: 'bafyalice',
+			ipns: 'k51alice',
+			sequence: {state: 'known', sequence: 12},
+		});
+		expect(row).toContain('<code>12</code>');
+	});
+
+	it('shows a real sequence of 0 (a first publish is a fact, not a failure)', () => {
+		const row = rowFor({
+			id: 'alice.eth',
+			cid: 'bafyalice',
+			ipns: 'k51alice',
+			sequence: {state: 'known', sequence: 0},
+		});
+		// The seq CELL itself carries the number (the announced/gateway cells in
+		// this fixture legitimately read `unknown`, so assert the cell, not the row).
+		expect(row).toContain('<td><code>0</code></td>');
+	});
+
+	it('shows an unreadable sequence NEUTRALLY with its reason, never as a number', () => {
+		const row = rowFor({
+			id: 'alice.eth',
+			cid: 'bafyalice',
+			ipns: 'k51alice',
+			sequence: {state: 'unknown', reason: 'routing/get failed'},
+		});
+		expect(row).toContain('unknown (routing/get failed)');
+		// The neutral class, NOT the negative indicator: we could not ask.
+		expect(row).toContain('class="unknown"');
+		expect(row).not.toContain('class="no"');
 	});
 });

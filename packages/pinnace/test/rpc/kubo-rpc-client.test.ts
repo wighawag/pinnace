@@ -162,6 +162,48 @@ describe('KuboRpcClient — file-upload endpoints send multipart/form-data', () 
 		expect(req.query.get('key')).toBe('mysite');
 		expect(req.query.get('lifetime')).toBe('72h');
 		expect(req.query.get('ttl')).toBe('1h');
+		// Unstated: Kubo's own sequence logic is left alone, which is right for
+		// every publish by a node that already signs this name.
+		expect(req.query.get('sequence')).toBeNull();
+	});
+
+	it('name/publish carries an EXPLICIT sequence when one is stated', async () => {
+		// The failover lever: a new signer that cannot see the live record would
+		// otherwise silently start at 0 and lose. See
+		// work/notes/findings/ipns-sequence-resets-to-zero-on-a-new-signer.md.
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.namePublish({
+			cidPath: '/ipfs/bafyroot',
+			key: 'mysite',
+			sequence: 42,
+		});
+		expect(mock.lastRequest!.query.get('sequence')).toBe('42');
+	});
+
+	it('name/publish omits a sequence of 0 (Kubo rejects it; it overrides nothing)', async () => {
+		const mock = new MockKuboApi();
+		const client = clientWith(mock);
+		await client.namePublish({
+			cidPath: '/ipfs/bafyroot',
+			key: 'mysite',
+			sequence: 0,
+		});
+		expect(mock.lastRequest!.query.get('sequence')).toBeNull();
+	});
+
+	it('name/inspect uploads the record as multipart and suppresses the hex dump', async () => {
+		const mock = new MockKuboApi().on('name/inspect', {
+			json: {Entry: {Sequence: 5}},
+		});
+		const client = clientWith(mock);
+		const out = await client.nameInspect(new Uint8Array([1, 2, 3]));
+		const req = mock.lastRequest!;
+		expect(req.path).toBe('name/inspect');
+		expect(req.contentType).toMatch(/multipart\/form-data/);
+		expect(Array.from(req.fileParts![0]!.bytes)).toEqual([1, 2, 3]);
+		expect(req.query.get('dump')).toBe('false');
+		expect(out.Entry?.Sequence).toBe(5);
 	});
 
 	it('routing/get is a body-less read (no multipart, no file part)', async () => {

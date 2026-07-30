@@ -45,7 +45,7 @@ import {
 	republishAndExport,
 	mirrorAndReannounce,
 } from '../publisher/record-sequence.js';
-import type {CheckOutcome} from '../status/check-outcome.js';
+import type {CheckOutcome, RecordSequence} from '../status/check-outcome.js';
 import type {
 	EthLimoFreshness,
 	EthLimoOrigin,
@@ -138,6 +138,19 @@ export interface SiteOutcome {
 	gatewayServes?: CheckOutcome;
 	/** `status`-verb only: the raw HTTP status the cold-gateway probe answered with. */
 	gatewayHttp?: number;
+	/**
+	 * `status`-verb only: the sequence of the IPNS record THIS node holds for the
+	 * site — the number that decides which record wins. `known` with the number,
+	 * or `unknown` WITH its reason; ABSENT means not applicable (this node holds
+	 * no key for the site). Never a fallback 0: a spurious 0 is the failure it
+	 * exists to expose (see
+	 * `work/notes/findings/ipns-sequence-resets-to-zero-on-a-new-signer.md`).
+	 *
+	 * It travels into BOTH on-box artefacts — `status.json` and the rendered
+	 * dashboard — so each box publishes its own number and an operator can compare
+	 * them across the fleet, which is the only way the comparison means anything.
+	 */
+	sequence?: RecordSequence;
 	/**
 	 * `status`-verb only: the `mode` the site STORES in its `metadata.json`,
 	 * reported as stored — ABSENT stays absent rather than being resolved to the

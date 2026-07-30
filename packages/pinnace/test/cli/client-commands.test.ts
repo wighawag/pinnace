@@ -697,6 +697,66 @@ describe('status — dispatches to core statusReport per site', () => {
 		expect(printed).not.toContain('ensName unset');
 	});
 
+	it('prints each site record SEQUENCE, and omits it where there is no name of ours', async () => {
+		// Printed per host, so running `status` over a fleet puts the numbers side
+		// by side: that comparison is how a half-completed failover (a new
+		// publisher stuck BELOW the box it replaced) becomes visible at all.
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					ipns: 'k51alice',
+					sequence: {state: 'known' as const, sequence: 12},
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+				{
+					id: 'plain',
+					cid: 'bafyplain',
+					// No key here, so no name of ours: nothing to ask, nothing printed.
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const printed = out.join('\n');
+		expect(printed).toContain('seq 12');
+		// The keyless site's line carries no seq field at all.
+		const plainLine = out.find((l) => l.includes('plain: cid bafyplain'))!;
+		expect(plainLine).not.toContain('seq');
+	});
+
+	it('prints an unreadable SEQUENCE as unknown with its reason, never as a number', async () => {
+		const {deps} = recordingDeps();
+		deps.statusReport = async () => ({
+			peerId: 'peer-stub',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					ipns: 'k51alice',
+					sequence: {
+						state: 'unknown' as const,
+						reason: 'routing/get failed',
+					},
+					announced: checkAnswer(true),
+					gatewayServes: checkAnswer(true),
+				},
+			],
+		});
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		expect(await run(['status'], context)).toBe(0);
+		const printed = out.join('\n');
+		expect(printed).toContain('seq unknown (routing/get failed)');
+		// A sequence we could not read must never print as 0 (that IS the bug).
+		expect(printed).not.toContain('seq 0');
+	});
+
 	it('prints an INFERRED ensName as the name, a STORED one bare, none `unset`', async () => {
 		const {deps} = recordingDeps();
 		deps.statusReport = async () => ({

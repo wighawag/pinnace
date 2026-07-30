@@ -37,7 +37,12 @@
  * prominently so a viewer sees the real data age regardless of reload timing.
  */
 import {ensNameDisplay, type EnsNameDisplay} from './ens-name-display.js';
-import {checkState, type CheckOutcome} from './check-outcome.js';
+import {
+	checkState,
+	printedSequence,
+	type CheckOutcome,
+	type RecordSequence,
+} from './check-outcome.js';
 import type {EthLimoFreshness, EthLimoOrigin} from './ethlimo-resolution.js';
 
 /**
@@ -73,6 +78,17 @@ export interface StatusPageSite {
 	cid?: string;
 	/** The IPNS id when the site has a key (absent/empty for ipfs-mode sites). */
 	ipns?: string;
+	/**
+	 * The sequence of the record THIS node holds for {@link ipns} — which record
+	 * wins. ABSENT means not applicable (no key here, so no name of ours to ask
+	 * about) and renders as `none`, never as a fault; `unknown` renders neutrally
+	 * WITH its reason, and is never shown as a number.
+	 *
+	 * Its value is in COMPARING it across each node's own dashboard: a new
+	 * publisher stuck at a lower sequence than the box it replaced has not taken
+	 * over the name, however green everything else looks.
+	 */
+	sequence?: RecordSequence;
 	/**
 	 * The `mode` the site stores in its MFS metadata (`ipfs`/`ipns`), or absent
 	 * for a site that stores none. Rendered AS STORED, never resolved to a
@@ -192,7 +208,7 @@ ${PAGE_CSS}
 	<p class="meta">generated <time datetime="${generated}">${generated}</time>, reloading every ${refresh}s</p>
 	<table>
 		<thead>
-			<tr><th>site</th><th>cid</th><th>ipns</th><th>mode</th><th>ens name</th><th>eth.limo</th><th>origin</th><th>freshness</th><th>announced</th><th>gateway</th></tr>
+			<tr><th>site</th><th>cid</th><th>ipns</th><th>seq</th><th>mode</th><th>ens name</th><th>eth.limo</th><th>origin</th><th>freshness</th><th>announced</th><th>gateway</th></tr>
 		</thead>
 		<tbody>
 ${rows}
@@ -224,6 +240,15 @@ function renderSiteRow(site: StatusPageSite): string {
 				`https://${uriPart(site.ipns)}.${IPNS_GATEWAY_HOST}/`,
 			)
 		: '<span class="none">none</span>';
+	// The record sequence: a plain number when known, the reason when not, and
+	// `none` when this node holds no key for the site. Never a bare 0 for an
+	// unread sequence (that IS the failure this column exposes).
+	const sequence =
+		site.sequence === undefined
+			? '<span class="none">none</span>'
+			: site.sequence.state === 'known'
+				? `<code>${escapeHtml(printedSequence(site.sequence))}</code>`
+				: `<span class="unknown">${escapeHtml(printedSequence(site.sequence))}</span>`;
 	const mode = site.mode
 		? `<code>${escapeHtml(site.mode)}</code>`
 		: '<span class="none">none</span>';
@@ -247,7 +272,7 @@ function renderSiteRow(site: StatusPageSite): string {
 		: '<span class="none">none</span>';
 	return (
 		`\t\t\t<tr><th scope="row">${escapeHtml(site.id)}</th>` +
-		`<td>${cid}</td><td>${ipns}</td>` +
+		`<td>${cid}</td><td>${ipns}</td><td>${sequence}</td>` +
 		`<td>${mode}</td><td>${ensName}</td><td>${ethLimo}</td>` +
 		`<td>${renderOrigin(site.ethLimoOrigin)}</td>` +
 		`<td>${renderFreshness(site.ethLimoFreshness)}</td>` +

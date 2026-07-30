@@ -105,7 +105,7 @@ import {
 	type StatusReportInput,
 	type StatusReport,
 } from '../status/status-report.js';
-import type {CheckOutcome} from '../status/check-outcome.js';
+import {printedSequence, type CheckOutcome} from '../status/check-outcome.js';
 import type {
 	EthLimoFreshness,
 	EthLimoOrigin,
@@ -847,6 +847,12 @@ async function runStatus(
 		for (const site of report.sites) {
 			rc.out(
 				`  ${site.id}: cid ${site.cid}${site.ipns ? ` ipns ${site.ipns}` : ''}` +
+					// The record sequence decides which record WINS, so it is printed
+					// per host: running `status` over a fleet puts each node's number
+					// side by side, which is how a half-completed failover (a new
+					// publisher stuck BELOW the box it replaced) or two racing signers
+					// become visible. Omitted entirely when not applicable (no key here).
+					`${site.sequence ? ` seq ${printedSequence(site.sequence)}` : ''}` +
 					` mode ${site.mode ?? 'unset'} ensName ${printedEnsName(site)}` +
 					` eth.limo ${site.ensNameToWarm ? `${site.ensNameToWarm}.limo` : 'none'}` +
 					` ethLimoServes=${printedEthLimoServes(site.ethLimoServes)}` +

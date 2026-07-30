@@ -38,7 +38,7 @@ Requires Node >= 22. (The nodes themselves install `pinnace` globally for their 
 ## Mental model
 
 - **node** (box): a self-owned server running the Kubo IPFS daemon, reached ONLY via its Kubo RPC API (`POST /api/v0/...`, bearer-token guarded, fronted by Caddy over HTTPS). Swarm port 4001 is open so public gateways can dial it; the raw RPC (5001) is never exposed.
-- **publisher / replica**: exactly one **publisher** per shared IPNS name holds the derived key, signs + refreshes the record, and exports the raw signed record. Keyless **replicas** pin the same CID and re-announce the publisher's record (falling back to a cached copy if the publisher is down), so the name stays resolvable within the record's validity window even if the publisher dies. That window is a GRACE period, not a handover: getting the name signed again beyond it means another box actually signing, and a box's role (`NODE_ROLE`) and a replica's `PUBLISHER_ENDPOINT` are cloud-init env values pinnace cannot change over Kubo RPC. So promoting a replica is today a REPROVISION of that box, not a command.
+- **publisher / replica**: exactly one **publisher** per shared IPNS name holds the derived key, signs + refreshes the record, and exports the raw signed record. Keyless **replicas** pin the same CID and re-announce the publisher's record (falling back to a cached copy if the publisher is down), so the name stays resolvable within the record's validity window even if the publisher dies. That window is a GRACE period, not a handover: getting the name signed again beyond it means another box actually signing, and a box's role (`NODE_ROLE`) is a cloud-init env value pinnace cannot change over Kubo RPC. So promotion is not a command. It is also not as painful as that sounds: a replica's `PUBLISHER_ENDPOINT` is a URL against the publisher's DASHBOARD vhost, so repointing that ONE DNS record moves every replica to a new publisher at once, with no SSH and nothing to reprovision. The procedure (including the record-sequence check that decides whether the handover actually took) is the [failover runbook](https://github.com/wighawag/pinnace/blob/main/docs/failover.md).
 - **CID / CAR**: your site is built client-side into a CAR (Content Addressable aRchive) whose root is the site's UnixFS directory; the same CAR is imported into every node so they all serve the identical **CID**.
 - **master key -> per-site IPNS key**: one operator-held secret (env-only, never on a node, never in the config file) deterministically derives each site's IPNS key: `HKDF-SHA256(master, info = "pinnace:ipns:v1:" + id)` -> ed25519 seed -> the `k51...` IPNS name. Names are recoverable from the master alone; provisioning is stateless. This is a frozen contract (see the ADRs).
 - **site `id`**: one value per site, used as BOTH its MFS home (`/sites/<id>/`) AND the key-derivation input. Pick anything stable (e.g. `mysite`, or `ronan.eth`).
@@ -165,7 +165,7 @@ That is the whole first deploy: in `ipns` mode `deploy` PROVISIONS its own key. 
 
 `--set-mode ipns` is stated ONCE: it is written into the site's `metadata.json`, so every later deploy of `mysite` picks it up from there. Later deploys need NO master, because the publisher already holds the key — which is what makes CI deploys (`install-ci`) key-free: they just re-sign the new CID.
 
-After this the on-box timers run the record loop automatically: the publisher re-signs + exports the record, replicas mirror + re-announce it, and if the publisher goes down the replicas keep the name alive from their cached record within its validity window. That is a grace window, not a handover — recovering the name beyond it means reprovisioning a box to sign (see the publisher/replica note above).
+After this the on-box timers run the record loop automatically: the publisher re-signs + exports the record, replicas mirror + re-announce it, and if the publisher goes down the replicas keep the name alive from their cached record within its validity window (~72h from the last signing). That is a grace window, not a handover: recovering the name beyond it means another box signing, which is a short DNS-led procedure rather than a command — see the [failover runbook](https://github.com/wighawag/pinnace/blob/main/docs/failover.md).
 
 ### 6. Change a site's metadata (just re-deploy)
 
@@ -196,6 +196,8 @@ pinnace --config pinnace.json status                 # per-site CID / IPNS id / 
 curl -sS https://ipfs-dash.example.com/records/mysite.ipns-record   # the exported signed record
 ```
 
+The per-site line also carries `seq`, the sequence number of the IPNS record that node currently holds. Among unexpired records the HIGHEST sequence wins, so comparing `seq` ACROSS hosts is how you confirm a failover actually took (a new publisher stuck below the box it replaced has not taken over the name, however green everything else reads) and how two boxes signing one name shows up. A site this node holds no key for prints no `seq` at all, and a record that could not be read prints `unknown (<reason>)` — never a `0`, because a spurious `0` is exactly the failure worth catching.
+
 ### 8. CI-only setups: `authorize` once, then deploy forever with no master
 
 `deploy` imports the site key itself, but only when it HAS the master — which bootstraps nothing for a project that only ever deploys from CI, where you do not want `PINNACE_MASTER` at all. Run `authorize` ONCE from your own machine instead:
@@ -206,7 +208,7 @@ pinnace --config pinnace.json authorize mysite   # or bare: every site the publi
 
 It derives `mysite`'s key from your master and imports it into the keystore of the host your config declares `role: publisher`. From then on CI deploys that name forever, with no master anywhere in the pipeline. It is IDEMPOTENT: the keystore is probed first, so a key already there is reported `already-authorized` and never re-imported — re-running it, or the bare form over every site the publisher holds in MFS, is safe. A named `<id>` does NOT need the site to exist yet, which is the point: authorize before the very first deploy.
 
-`authorize` grants KEY MATERIAL and nothing else. It is not a failover and it changes no role: it does not touch `hosts[].role` in `pinnace.json`, and it cannot touch the box's own `NODE_ROLE` (see the publisher/replica note in the mental model — promotion is a reprovision). It takes no `--host`, because the config already declares which host is the publisher, and it refuses loudly if that config declares zero or several publishers, or if another configured host already holds a key for the site: two nodes signing one name race the record's sequence numbers, so the name would flap between their CIDs.
+`authorize` grants KEY MATERIAL and nothing else. It is not a failover and it changes no role: it does not touch `hosts[].role` in `pinnace.json`, and it cannot touch the box's own `NODE_ROLE` (see the publisher/replica note in the mental model; recovering a name is the [failover runbook](https://github.com/wighawag/pinnace/blob/main/docs/failover.md), of which `authorize` is one step). It takes no `--host`, because the config already declares which host is the publisher, and it refuses loudly if that config declares zero or several publishers, or if another configured host already holds a key for the site: two nodes signing one name race the record's sequence numbers, so the name would flap between their CIDs.
 
 With `--endpoint <url>` there is no config to read: that flag MINTS a single host named `publisher` with role `publisher`, so you are ASSERTING that this node is the publisher. pinnace cannot verify the claim (a box's real role lives in its cloud-init env, not over Kubo RPC) and, seeing one node, it cannot check for a second signer elsewhere either — exactly as `deploy --endpoint` already works.
 
@@ -241,6 +243,8 @@ import {deriveIpnsId, buildCar, resolveConfig, KuboRpcClient} from 'pinnace';
 ## Design notes / decisions
 
 Durable architectural decisions live in [`docs/adr/`](https://github.com/wighawag/pinnace/tree/main/docs/adr) in the repo, notably: the frozen master-key -> IPNS KDF; that client-side key derivation is NOT client-side record signing (the node signs); and the boundary that Kubo owns pinning + provider-record freshness while the same `pinnace` binary runs the recurring on-box loop.
+
+Operational procedures live in [`docs/`](https://github.com/wighawag/pinnace/tree/main/docs), notably the [failover runbook](https://github.com/wighawag/pinnace/blob/main/docs/failover.md): what to do when the publisher dies, why the replicas follow a DNS change rather than needing a reprovision, and the record-sequence check that tells you whether the handover actually took.
 
 ## License
 
