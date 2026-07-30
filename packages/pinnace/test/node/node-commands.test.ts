@@ -3,7 +3,11 @@ import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
-import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
+import {MockKuboApi, routingGetBody} from '../../src/rpc/mock-kubo.js';
+
+/** The publisher-record seam carries BYTES (binary protobuf), never a string. */
+const bytes = (s: string) => new TextEncoder().encode(s);
+
 import {
 	runNodeCommand,
 	discoverSites,
@@ -288,7 +292,7 @@ describe('node republish (publisher) — default op wiring over the mock Kubo RP
 		mock.on('name/publish', {
 			json: {Name: 'k51alice', Value: '/ipfs/bafysite'},
 		});
-		mock.on('routing/get', {text: 'SIGNED-RECORD-BYTES'});
+		mock.on('routing/get', {text: routingGetBody('SIGNED-RECORD-BYTES')});
 		const {ctx, dir} = await baseContext(mock, {role: 'publisher'});
 		try {
 			const res = await runNodeCommand('republish', ctx);
@@ -318,7 +322,7 @@ describe('node republish (publisher) — default op wiring over the mock Kubo RP
 		// Only alice.eth has a key; bob is ipfs-mode (no key) -> not published.
 		mock.on('key/list', {json: {Keys: [{Name: 'alice.eth', Id: 'k51alice'}]}});
 		mock.on('name/publish', {json: {Name: 'k51alice'}});
-		mock.on('routing/get', {text: 'REC'});
+		mock.on('routing/get', {text: routingGetBody('REC')});
 		const {ctx, dir} = await baseContext(mock, {role: 'publisher'});
 		try {
 			await runNodeCommand('republish', ctx);
@@ -339,8 +343,9 @@ describe('node mirror (replica) — default op wiring: fetch + routing/put + fal
 		const publisherFetch = async (url: string) => {
 			fetched.push(url);
 			// name record + name id endpoints both resolve.
-			if (url.endsWith('.ipns-record')) return 'PUB-RECORD';
-			return 'k51pubid';
+			// BYTES: a signed record is binary, so the seam carries bytes.
+			if (url.endsWith('.ipns-record')) return bytes('PUB-RECORD');
+			return bytes('k51pubid');
 		};
 		const {ctx, dir} = await baseContext(mock, {
 			role: 'replica',

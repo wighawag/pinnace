@@ -458,13 +458,46 @@ export class KuboRpcClient {
 		return cid;
 	}
 
-	/** `routing/get?arg=<ipnsPath>` — fetch the raw signed record for a name. */
+	/**
+	 * `routing/get?arg=<ipnsPath>`: fetch the raw signed record for a name.
+	 *
+	 * UNLIKE the `ipfs routing get > file` shell pipeline, the HTTP RPC does NOT
+	 * return raw record bytes. It returns a JSON `QueryEvent` with the record
+	 * BASE64-ENCODED in `Extra`; the raw-bytes writer lives only in the command's
+	 * `cmds.Text` encoder, which the CLI selects and HTTP does not. So the decode
+	 * belongs HERE, once, rather than in each caller. See
+	 * `work/notes/findings/kubo-routing-get-returns-a-json-envelope-not-the-record.md`.
+	 *
+	 * This is asymmetric with {@link routingPut}, which takes RAW bytes and
+	 * VALIDATES them, so a naive get -> put round trip re-announces the envelope
+	 * instead of the record and is rejected as a malformed record.
+	 *
+	 * The envelope is a 200-OK non-empty text body, so nothing upstream fails on
+	 * it: a missing or non-string `Extra` is therefore a LOUD error naming the
+	 * node, never a silent empty record that would later read as "no record".
+	 */
 	async routingGet(ipnsPath: string): Promise<Uint8Array> {
 		const res = await this.request(
 			'routing/get',
 			new URLSearchParams({arg: ipnsPath}),
 		);
-		return new Uint8Array(await res.arrayBuffer());
+		const body = await res.text();
+		let extra: unknown;
+		try {
+			extra = (JSON.parse(body) as {Extra?: unknown}).Extra;
+		} catch {
+			throw new Error(
+				`Kubo RPC routing/get ${ipnsPath} on ${this.baseUrl}: expected a JSON ` +
+					`QueryEvent carrying the record in base64 'Extra', got a body that is ` +
+					`not JSON (${body.slice(0, 80)})`,
+			);
+		}
+		if (typeof extra !== 'string' || extra === '')
+			throw new Error(
+				`Kubo RPC routing/get ${ipnsPath} on ${this.baseUrl}: JSON QueryEvent ` +
+					`carries no base64 'Extra', so there is no record to decode`,
+			);
+		return new Uint8Array(Buffer.from(extra, 'base64'));
 	}
 
 	/**

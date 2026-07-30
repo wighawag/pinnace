@@ -1,6 +1,6 @@
 import {describe, it, expect, vi, afterEach} from 'vitest';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
-import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
+import {MockKuboApi, routingGetBody} from '../../src/rpc/mock-kubo.js';
 import {
 	statusReport,
 	makeStatusOp,
@@ -948,7 +948,7 @@ describe('status core — the record SEQUENCE (which record wins)', () => {
 	/** Seed a readable record + inspect result on a status mock. */
 	function withSequence(mock: MockKuboApi, sequence: number): MockKuboApi {
 		return mock
-			.on('routing/get', {text: 'raw-record'})
+			.on('routing/get', {text: routingGetBody('raw-record')})
 			.on('name/inspect', {json: {Entry: {Sequence: sequence}}});
 	}
 

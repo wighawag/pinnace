@@ -1,6 +1,6 @@
 import {describe, it, expect} from 'vitest';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
-import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
+import {MockKuboApi, routingGetBody} from '../../src/rpc/mock-kubo.js';
 import {readRecordSequence} from '../../src/publisher/ipns-sequence.js';
 
 /**
@@ -21,7 +21,7 @@ function clientWith(mock: MockKuboApi) {
 /** A mock whose routing/get returns a record body and name/inspect decodes it. */
 function mockWith(record: string, inspect: unknown): MockKuboApi {
 	return new MockKuboApi()
-		.on('routing/get', {text: record})
+		.on('routing/get', {text: routingGetBody(record)})
 		.on('name/inspect', {json: inspect});
 }
 
@@ -73,16 +73,33 @@ describe('readRecordSequence', () => {
 
 	it('reports UNKNOWN when name/inspect fails', async () => {
 		const mock = new MockKuboApi()
-			.on('routing/get', {text: 'raw'})
+			.on('routing/get', {text: routingGetBody('raw')})
 			.on('name/inspect', {status: 500, text: 'boom'});
 		const seq = await readRecordSequence(clientWith(mock), 'k51alice');
 		expect(seq.state).toBe('unknown');
 	});
 
-	it('reports UNKNOWN on an empty record body', async () => {
-		const mock = mockWith('', {Entry: {Sequence: 4}});
+	it('reports UNKNOWN when the envelope carries no record at all', async () => {
+		// routing/get REFUSES an envelope with no `Extra` (loudly, at the client),
+		// so this arrives here as a thrown read rather than as empty bytes. Either
+		// way the caller must see `unknown`, never a number.
+		const mock = new MockKuboApi().on('routing/get', {
+			text: JSON.stringify({ID: '', Type: 5, Responses: null}),
+		});
 		const seq = await readRecordSequence(clientWith(mock), 'k51alice');
-		expect(seq).toEqual({state: 'unknown', reason: 'empty record'});
+		expect(seq.state).toBe('unknown');
+	});
+
+	it('reports UNKNOWN on an empty record body', async () => {
+		// A well-formed envelope whose base64 decodes to nothing: no record to
+		// inspect, so no sequence, and still never a 0.
+		const mock = new MockKuboApi()
+			.on('routing/get', {
+				text: JSON.stringify({ID: '', Type: 5, Extra: ''}),
+			})
+			.on('name/inspect', {json: {Entry: {Sequence: 4}}});
+		const seq = await readRecordSequence(clientWith(mock), 'k51alice');
+		expect(seq.state).toBe('unknown');
 	});
 
 	it('reports UNKNOWN — NOT 0 — when the inspect result carries no sequence', async () => {

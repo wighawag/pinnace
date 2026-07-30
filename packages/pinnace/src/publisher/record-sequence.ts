@@ -186,11 +186,13 @@ export async function mirrorAndReannounce(
 	sites: DiscoveredSite[],
 ): Promise<NodeOpResult> {
 	const base = (ctx.publisherEndpoint ?? '').replace(/\/+$/, '');
-	const fetchRecord: PublisherFetch = ctx.publisherFetch ?? httpFetchText;
+	const fetchRecord: PublisherFetch = ctx.publisherFetch ?? httpFetchBytes;
 	const outcomes: SiteOutcome[] = [];
 
 	for (const site of sites) {
-		let record: string | undefined;
+		// BYTES throughout: the record is binary protobuf, so it never becomes a
+		// string anywhere on this path (fetch -> cache -> routing/put).
+		let record: Uint8Array | undefined;
 		let ipnsId: string | undefined;
 		let fromCache = false;
 
@@ -200,9 +202,11 @@ export async function mirrorAndReannounce(
 				record = await fetchRecord(
 					`${base}/records/${site.id}${RECORD_SUFFIX}`,
 				);
-				ipnsId = (
-					await fetchRecord(`${base}/records/${site.id}${NAME_SUFFIX}`)
-				).trim();
+				// The NAME sidecar is genuinely text (a `k51...` id), so it is the one
+				// thing on this path that is decoded rather than kept as bytes.
+				ipnsId = decodeName(
+					await fetchRecord(`${base}/records/${site.id}${NAME_SUFFIX}`),
+				);
 			} catch {
 				record = undefined;
 				ipnsId = undefined;
@@ -231,11 +235,11 @@ export async function mirrorAndReannounce(
 			await writeFile(join(ctx.cacheDir, site.id + NAME_SUFFIX), ipnsId);
 		}
 
-		// Re-announce ONLY. No signing — this is a replica.
-		await ctx.client.routingPut(
-			`/ipns/${ipnsId}`,
-			new Uint8Array(Buffer.from(record)),
-		);
+		// Re-announce ONLY. No signing, because this is a replica. The bytes go
+		// through: `routing/put` VALIDATES the record, so anything that mangled it
+		// on the way here (a string round trip, or the un-decoded `routing/get`
+		// envelope) is rejected as malformed rather than quietly announced.
+		await ctx.client.routingPut(`/ipns/${ipnsId}`, record);
 		outcomes.push({
 			id: site.id,
 			ipns: ipnsId,
@@ -292,26 +296,43 @@ async function listKeys(client: KuboRpcClient): Promise<Map<string, string>> {
 	return map;
 }
 
-/** Read a cached record + its ipns id for a site, or undefined if absent. */
+/**
+ * Read a cached record + its ipns id for a site, or undefined if absent. The
+ * RECORD is read as BYTES (no encoding applied); only the name sidecar is text.
+ */
 async function readCached(
 	cacheDir: string,
 	name: string,
-): Promise<{record: string; ipnsId: string} | undefined> {
+): Promise<{record: Uint8Array; ipnsId: string} | undefined> {
 	try {
-		const record = await readFile(join(cacheDir, name + RECORD_SUFFIX), 'utf8');
+		const record = await readFile(join(cacheDir, name + RECORD_SUFFIX));
 		const ipnsId = (
 			await readFile(join(cacheDir, name + NAME_SUFFIX), 'utf8')
 		).trim();
 		if (!ipnsId) return undefined;
-		return {record, ipnsId};
+		return {record: new Uint8Array(record), ipnsId};
 	} catch {
 		return undefined;
 	}
 }
 
-/** Production publisher-record fetch: GET the URL and return its body text. */
-async function httpFetchText(url: string): Promise<string> {
+/**
+ * Decode the `.ipns-name` sidecar: it is a `k51...` id, i.e. genuinely text,
+ * unlike the record it sits beside.
+ */
+function decodeName(bytes: Uint8Array): string {
+	return new TextDecoder().decode(bytes).trim();
+}
+
+/**
+ * Production publisher-record fetch: GET the URL and return its body BYTES.
+ *
+ * `arrayBuffer`, never `text`: this fetches a signed IPNS record, and decoding
+ * it as UTF-8 would corrupt it (see the module doc and
+ * `work/notes/findings/kubo-routing-get-returns-a-json-envelope-not-the-record.md`).
+ */
+async function httpFetchBytes(url: string): Promise<Uint8Array> {
 	const res = await fetch(url);
 	if (!res.ok) throw new Error(`fetch ${url} -> ${res.status}`);
-	return await res.text();
+	return new Uint8Array(await res.arrayBuffer());
 }

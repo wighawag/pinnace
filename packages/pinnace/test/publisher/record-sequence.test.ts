@@ -11,7 +11,11 @@ import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {KuboRpcClient} from '../../src/rpc/kubo-rpc-client.js';
-import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
+import {MockKuboApi, routingGetBody} from '../../src/rpc/mock-kubo.js';
+
+/** The publisher-record seam carries BYTES (binary protobuf), never a string. */
+const bytes = (s: string) => new TextEncoder().encode(s);
+
 import type {
 	DiscoveredSite,
 	NodeCommandContext,
@@ -73,7 +77,7 @@ function publisherMock(): MockKuboApi {
 			},
 		})
 		.on('name/publish', {json: {Name: 'k51alice', Value: '/ipfs/bafyalice'}})
-		.on('routing/get', {text: 'SIGNED-RECORD-BYTES'});
+		.on('routing/get', {text: routingGetBody('SIGNED-RECORD-BYTES')});
 }
 
 async function tempCtx(
@@ -132,7 +136,7 @@ describe('republishAndExport (publisher) — exactly one signer, exports the raw
 		const mock = new MockKuboApi()
 			.on('key/list', {json: {Keys: [{Name: 'alice.eth', Id: 'k51alice'}]}})
 			.on('name/publish', {json: {Name: 'k51alice'}})
-			.on('routing/get', {text: 'REC'});
+			.on('routing/get', {text: routingGetBody('REC')});
 		const {ctx, dir} = await tempCtx(mock, {role: 'publisher'});
 		try {
 			const res = await republishAndExport(ctx, SITES);
@@ -245,8 +249,9 @@ describe('mirrorAndReannounce (replica) — fetch + routing/put, NEVER signs', (
 		const fetched: string[] = [];
 		const publisherFetch = async (url: string) => {
 			fetched.push(url);
-			if (url.endsWith('.ipns-record')) return 'PUB-RECORD';
-			return 'k51pubid';
+			// BYTES: a signed record is binary, so the seam carries bytes.
+			if (url.endsWith('.ipns-record')) return bytes('PUB-RECORD');
+			return bytes('k51pubid');
 		};
 		const {ctx, dir} = await tempCtx(mock, {role: 'replica', publisherFetch});
 		try {
@@ -330,7 +335,7 @@ describe('node-command adapters (makeRepublishOp / makeMirrorOp) — same core b
 		const {ctx, dir} = await tempCtx(mock, {
 			role: 'replica',
 			publisherFetch: async (url) =>
-				url.endsWith('.ipns-record') ? 'PUB-RECORD' : 'k51pubid',
+				bytes(url.endsWith('.ipns-record') ? 'PUB-RECORD' : 'k51pubid'),
 		});
 		try {
 			await op(ctx, SITES);
@@ -358,10 +363,13 @@ describe('full sequence: publisher EXPORT -> replica FETCH -> routing/put -> fal
 		try {
 			await republishAndExport(pubCtx, SITES);
 
-			// The fake publisher endpoint serves exactly the exported files.
-			const servePublisher = async (url: string): Promise<string> => {
+			// The fake publisher endpoint serves exactly the exported files, as
+			// BYTES — like the real Caddy vhost, and unlike a utf8 read, which would
+			// silently repair a mangled record and hide the very defect this
+			// end-to-end test exists to catch.
+			const servePublisher = async (url: string): Promise<Uint8Array> => {
 				const file = url.slice(url.lastIndexOf('/') + 1);
-				return await readFile(join(pubCtx.recordsDir!, file), 'utf8');
+				return new Uint8Array(await readFile(join(pubCtx.recordsDir!, file)));
 			};
 			const liveCtx: NodeCommandContext = {
 				...repCtx,
@@ -415,7 +423,7 @@ describe('the record sequence grants no key material (authorize owns that)', () 
 					...ctx,
 					role: 'replica',
 					publisherFetch: async (url) =>
-						url.endsWith('.ipns-record') ? 'PUB-RECORD' : 'k51pubid',
+						bytes(url.endsWith('.ipns-record') ? 'PUB-RECORD' : 'k51pubid'),
 				},
 				SITES,
 			);

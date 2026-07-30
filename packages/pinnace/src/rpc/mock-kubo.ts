@@ -214,3 +214,30 @@ async function bodyToText(body: unknown): Promise<string> {
 	if (body instanceof Uint8Array) return Buffer.from(body).toString('utf8');
 	return String(body);
 }
+
+/**
+ * Build the response body Kubo's `routing/get` ACTUALLY returns over the HTTP
+ * RPC: a JSON `QueryEvent` carrying the record BASE64-encoded in `Extra`, NOT
+ * the raw record bytes (those come only from the CLI's `cmds.Text` encoder).
+ * See
+ * `work/notes/findings/kubo-routing-get-returns-a-json-envelope-not-the-record.md`.
+ *
+ * Exists so the real wire shape is written down ONCE. Tests that seeded
+ * `routing/get` with raw bytes encoded a contract Kubo does not honour, which is
+ * exactly why the un-decoded envelope reached production: the publisher exported
+ * the envelope, and replicas re-announced it as if it were a signed record.
+ *
+ * @example mock.on('routing/get', {text: routingGetBody('SIGNED-RECORD-BYTES')})
+ */
+export function routingGetBody(record: Uint8Array | string): string {
+	const bytes =
+		typeof record === 'string'
+			? Buffer.from(record, 'utf8')
+			: Buffer.from(record);
+	return JSON.stringify({
+		ID: '',
+		Type: 5,
+		Responses: null,
+		Extra: bytes.toString('base64'),
+	});
+}

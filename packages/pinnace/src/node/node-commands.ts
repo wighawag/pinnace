@@ -230,12 +230,19 @@ export interface NodeCommandResult extends NodeOpResult {
 }
 
 /**
- * An injectable HTTP fetch for a single URL, returning the body text. Used for
+ * An injectable HTTP fetch for a single URL, returning the body BYTES. Used for
  * fetching the publisher's exported record on a replica. Tests inject a fake;
  * production passes a `fetch`-backed implementation. Throwing signals the
  * endpoint is unreachable (the replica then falls back to its cache).
+ *
+ * BYTES, not text, and that is load-bearing: a signed IPNS record is arbitrary
+ * binary protobuf, and routing it through a JS string applies UTF-8, which
+ * corrupts non-UTF-8 sequences irrecoverably. The same seam also carries the
+ * `.ipns-name` sidecar, which IS text; its one caller decodes it explicitly
+ * rather than splitting this into two seams (see
+ * `work/notes/findings/kubo-routing-get-returns-a-json-envelope-not-the-record.md`).
  */
-export type PublisherFetch = (url: string) => Promise<string>;
+export type PublisherFetch = (url: string) => Promise<Uint8Array>;
 
 /**
  * An injectable HTTP fetch for gateway WARMING: fetch the URL (a small range is

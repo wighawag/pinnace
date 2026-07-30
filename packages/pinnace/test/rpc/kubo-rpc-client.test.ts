@@ -1,6 +1,6 @@
 import {describe, it, expect} from 'vitest';
 import {KuboRpcClient, KuboRpcError} from '../../src/rpc/kubo-rpc-client.js';
-import {MockKuboApi} from '../../src/rpc/mock-kubo.js';
+import {MockKuboApi, routingGetBody} from '../../src/rpc/mock-kubo.js';
 
 function clientWith(mock: MockKuboApi, token = 'secret-token') {
 	return new KuboRpcClient({
@@ -206,8 +206,43 @@ describe('KuboRpcClient — file-upload endpoints send multipart/form-data', () 
 		expect(out.Entry?.Sequence).toBe(5);
 	});
 
+	it("routing/get DECODES the base64 record out of Kubo's JSON envelope", async () => {
+		// Kubo's HTTP RPC returns a JSON QueryEvent carrying the record base64 in
+		// `Extra` — the raw bytes a shell redirect sees come only from the CLI's
+		// text encoder. Exporting the ENVELOPE is what broke replica re-announce in
+		// production; see
+		// work/notes/findings/kubo-routing-get-returns-a-json-envelope-not-the-record.md.
+		const record = new Uint8Array([0x0a, 0x41, 0x2f, 0xff, 0x00, 0xfe]);
+		const mock = new MockKuboApi().on('routing/get', {
+			text: routingGetBody(record),
+		});
+		const got = await clientWith(mock).routingGet('/ipns/k51xxx');
+		expect(Array.from(got)).toEqual(Array.from(record));
+	});
+
+	it('routing/get REFUSES loudly when the envelope carries no record', async () => {
+		// The envelope is a 200-OK non-empty body, so nothing upstream fails on it.
+		// An empty/absent `Extra` must therefore be a loud error, never an empty
+		// record that would later read as "this name has no record".
+		const mock = new MockKuboApi().on('routing/get', {
+			text: JSON.stringify({ID: '', Type: 5, Responses: null}),
+		});
+		await expect(clientWith(mock).routingGet('/ipns/k51xxx')).rejects.toThrow(
+			/no base64 'Extra'/,
+		);
+	});
+
+	it('routing/get REFUSES loudly on a body that is not JSON at all', async () => {
+		const mock = new MockKuboApi().on('routing/get', {text: 'not json'});
+		await expect(clientWith(mock).routingGet('/ipns/k51xxx')).rejects.toThrow(
+			/not JSON/,
+		);
+	});
+
 	it('routing/get is a body-less read (no multipart, no file part)', async () => {
-		const mock = new MockKuboApi();
+		const mock = new MockKuboApi().on('routing/get', {
+			text: routingGetBody('rec'),
+		});
 		const client = clientWith(mock);
 		await client.routingGet('/ipns/k51xxx');
 		const req = mock.lastRequest!;
