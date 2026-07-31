@@ -1,5 +1,37 @@
 # pinnace
 
+## 0.14.0
+
+### Minor Changes
+
+- 39f7c89: Make `install-ci` emit a pipeline that actually deploys: nodes as args, a shared composite action, and `deploy --json`.
+
+  The generated GitHub workflow could not run. Its deploy step set `IPFS_API`, `IPFS_TOKEN`, `SITE_NAME` and `SITE_MODE` and then called `pinnace deploy`, which reads none of the first three: hosts come from `--endpoint` / `pinnace.json` / `PINNACE_HOST_<NAME>_ENDPOINT` and tokens from `PINNACE_HOST_<NAME>_TOKEN`. Every emitted pipeline would have died on its first run with "no hosts", and `$SITE_NAME` expanded empty so the site-id positional vanished too. Its job summary read `steps.deploy.outputs.cid`, which nothing wrote. It stayed invisible because the emitter is pure and snapshot-tested as a string, so the snapshot only ever compared to itself: see `work/notes/findings/install-ci-emits-a-workflow-the-cli-cannot-execute.md`.
+
+  - INFRASTRUCTURE IS ARGS, NOT ENV. The emitted step bakes your nodes in as literal `--endpoint` / `--replica-endpoint` args and the site as a literal positional, so the only repo secrets are the bearer tokens, named by the CLI's ordinary `PINNACE_HOST_<NAME>_TOKEN` rule. There is no CI-only env contract: a generated pipeline speaks exactly the surface you speak at your own shell. Emitting with no `--endpoint` defers to a committed `pinnace.json` and says so.
+  - NEW GLOBAL FLAG `--replica-endpoint <url>` (repeatable, publisher-first, only alongside `--endpoint`), so a whole multi-node setup is expressible with args and no config file. Replicas are numbered `replica-1`, `replica-2`, ... in the order given, which is what names their env-only tokens. This is what makes args-only CI safe: content redundancy comes from the deploy/pin fan-out, and a replica's `mirror` timer replicates the signed record and never the content, so a node a run leaves out keeps serving the previous CID. A bare flag, a duplicated replica url, or replicas with no publisher are loud refusals.
+  - NEW COMPOSITE ACTION `wighawag/pinnace/actions/deploy`, which both emit targets `uses:`. It owns the `pinnace deploy --json` call, the step outputs (`cid`, `ipns`, `mode`, `contenthash`, `url`) and the job summary, so generated YAML cannot drift from the CLI behind it. For an `ipfs`-mode site the summary prints the `ipfs://<cid>` to point ENS at, because each build has its own address.
+  - NEW `pinnace deploy --json`: one machine-readable object (`cid`, `mode`, `ipns`, and the per-node `ok`/`failed` breakdown) instead of the human lines. A partial deploy is data, not just a stderr line, and the exit code is unchanged.
+  - `install-ci` DOES NOT OWN YOUR BUILD. `--emit steps` renders the deploy step alone, to paste into a workflow that already builds however that repo builds. The default whole-workflow target takes `--package-manager npm|pnpm|yarn` (driving install + cache, with `pnpm/action-setup` before `setup-node`) and `--build-command`, instead of a hardcoded `npm ci`. The output directory stays stated via `--output-dir`, never auto-detected.
+  - `install-ci` now installs when asked: `--write` writes the workflow and refuses to overwrite an existing one without `--force`. It still prints by default.
+
+  BREAKING for anyone who generated a workflow with the old flags: `install-ci` now requires `--site <id>`, and `--build-command` is optional (and refused with `--emit steps`). Since the old output could not deploy, no working pipeline can regress.
+
+  The emitter is now tested against its real counterparties rather than a golden string: the emitted YAML is parsed, every action input it passes is checked against the composite action's declared inputs, the token variables are checked against `config-resolution`'s own naming rule, and an acceptance test feeds the emitted argv to the real CLI dispatch against mock Kubo nodes with only the secrets the report asks for.
+
+### Patch Changes
+
+- 4a77748: Document `pin` in the README: mirroring an external CID, and the `--from-ipns` migration that had no docs at all.
+
+  `pinnace pin` is half the product (it is what makes the boxes a pinning service for content you did not build, not only a deploy target), and `--from-ipns` is the one-command migration of an existing IPNS name onto your own nodes. Neither had a walkthrough. `--from-ipns` was not even in the command table's `pin` row: its only appearance in the whole README was incidental, inside an error-message example illustrating flag strictness, so an operator holding a CID or an old publisher's name could not find out from the docs that the verb they needed exists.
+
+  - A new "Mirror content you did not build: `pin`" section in the package README: mirroring a CID across every node, `--host` / `--no-recursive`, `--set-mode ipns` for your own stable name over someone else's content, and `site remove` to stop.
+  - A "Migrating from an existing IPNS name" sub-section: `--from-ipns` with the ENS-migration example, the accepted source forms (`k51...`, `/ipns/<id>`, `ipns://<id>`, DNSLink), the exactly-one-source rule, and the two deliberate non-features (you get YOUR name, not the source's key; a snapshot, not a follow).
+  - A "What can go wrong" sub-section: retrievability, the blocking `pin/add`, the `pin`/`place`/`publish` stage tags, some-nodes-pinned being a success, the up-front `ipns`-mode refusals, and `pin` versus `site add`.
+  - The command table's `pin` row now carries the `--from-ipns` source form, and the root README's pitch names the mirroring capability instead of reading as deploy-only.
+
+  Documentation only: no behaviour, flags or output changed.
+
 ## 0.13.1
 
 ### Patch Changes
