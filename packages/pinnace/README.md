@@ -212,13 +212,54 @@ It derives `mysite`'s key from your master and imports it into the keystore of t
 
 With `--endpoint <url>` there is no config to read: that flag MINTS a single host named `publisher` with role `publisher`, so you are ASSERTING that this node is the publisher. pinnace cannot verify the claim (a box's real role lives in its cloud-init env, not over Kubo RPC) and, seeing one node, it cannot check for a second signer elsewhere either — exactly as `deploy --endpoint` already works.
 
+## Mirror content you did not build: `pin`
+
+Everything above deploys files you HAVE. `pin` is the other half: it takes content you only have an ADDRESS for — a CID, or someone's IPNS name — makes every node fetch and pin it, and files it in the same `/sites/<name>` wrapper, so a mirror is warmed, republished and reported exactly like a site you deployed. That is what turns your boxes into a pinning service for other people's content, not only for your own builds.
+
+```sh
+# mirror an external CID on EVERY configured node, tracked as /sites/mymirror
+pinnace pin bafybeih... --as mymirror
+
+# one node only, or the root block instead of the whole DAG
+pinnace pin bafybeih... --as mymirror --host replica-1 --no-recursive
+
+# ALSO give the mirrored content YOUR own stable name (needs a publisher + PINNACE_MASTER)
+pinnace pin bafybeih... --as mymirror --set-mode ipns
+
+# stop mirroring it (drops the MFS entry and unpins)
+pinnace site remove mymirror
+```
+
+`--as <name>` is required and is a site `id` in the full sense: it is BOTH the MFS home (`/sites/<name>`) and the key-derivation input, so `--set-mode ipns` publishes the pinned CID under `ipns://<derive <name>>` — your key, your master, your name, pointing at content that stays someone else's. Re-pinning a NEWER cid under the same `--as` re-publishes, so the pointer moves while the name stays. As with `deploy`, omitting `--set-mode` / `--set-ens-name` PRESERVES what the entry already stores, so a re-pin never silently demotes a published mirror to `ipfs` or wipes its eth.limo name.
+
+### Migrating from an existing IPNS name
+
+Give `--from-ipns <source>` INSTEAD of the positional `<cid>` and pinnace resolves that name to the cid it points at RIGHT NOW (on the first node that answers), then pins it by the ordinary flow. With `--set-mode ipns` that is the one-command migration onto your own infrastructure:
+
+```sh
+# resolve the source name, pin its current content everywhere,
+# and publish it under YOUR derived key so you have an ipns:// to point ENS at
+pinnace pin --from-ipns k51qzi...source... --as ronan --set-mode ipns
+pinnace derive ronan     # the k51... to put in the ENS contenthash
+```
+
+The source may be a `k51...` id, `/ipns/<id>`, `ipns://<id>` or a DNSLink name. A pin takes EXACTLY ONE source: giving both a `<cid>` and `--from-ipns`, or neither, is a usage error rather than a guess.
+
+Two things this deliberately does NOT do. It does not hand you the SOURCE's key: you get YOUR OWN name (master + `--as`) pointing at the source's content, because the content stays theirs and only the name is yours. And it does not FOLLOW the source: each call re-resolves, so it is a SNAPSHOT, and pulling a newer one is re-running the same command (which re-publishes the newer cid under the same stable name).
+
+### What can go wrong
+
+`pin/add` only succeeds if SOMETHING on the network still serves the content, and Kubo BLOCKS while it fetches (no timeout is imposed, so a large DAG may take a while). Failures are reported per node and tagged with the step that failed — `pin` (the network could not give this node the content), `place` (pinned, but not filed under that name) or `publish` (pinned and filed, but the name did not move) — and a pin that succeeded on SOME nodes is still a success: it is pinned on the rest. `--set-mode ipns` with no publisher among the targets, or with no `PINNACE_MASTER` to derive from, is refused up-front, before any node is touched.
+
+`pin` is also not `site add`: `site add` places a CID the node ALREADY holds into MFS (no fetching, no pinning), while `pin` is the verb that depends on the network having a provider.
+
 ## Command reference
 
 | Command | What it does |
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
 | `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. |
-| `pinnace pin <cid> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin an EXTERNAL network CID (content you only have the CID for) on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows). Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
+| `pinnace pin <cid> \| --from-ipns <source> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin content you only have an ADDRESS for on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. The source is EXACTLY ONE of the positional `<cid>` or `--from-ipns <source>`, which resolves an existing IPNS/DNSLink name to the cid it points at now (a snapshot, not a follow). With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows) — the one-command migration onto your own boxes. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace authorize [<id>]` | Grant the DECLARED publisher the per-site key derived from your master, so CI can deploy that name with no master (its primary job: run once locally, deploy from CI forever). Bare = every site the publisher holds in MFS; `<id>` = just that site, which need not exist yet. Idempotent (a key already held is reported `already-authorized`, never re-imported). No `--host`: the config says which host is the publisher, and zero/several declared publishers, or another host already holding that key, are loud refusals. It grants key MATERIAL only — it changes NO role and is NOT a failover. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName`, the eth.limo name they resolve to AND whether `https://<name>.limo/` actually serves (`ethLimoServes=true/false`, or `n/a` for a site that resolves no name), the two eth.limo mismatch axes below, network-announce, gateway-serves. The three external checks are three-valued: a check that could NOT run prints `unknown (<reason>)` (e.g. `announced=unknown (http 429)`), never `false` — only a check that ANSWERED reports a negative. |

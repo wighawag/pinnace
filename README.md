@@ -6,6 +6,8 @@
 
 Self-host a static website on IPFS across one or more self-owned Kubo nodes, without a paid pinning service. `pinnace` provisions the nodes (generated cloud-init), deploys your site as a content-addressed archive pinned on every node with the same CID, manages mutable `ipns://` names via a master-key-derived per-site key with publisher/keyless-replica failover, keeps public-gateway caches warm, and emits CI, all over the nodes' bearer-guarded Kubo RPC API.
 
+It also mirrors content you did NOT build: `pinnace pin <cid> --as <name>` (or `--from-ipns <source>`, which resolves an existing IPNS name first) makes every node fetch and pin it, tracked like any other site, and `--set-mode ipns` republishes it under your own derived key — a one-command migration of someone else's (or your old host's) content onto boxes you own.
+
 It is both a **CLI** (`pinnace`) and a **TypeScript library**: the core owns all logic; the bin is a thin wrapper.
 
 ## Getting started
@@ -41,7 +43,7 @@ A site's own state lives with the site, on the node: MFS holds each one as a wra
 
 The full setup guide (mental model, config + secrets, and the end-to-end provision -> deploy -> failover flow) is in the package README:
 
-- **[packages/pinnace/README.md](packages/pinnace/README.md)** — install, configure, provision Hetzner nodes, deploy an `ipns` site, and verify failover.
+- **[packages/pinnace/README.md](packages/pinnace/README.md)** — install, configure, provision Hetzner nodes, deploy an `ipns` site, mirror external content with `pin`, and verify failover.
 - **[docs/failover.md](docs/failover.md)** — the failover runbook: recovering a name when the publisher dies (the replicas follow a DNS change; the record-sequence check tells you whether the handover took).
 
 ## Repository layout
