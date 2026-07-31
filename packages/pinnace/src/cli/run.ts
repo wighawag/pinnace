@@ -51,8 +51,11 @@ import {
 	assertEnsNameIntent,
 	EnsNameInferenceError,
 	DEFAULT_SITE_MODE,
+	PRESERVE_SITE_KEEP,
+	siteKeepIntent,
 	type EnsNameIntent,
 	type SiteModeIntent,
+	type SiteKeepIntent,
 } from '../site/site-wrapper.js';
 import {makeStatusOp} from '../status/status-report.js';
 import {
@@ -87,6 +90,12 @@ import {
 	type DeployResult,
 	type DeployTarget,
 } from '../deploy/deploy.js';
+import {
+	pruneSite as corePruneSite,
+	PruneKeepRequiredError,
+	type PruneSiteInput,
+	type PruneSiteResult,
+} from '../site/site-retention.js';
 import {
 	pinExternal as corePinExternal,
 	PinSourceResolveError,
@@ -157,6 +166,8 @@ export interface ClientDeps {
 		verb: NodeVerb,
 		ctx: NodeCommandContext,
 	): Promise<NodeCommandResult>;
+	/** `prune` -> apply a site's retention policy on one node. */
+	pruneSite(input: PruneSiteInput): Promise<PruneSiteResult>;
 	/** `site list` -> enumerate the node's MFS sites. */
 	listSites(input: ListSitesInput): Promise<SiteListing[]>;
 	/** `site remove` -> drop an MFS site + unpin its content. */
@@ -177,6 +188,7 @@ const DEFAULT_DEPS: ClientDeps = {
 	statusReport: coreStatusReport,
 	deriveIpnsId: coreDeriveIpnsId,
 	pinExternal: corePinExternal,
+	pruneSite: corePruneSite,
 	runNodeCommand: coreRunNodeCommand,
 	listSites: coreListSites,
 	removeSite: coreRemoveSite,
@@ -444,6 +456,9 @@ export async function run(
 	}
 	if (command === 'pin') {
 		return runPin(rest, rc);
+	}
+	if (command === 'prune') {
+		return runPrune(rest, rc);
 	}
 	if (command === 'authorize') {
 		return runAuthorize(rest, rc);
@@ -769,6 +784,7 @@ async function runDeploy(
 	const {flags, positionals} = parseArgs(argv, [
 		'json',
 		...ENS_NAME_BOOLEAN_FLAGS,
+		...KEEP_BOOLEAN_FLAGS,
 	]);
 	if (!refuseUnknownFlags('pinnace deploy', flags, VERB_FLAGS.deploy, rc))
 		return 1;
@@ -788,6 +804,8 @@ async function runDeploy(
 	// the core resolves against the site's MFS metadata.
 	const mode = siteModeIntentFromFlags('pinnace deploy', flags, siteId, rc);
 	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
+	const keep = keepIntentFromFlags('pinnace deploy', flags, rc);
+	if (!keep) return 1; // keepIntentFromFlags already emitted the error.
 
 	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
@@ -836,6 +854,7 @@ async function runDeploy(
 		...(mode.kind === 'set' ? {mode: mode.mode} : {}),
 		targets,
 		ensName,
+		keep,
 		...(derived ? {derived} : {}),
 	};
 
@@ -904,6 +923,134 @@ const INSTALL_CI_USAGE =
 	'         [--emit workflow|steps] [--set-mode ipfs|ipns] \\\n' +
 	'         [--build-command <cmd>] [--package-manager npm|pnpm|yarn] \\\n' +
 	'         [--branch <b>] [--node-version <v>] [--action-ref <ref>] [--write [--force]]';
+
+/**
+ * `prune <id> [--keep <n>] [--apply] [--host <name>]` -> core
+ * {@link ClientDeps.pruneSite}, on every configured node (each holds its own
+ * pins, so each is pruned on its own terms).
+ *
+ * DRY RUN BY DEFAULT. This is the one verb whose job is to DESTROY data, and
+ * pinnace cannot see an ENS record: it knows what a gateway served, never what a
+ * contenthash says, so it can never prove an old cid is unreferenced. So it
+ * shows what it would unpin and does nothing until `--apply`, and the report is
+ * produced by the same code path (every read, and the cross-site guard, run
+ * either way) rather than by a separate estimate.
+ *
+ * The keep count comes from `--keep <n>` (a one-off) or the site's stored
+ * `keep`; with neither, it REFUSES rather than picking a number
+ * ({@link PruneKeepRequiredError}).
+ */
+async function runPrune(
+	argv: readonly string[],
+	rc: ResolvedRunContext,
+): Promise<number> {
+	const {flags, positionals} = parseArgs(argv, ['apply']);
+	if (!refuseUnknownFlags('pinnace prune', flags, VERB_FLAGS.prune, rc))
+		return 1;
+	if (!refuseBareFlags('pinnace prune', flags, rc)) return 1;
+	const [id] = positionals;
+	if (!id) {
+		rc.err(
+			'pinnace prune: usage: pinnace prune <id> [--keep <n>] [--apply] ' +
+				'[--host <name>]\n' +
+				'It lists the superseded builds it would unpin; nothing is unpinned ' +
+				'until you add --apply.',
+		);
+		return 1;
+	}
+	let keep: number | undefined;
+	if (flags['keep'] !== undefined) {
+		const parsed = Number(flags['keep']);
+		if (!Number.isInteger(parsed) || parsed < 0) {
+			rc.err(
+				`pinnace prune: --keep needs a whole number of superseded builds to ` +
+					`keep (0 or more); got '${flags['keep']}'`,
+			);
+			return 1;
+		}
+		keep = parsed;
+	}
+	const apply = flags['apply'] !== undefined;
+
+	const cli = cliOverridesFromFlags(flags, rc);
+	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
+	if (cfg.hosts.length === 0) {
+		rc.err(`pinnace prune: ${NO_HOSTS_HINT}`);
+		return 1;
+	}
+	let hosts = cfg.hosts;
+	const hostName = flags['host'];
+	if (hostName) {
+		const match = cfg.hosts.find((h) => h.name === hostName);
+		if (!match) {
+			rc.err(
+				`pinnace prune: unknown host '${hostName}'; configured hosts: ` +
+					`${cfg.hosts.map((h) => h.name).join(', ')}`,
+			);
+			return 1;
+		}
+		hosts = [match];
+	}
+
+	let failures = 0;
+	for (const host of hosts) {
+		let token: string;
+		try {
+			token = resolveHostToken({hostName: host.name, env: rc.env, cli});
+		} catch (error) {
+			if (error instanceof MissingHostTokenError) {
+				rc.err(`pinnace prune: ${error.message}`);
+				failures++;
+				continue;
+			}
+			throw error;
+		}
+		const client = new KuboRpcClient({baseUrl: host.endpoint, token});
+		let result: PruneSiteResult;
+		try {
+			result = await rc.deps.pruneSite({
+				client,
+				id,
+				...(keep !== undefined ? {keep} : {}),
+				apply,
+			});
+		} catch (error) {
+			// A node that cannot answer, or a site with no policy to prune against:
+			// reported per node, so one bad node does not hide the others' plans.
+			rc.err(`pinnace prune: ${host.name}: ${(error as Error).message}`);
+			failures++;
+			continue;
+		}
+		const kept = result.history.slice(
+			0,
+			Math.min(result.keep, result.history.length),
+		);
+		rc.out(
+			`${host.name} (${host.endpoint}) ${id}: keep ${result.keep}` +
+				`${result.stated ? ' (stated)' : ' (stored)'}, ` +
+				`${result.before.length} superseded build(s) held, ${kept.length} kept`,
+		);
+		for (const entry of result.pruned) {
+			rc.out(
+				`  ${apply ? '' : 'would '}${entry.outcome === 'unpinned' ? 'unpin' : entry.outcome} ` +
+					`${entry.cid}${entry.error ? `: ${entry.error}` : ''}`,
+			);
+		}
+		if (result.pruned.length === 0) {
+			rc.out('  nothing to prune');
+		}
+	}
+	if (!apply) {
+		rc.out('DRY RUN: nothing was unpinned. Re-run with --apply to do it.');
+	} else {
+		// Unpinning only makes blocks eligible; Kubo frees the space on its own
+		// gc. Saying so beats an operator wondering why the disk did not move.
+		rc.out(
+			"note: unpinned content is reclaimed by Kubo's own repo gc, not here.",
+		);
+	}
+	return failures > 0 ? 1 : 0;
+}
 
 /**
  * `install-ci --system <s> --site <id> --output-dir <d> [--emit workflow|steps]
@@ -1313,6 +1460,7 @@ async function runPin(
 	const {flags, positionals} = parseArgs(argv, [
 		'no-recursive',
 		...ENS_NAME_BOOLEAN_FLAGS,
+		...KEEP_BOOLEAN_FLAGS,
 	]);
 	if (!refuseUnknownFlags('pinnace pin', flags, VERB_FLAGS.pin, rc)) return 1;
 	if (!refuseBareFlags('pinnace pin', flags, rc)) return 1;
@@ -1364,6 +1512,8 @@ async function runPin(
 	// and stating nothing PRESERVES the entry's stored mode (the core resolves it).
 	const mode = siteModeIntentFromFlags('pinnace pin', flags, pinName, rc);
 	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
+	const keep = keepIntentFromFlags('pinnace pin', flags, rc);
+	if (!keep) return 1; // keepIntentFromFlags already emitted the error.
 
 	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
@@ -1441,6 +1591,7 @@ async function runPin(
 			recursive: flags['no-recursive'] === undefined,
 			...(mode.kind === 'set' ? {mode: mode.mode} : {}),
 			ensName,
+			keep,
 			...(derived ? {derived} : {}),
 		});
 	} catch (error) {
@@ -1565,6 +1716,48 @@ const NO_HOSTS_HINT =
  * (end of argv, or immediately followed by another `--flag`).
  */
 const ENS_NAME_BOOLEAN_FLAGS = ['unset-ens-name'] as const;
+
+/** `--unset-keep` takes no value either (same reason as `--unset-ens-name`). */
+const KEEP_BOOLEAN_FLAGS = ['unset-keep'] as const;
+
+/**
+ * Turn the two retention verb-flags into ONE {@link SiteKeepIntent}, mirroring
+ * {@link ensNameIntent}: `--set-keep <n>` states a policy, `--unset-keep` drops
+ * it (back to keeping everything), and neither PRESERVES the site's own.
+ *
+ * Returns `undefined` after printing the refusal, so a caller returns 1.
+ */
+function keepIntentFromFlags(
+	prefix: string,
+	flags: Record<string, string>,
+	rc: ResolvedRunContext,
+): SiteKeepIntent | undefined {
+	const stated = flags['set-keep'];
+	const unset = flags['unset-keep'] !== undefined;
+	if (stated !== undefined && unset) {
+		rc.err(
+			`${prefix}: --set-keep and --unset-keep contradict each other: one ` +
+				'states how many superseded builds to keep, the other says keep them ' +
+				"all. Give one, or neither to leave the site's policy alone",
+		);
+		return undefined;
+	}
+	if (unset) return {kind: 'unset'};
+	if (stated === undefined) return PRESERVE_SITE_KEEP;
+	// A COUNT, so the parse is strict: a floored '2.5' or a negative read as
+	// "keep everything" would be a retention policy nobody typed.
+	const count = Number(stated);
+	try {
+		return siteKeepIntent(count);
+	} catch {
+		rc.err(
+			`${prefix}: --set-keep needs a whole number of superseded builds to ` +
+				`keep (0 or more); got '${stated}'. Omit it to leave the site's ` +
+				'policy alone, or --unset-keep to keep every build',
+		);
+		return undefined;
+	}
+}
 
 /**
  * Turn the two ensName verb-flags into ONE {@link EnsNameIntent} (the core's
@@ -1761,6 +1954,8 @@ const VERB_FLAGS = {
 			'set-mode',
 			'set-ens-name',
 			'unset-ens-name',
+			'set-keep',
+			'unset-keep',
 			'json',
 			...CONFIG_OVERRIDE_FLAGS,
 		],
@@ -1777,6 +1972,8 @@ const VERB_FLAGS = {
 			'set-mode',
 			'set-ens-name',
 			'unset-ens-name',
+			'set-keep',
+			'unset-keep',
 			...CONFIG_OVERRIDE_FLAGS,
 		],
 		prefixes: HOST_OVERRIDE_PREFIXES,
@@ -1808,6 +2005,14 @@ const VERB_FLAGS = {
 			'write',
 			'force',
 		],
+	},
+	/**
+	 * `--keep` states a one-off policy, `--apply` turns the DRY RUN into a real
+	 * unpin, `--host` narrows to one node.
+	 */
+	prune: {
+		exact: ['keep', 'apply', 'host', ...CONFIG_OVERRIDE_FLAGS],
+		prefixes: HOST_OVERRIDE_PREFIXES,
 	},
 	/** `--host` SELECTS the one node the site verbs act on. */
 	site: {

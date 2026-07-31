@@ -436,6 +436,8 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 			// no metadata.json, which is what makes "it stores nothing" a positive
 			// fact — so there is nothing to read back.
 			'files/ls',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -461,6 +463,8 @@ describe('deploy — per-site mode branch (verified against the mock Kubo API)',
 			'key/list',
 			'dag/import',
 			'files/ls',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -802,6 +806,8 @@ function seedMetadata(mock: MockKuboApi, storedMetadata?: string): void {
 const MUTATING_PATHS = [
 	'dag/import',
 	'pin/add',
+	// The retention read: what this site resolved to BEFORE this write.
+	'files/stat',
 	'files/mkdir',
 	'files/rm',
 	'files/cp',
@@ -846,6 +852,8 @@ describe('deploy — ipns mode IMPORTS the derived key when the publisher has no
 			'key/list',
 			'dag/import',
 			'files/ls',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',

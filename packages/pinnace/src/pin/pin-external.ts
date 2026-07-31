@@ -119,7 +119,9 @@ import {
 	siteModeIntent,
 	DEFAULT_SITE_MODE,
 	PRESERVE_ENS_NAME,
+	PRESERVE_SITE_KEEP,
 	type EnsNameIntent,
+	type SiteKeepIntent,
 	type ResolvedSiteMetadata,
 } from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
@@ -221,6 +223,12 @@ export interface PinExternalInput {
 	 * newer cid never silently wipes — or invents — an eth.limo name.
 	 */
 	ensName?: EnsNameIntent;
+	/**
+	 * What this pin says about the site's RETENTION (`--set-keep <n>` /
+	 * `--unset-keep`): how many superseded builds stay pinned. Omitted =
+	 * PRESERVE, so a routine re-pin never turns retention on, off, or up.
+	 */
+	keep?: SiteKeepIntent;
 	/**
 	 * The per-site key derived from the operator's master + this pin's `name`
 	 * (`deriveIpnsKey`). REQUIRED in `ipns` mode and unused in `ipfs` mode. The
@@ -436,6 +444,7 @@ interface PinPlan {
 	sitesDir: string;
 	mode: SiteMode;
 	ensName: EnsNameIntent;
+	keep: SiteKeepIntent;
 	derived?: DerivedIpnsKey;
 }
 
@@ -507,12 +516,13 @@ export async function pinExternal(
 	// infer from. Checked here, with the other refusals, before any node is
 	// touched (and before the source name is even resolved).
 	const ensName = input.ensName ?? PRESERVE_ENS_NAME;
+	const keep = input.keep ?? PRESERVE_SITE_KEEP;
 	assertEnsNameIntent(ensName, name);
 
 	// The ONE mode this fan-out runs in: stated, else the PUBLISHER's stored one,
 	// else the conservative default (see resolveFanOutMode). A STATED mode needs
 	// no node, so the refusals below still precede any node contact for it.
-	const modeResolution = await resolveFanOutMode(input, ensName);
+	const modeResolution = await resolveFanOutMode(input, ensName, keep);
 	const mode = modeResolution.mode;
 	if (mode === 'ipns') {
 		if (!targets.some(canSign)) {
@@ -541,6 +551,7 @@ export async function pinExternal(
 		sitesDir,
 		mode,
 		ensName,
+		keep,
 		...(input.derived ? {derived: input.derived} : {}),
 	};
 
@@ -600,6 +611,7 @@ export async function pinExternal(
 async function resolveFanOutMode(
 	input: PinExternalInput,
 	ensName: EnsNameIntent,
+	keep: SiteKeepIntent,
 ): Promise<{
 	mode: SiteMode;
 	/** Index of the target the mode was resolved from, or -1. */
@@ -617,6 +629,7 @@ async function resolveFanOutMode(
 		id: input.name,
 		mode: intent,
 		ensName,
+		keep,
 	});
 	return {mode: metadata.mode, resolvedFrom, metadata};
 }
@@ -755,6 +768,7 @@ async function pinOnNode(
 				id: name,
 				mode: {kind: 'set', mode},
 				ensName: plan.ensName,
+				keep: plan.keep,
 			}));
 		await placeInMfs(client, sitesDir, name, cid, resolved);
 	} catch (cause) {

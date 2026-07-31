@@ -189,6 +189,8 @@ describe('pinExternal — MFS placement so the pin is tracked like a site', () =
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
 			'files/ls',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -401,6 +403,8 @@ describe('pinExternal — mode ipfs (the DEFAULT) is pin + MFS ONLY', () => {
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'files/ls',
 			'pin/add',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -565,6 +569,8 @@ describe('pinExternal — mode ipns ADDS the publish path (publisher only)', () 
 		expect(a.requests.map((r) => r.path)).toEqual([
 			'pin/add',
 			'files/ls',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -761,6 +767,8 @@ describe('pinExternal: fromIpns resolves the SOURCE name, then pins that cid', (
 			'name/resolve',
 			'pin/add',
 			'files/ls',
+			// The retention read: what this site resolved to BEFORE this write.
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
@@ -1273,7 +1281,13 @@ describe('pinExternal: fromSite promotes a staging site to a live one', () => {
 		// Promotion PRESERVES what the destination stores: a promotion must never
 		// silently demote a published site because staging happened to be `ipfs`.
 		expect(result.mode).toBe('ipns');
-		expect(metadataOf(node)).toEqual({mode: 'ipns', ensName: 'live.eth'});
+		expect(metadataOf(node)).toEqual({
+			mode: 'ipns',
+			ensName: 'live.eth',
+			// A promotion supersedes the live site's previous build, so it is
+			// remembered like any other: this is what makes rollback possible.
+			history: [EXTERNAL_CID],
+		});
 		expect(node.requestsFor('name/publish')[0].query.get('arg')).toBe(
 			`/ipfs/${STAGED_CID}`,
 		);

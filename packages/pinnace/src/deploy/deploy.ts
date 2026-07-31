@@ -76,7 +76,9 @@ import {
 	siteModeIntent,
 	DEFAULT_SITE_MODE,
 	PRESERVE_ENS_NAME,
+	PRESERVE_SITE_KEEP,
 	type EnsNameIntent,
+	type SiteKeepIntent,
 	type ResolvedSiteMetadata,
 } from '../site/site-wrapper.js';
 import {lookupIpnsKeyId, publishSiteRecord} from '../publisher/ipns-publish.js';
@@ -135,6 +137,12 @@ export interface DeployInput {
 	 * so a deploy never silently wipes — or invents — an eth.limo name.
 	 */
 	ensName?: EnsNameIntent;
+	/**
+	 * What this deploy says about the site's RETENTION (`--set-keep <n>` /
+	 * `--unset-keep`): how many superseded builds stay pinned. Omitted = PRESERVE,
+	 * so a routine deploy never turns retention on, off, or up.
+	 */
+	keep?: SiteKeepIntent;
 	/** The nodes to deploy to (each with its own token); the CAR lands on all. */
 	targets: DeployTarget[];
 	/** The MFS directory sites live under (default `/sites`). */
@@ -294,12 +302,13 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 		throw new Error('deploy requires exactly one of `sourceDir` or `car`');
 	}
 	const ensName = input.ensName ?? PRESERVE_ENS_NAME;
+	const keep = input.keep ?? PRESERVE_SITE_KEEP;
 	assertEnsNameIntent(ensName, id);
 	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
 
 	// The ONE mode this whole fan-out runs in (see resolveFanOutMode): a stated
 	// mode, else the PUBLISHER's stored one, else the conservative default.
-	const resolved = await resolveFanOutMode(input, sitesDir, ensName);
+	const resolved = await resolveFanOutMode(input, sitesDir, ensName, keep);
 	const mode = resolved.mode;
 
 	// Can this deploy actually produce the name it was asked for? Answered (and
@@ -317,6 +326,7 @@ export async function deploy(input: DeployInput): Promise<DeployResult> {
 		mode,
 		sitesDir,
 		ensName,
+		keep,
 		stated,
 		...(input.derived ? {derived: input.derived} : {}),
 	};
@@ -360,6 +370,8 @@ interface DeployPlan {
 	mode: SiteMode;
 	sitesDir: string;
 	ensName: EnsNameIntent;
+	/** The retention intent this deploy carries (see DeployInput.keep). */
+	keep: SiteKeepIntent;
 	/** Whether the mode was STATED (only ever used to word a refusal). */
 	stated: boolean;
 	/** The derived key to import into a publisher that holds none (if given). */
@@ -398,6 +410,7 @@ async function resolveFanOutMode(
 	input: DeployInput,
 	sitesDir: string,
 	ensName: EnsNameIntent,
+	keep: SiteKeepIntent,
 ): Promise<{
 	mode: SiteMode;
 	/** Index of the target the mode was resolved from, or -1. */
@@ -417,6 +430,7 @@ async function resolveFanOutMode(
 		id: input.id,
 		mode: intent,
 		ensName,
+		keep,
 	});
 	return {mode: metadata.mode, resolvedFrom, metadata};
 }
@@ -529,6 +543,7 @@ async function deployToNode(
 			id,
 			mode: {kind: 'set', mode},
 			ensName,
+			keep: plan.keep,
 		}));
 	await placeInMfs(client, sitesDir, id, built.rootCid, resolved);
 

@@ -81,6 +81,32 @@ export interface SiteMetadata {
 	ensName?: string;
 	/** How the site is addressed: `ipfs` (cid) or `ipns` (stable name). */
 	mode?: SiteMode;
+	/**
+	 * The SUPERSEDED content cids this node still holds pinned, most recent
+	 * first: the site's own history, kept so a previous build can be rolled back
+	 * to and, above all, so superseded content stays ACCOUNTABLE.
+	 *
+	 * Without it, every re-deploy leaves an orphan pin: content the node keeps
+	 * for ever, that no site references, that `status` cannot see and no verb can
+	 * reclaim (the only handle left is a raw Kubo `pin/rm`). This list is what
+	 * makes {@link SiteMetadata.keep} and the `prune` verb possible at all.
+	 *
+	 * It is bookkeeping, NOT an operator-authored field: it is maintained by the
+	 * write path, and an entry leaves it only when that cid has actually been
+	 * unpinned (so a failed unpin is retried by the next prune rather than
+	 * silently forgotten).
+	 */
+	history?: string[];
+	/**
+	 * How many SUPERSEDED builds to keep pinned (`--set-keep <n>`). Absent means
+	 * KEEP EVERYTHING, which is the default because pinnace cannot see an ENS
+	 * record: it knows what a gateway served, never what a contenthash says, so
+	 * it can never prove an old cid is unreferenced. Retention is therefore
+	 * always something the operator opts into, per site.
+	 *
+	 * `0` is meaningful and allowed: keep no superseded build at all.
+	 */
+	keep?: number;
 }
 
 /**
@@ -134,6 +160,45 @@ export type SiteModeIntent =
 
 /** The intent when the caller states no mode: keep the site's stored one. */
 export const PRESERVE_SITE_MODE: SiteModeIntent = {kind: 'preserve'};
+
+/**
+ * What ONE operation says about the site's retention ({@link SiteMetadata.keep}),
+ * the same three-valued shape as `ensName`:
+ *
+ *  - `set`      (`--set-keep <n>`): keep at most `n` superseded builds pinned.
+ *  - `unset`    (`--unset-keep`): drop the field, back to keeping everything.
+ *  - `preserve` (neither flag, the DEFAULT): leave the site's policy alone, so
+ *    a routine deploy never turns retention on, off, or up.
+ */
+export type SiteKeepIntent =
+	/** `--set-keep <n>`: keep at most n superseded builds. */
+	| {kind: 'set'; keep: number}
+	/** `--unset-keep`: keep everything (the default policy). */
+	| {kind: 'unset'}
+	/** neither flag: leave whatever the site already carries. */
+	| {kind: 'preserve'};
+
+/** The intent when the caller states none: leave the site's retention alone. */
+export const PRESERVE_SITE_KEEP: SiteKeepIntent = {kind: 'preserve'};
+
+/**
+ * The intent an OPTIONAL stated keep expresses (a value is a `set`, an omitted
+ * one a `preserve`), mirroring {@link siteModeIntent}.
+ *
+ * @throws for a negative or non-integer count: retention is a COUNT of builds,
+ * and a silently floored `2.5` or a negative that reads as "keep everything"
+ * would be a policy the operator did not state.
+ */
+export function siteKeepIntent(keep?: number): SiteKeepIntent {
+	if (keep === undefined) return PRESERVE_SITE_KEEP;
+	if (!Number.isInteger(keep) || keep < 0) {
+		throw new Error(
+			`--set-keep must be a whole number of superseded builds to keep (0 or ` +
+				`more); got '${keep}'`,
+		);
+	}
+	return {kind: 'set', keep};
+}
 
 /**
  * The mode of a site that stores NONE — the last tier of the resolution order
@@ -205,6 +270,8 @@ export interface ResolveSiteMetadataInput {
 	mode?: SiteModeIntent;
 	/** What to do with `ensName` (default: {@link PRESERVE_ENS_NAME}). */
 	ensName?: EnsNameIntent;
+	/** What to do with `keep` (default: {@link PRESERVE_SITE_KEEP}). */
+	keep?: SiteKeepIntent;
 }
 
 /**
@@ -250,27 +317,55 @@ export async function resolveSiteMetadataToWrite(
 ): Promise<ResolvedSiteMetadata> {
 	const intent = input.ensName ?? PRESERVE_ENS_NAME;
 	const modeIntent = input.mode ?? PRESERVE_SITE_MODE;
+	const keepIntent = input.keep ?? PRESERVE_SITE_KEEP;
 	assertEnsNameIntent(intent, input.id);
 
-	// ONE read serves BOTH preserve branches (and none at all when neither asks).
-	// The STRICT read: on this destructive path a failure REFUSES rather than
-	// reading as "nothing stored" (see {@link readSiteMetadataForWrite}).
-	const stored =
-		intent.kind === 'preserve' || modeIntent.kind === 'preserve'
-			? await readSiteMetadataForWrite(input.client, input.sitesDir, input.id)
-			: {};
+	// ONE read serves every preserve branch. WHICH read depends on what would be
+	// lost if it answered wrongly, and the two answers are deliberately different:
+	//
+	//  - STRICT (refuses on an unreadable node) when `ensName` or `mode` is being
+	//    preserved. Those are the operator's ADDRESSING decisions, and resolving
+	//    them from an error writes `{mode:'ipfs'}` over a published site.
+	//  - TOLERANT otherwise, purely to carry `keep` and `history` forward. Neither
+	//    is an addressing decision: `history` is bookkeeping the operator never
+	//    states, and losing `keep` fails SAFE (back to keeping everything, which
+	//    unpins nothing). Refusing a fully-stated write over them would take away
+	//    the one path that gets past a sick node, in exchange for two fields whose
+	//    worst case is a stray pin. A bad trade, so the read stays best-effort.
+	const preservingAddressing =
+		intent.kind === 'preserve' || modeIntent.kind === 'preserve';
+	const stored = preservingAddressing
+		? await readSiteMetadataForWrite(input.client, input.sitesDir, input.id)
+		: await readSiteMetadata(input.client, input.sitesDir, input.id);
+
 	const mode: SiteMode =
 		modeIntent.kind === 'set'
 			? modeIntent.mode
 			: (stored.mode ?? DEFAULT_SITE_MODE);
+	const keep =
+		keepIntent.kind === 'set'
+			? {keep: keepIntent.keep}
+			: keepIntent.kind === 'unset'
+				? {}
+				: stored.keep === undefined
+					? {}
+					: {keep: stored.keep};
+	// History is carried forward VERBATIM here; the write path
+	// (`placeInMfs`) is what appends the superseded cid, because only it knows
+	// the cid being placed.
+	const history =
+		stored.history && stored.history.length > 0
+			? {history: stored.history}
+			: {};
+	const carried = {...keep, ...history};
 
-	if (intent.kind === 'set') return {ensName: intent.name, mode};
-	if (intent.kind === 'unset') return {ensName: '', mode};
-	if (intent.kind === 'infer') return {mode}; // the key stays ABSENT.
+	if (intent.kind === 'set') return {...carried, ensName: intent.name, mode};
+	if (intent.kind === 'unset') return {...carried, ensName: '', mode};
+	if (intent.kind === 'infer') return {...carried, mode}; // key stays ABSENT.
 	// preserve: whatever the site already says, unchanged (absent stays absent).
 	return stored.ensName === undefined
-		? {mode}
-		: {ensName: stored.ensName, mode};
+		? {...carried, mode}
+		: {...carried, ensName: stored.ensName, mode};
 }
 
 /**
@@ -353,9 +448,16 @@ export function siteMetadataPath(sitesDir: string, id: string): string {
  * `ensName: ""` writes an explicit empty string (the opt-out).
  */
 export function encodeSiteMetadata(metadata: SiteMetadata): Uint8Array {
-	const record: Record<string, string> = {};
+	const record: Record<string, unknown> = {};
 	if (metadata.ensName !== undefined) record['ensName'] = metadata.ensName;
 	if (metadata.mode !== undefined) record['mode'] = metadata.mode;
+	if (metadata.keep !== undefined) record['keep'] = metadata.keep;
+	// An EMPTY history is written as no field at all, so a site that never
+	// superseded anything carries no key (and an older pinnace's metadata is
+	// byte-identical to a new one's until there is something to remember).
+	if (metadata.history !== undefined && metadata.history.length > 0) {
+		record['history'] = metadata.history;
+	}
 	return new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`);
 }
 
@@ -387,6 +489,24 @@ export function parseSiteMetadata(bytes: Uint8Array): SiteMetadata {
 	if (typeof raw['ensName'] === 'string') metadata.ensName = raw['ensName'];
 	if (raw['mode'] === 'ipfs' || raw['mode'] === 'ipns') {
 		metadata.mode = raw['mode'];
+	}
+	// `keep` must be a whole, non-negative count. Anything else is dropped, which
+	// reads as "no retention policy", the safe direction, since the field's only
+	// power is to unpin.
+	if (
+		typeof raw['keep'] === 'number' &&
+		Number.isInteger(raw['keep']) &&
+		raw['keep'] >= 0
+	) {
+		metadata.keep = raw['keep'];
+	}
+	// `history` keeps only the string entries: a mangled element must not cost
+	// the accountability of the ones around it.
+	if (Array.isArray(raw['history'])) {
+		const history = raw['history'].filter(
+			(cid): cid is string => typeof cid === 'string' && cid.length > 0,
+		);
+		if (history.length > 0) metadata.history = history;
 	}
 	return metadata;
 }

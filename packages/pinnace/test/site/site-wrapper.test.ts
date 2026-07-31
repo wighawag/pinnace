@@ -355,7 +355,7 @@ describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
 		).toEqual({ensName: 'kept.eth', mode: 'ipns'});
 	});
 
-	it('reads the existing metadata ONLY when preserving (the other intents are total)', async () => {
+	it('never STRICT-reads for a total intent (the read is tolerant bookkeeping)', async () => {
 		for (const intent of [
 			{kind: 'set', name: 'alice.eth'},
 			{kind: 'unset'},
@@ -363,7 +363,13 @@ describe('resolveSiteMetadataToWrite — the four ensName intents', () => {
 		] satisfies EnsNameIntent[]) {
 			const mock = mockHolding('{"ensName":"kept.eth"}');
 			await resolveFor(mock, 'a.eth', intent);
-			expect(mock.requestsFor('files/read').length).toBe(0);
+			// A total intent needs no ANSWER about ensName/mode, so the strict
+			// read's wrapper listing never happens...
+			expect(mock.requestsFor('files/ls').length).toBe(0);
+			// ...but `keep`/`history` are carried forward whatever the intents say
+			// (the operator never states them), so one TOLERANT read still runs.
+			// Tolerant is the whole point: it cannot refuse the write.
+			expect(mock.requestsFor('files/read').length).toBe(1);
 		}
 	});
 });
@@ -426,7 +432,7 @@ describe('resolveSiteMetadataToWrite — the two mode intents', () => {
 		expect(mock.requestsFor('files/read').length).toBe(1);
 	});
 
-	it('reads NOTHING when both intents are total (stated mode + stated name)', async () => {
+	it('needs no ANSWER when both intents are total (stated mode + stated name)', async () => {
 		const mock = mockHolding('{"ensName":"kept.eth","mode":"ipns"}');
 		expect(
 			await resolveSiteMetadataToWrite({
@@ -437,7 +443,9 @@ describe('resolveSiteMetadataToWrite — the two mode intents', () => {
 				ensName: {kind: 'unset'},
 			}),
 		).toEqual({ensName: '', mode: 'ipfs'});
-		expect(mock.requestsFor('files/read').length).toBe(0);
+		// Neither field is resolved from the node: the stored ipns/kept.eth is
+		// overwritten exactly as stated. The strict path (which can REFUSE) is
+		// what stays out of the way.
 		expect(mock.requestsFor('files/ls').length).toBe(0);
 	});
 
@@ -577,7 +585,7 @@ describe('resolveSiteMetadataToWrite — absence is POSITIVE, an outage REFUSES'
 		).rejects.toBeInstanceOf(SiteMetadataUnreadableError);
 	});
 
-	it('touches NO node when both intents are total (the way past a sick node)', async () => {
+	it('still goes through a sick node when both intents are total', async () => {
 		const mock = mockOutage();
 		expect(
 			await resolveSiteMetadataToWrite({
@@ -588,7 +596,11 @@ describe('resolveSiteMetadataToWrite — absence is POSITIVE, an outage REFUSES'
 				ensName: {kind: 'unset'},
 			}),
 		).toEqual({ensName: '', mode: 'ipns'});
-		expect(mock.requests.length).toBe(0);
+		// The node is asked (for keep/history), and answers 401 to everything.
+		// That must not become a refusal: a fully-stated write resolves nothing
+		// from the node, and the two fields it could not carry forward fail SAFE
+		// (no retention policy = unpin nothing).
+		expect(mock.requestsFor('files/ls').length).toBe(0);
 	});
 
 	it('readSiteMetadataForWrite is the strict counterpart of readSiteMetadata', async () => {

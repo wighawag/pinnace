@@ -297,6 +297,34 @@ The destination keeps its OWN metadata: omitting `--set-mode` / `--set-ens-name`
 
 Rolling back is the same idea with a cid you already know: `pinnace pin <old-cid> --as mandalas.eth`.
 
+### What happens to the previous build
+
+Every deploy or pin that changes a site's content records the SUPERSEDED cid in that site's own `metadata.json`, most recent first. Remembering is automatic and free, and it is what makes a superseded build accountable at all: without it, each push would leave an orphan pin that no site references, `status` cannot see, and no verb can reclaim.
+
+FORGETTING is opt-in, because pinnace cannot read an ENS record. It knows what a gateway served, never what a contenthash says, so it can never prove an old cid is unreferenced, and a default retention would eventually unpin a live site. So an absent policy means KEEP EVERYTHING, and you say otherwise per site:
+
+```sh
+# from now on, keep only the 3 most recent superseded builds of this site
+pinnace deploy --set-keep 3 ./dist mysite
+
+# back to keeping everything
+pinnace deploy --unset-keep ./dist mysite
+```
+
+Like `--set-mode` and `--set-ens-name`, omitting both flags PRESERVES, so a routine deploy never turns retention on, off, or up. The policy is applied as each deploy/pin writes, and can also be run on its own:
+
+```sh
+pinnace prune mysite               # DRY RUN: what it would unpin, on every node
+pinnace prune mysite --apply       # actually unpin
+pinnace prune mysite --keep 1 --apply   # a one-off count, overriding the stored one
+```
+
+`prune` is a dry run until `--apply`, and the dry run performs every read and every check, so what it prints is what a real run would do. A site with no stored policy and no `--keep` is a refusal, not a guess.
+
+Two invariants hold in both paths. Nothing is ever unpinned that another site currently resolves to, because a Kubo recursive pin is not reference-counted and sites SHARE cids routinely (promoting a staging build leaves two sites on one cid); a cid skipped for that reason is reported, and stays listed. And a cid leaves the history only once it has actually been unpinned, so a failed unpin is retried by the next prune instead of being forgotten while still on disk.
+
+Unpinning makes blocks eligible for collection; the space comes back on Kubo's own `repo gc`, which pinnace never triggers behind your back.
+
 ### Migrating from an existing IPNS name
 
 Give `--from-ipns <source>` INSTEAD of the positional `<cid>` and pinnace resolves that name to the cid it points at RIGHT NOW (on the first node that answers), then pins it by the ordinary flow. With `--set-mode ipns` that is the one-command migration onto your own infrastructure:
@@ -323,10 +351,11 @@ Two things this deliberately does NOT do. It does not hand you the SOURCE's key:
 | Command | What it does |
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
-| `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--json] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. `--json` prints ONE machine-readable object (`cid`, `mode`, `ipns`, and the per-node `ok`/`failed` breakdown) instead of the human lines, for scripts and CI. |
+| `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--set-keep <n> \| --unset-keep] [--json] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. `--json` prints ONE machine-readable object (`cid`, `mode`, `ipns`, and the per-node `ok`/`failed` breakdown) instead of the human lines, for scripts and CI. |
 | `pinnace pin <cid> \| --from-ipns <source> \| --from-site <id> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin content you only have an ADDRESS for on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. The source is EXACTLY ONE of: the positional `<cid>`; `--from-ipns <source>`, which resolves an existing IPNS/DNSLink name to the cid it points at now (a snapshot, not a follow); or `--from-site <id>`, which PROMOTES the current cid of a site your nodes already hold (the staging to live step, read on one node and fanned out). With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows), which is the one-command migration onto your own boxes. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace authorize [<id>]` | Grant the DECLARED publisher the per-site key derived from your master, so CI can deploy that name with no master (its primary job: run once locally, deploy from CI forever). Bare = every site the publisher holds in MFS; `<id>` = just that site, which need not exist yet. Idempotent (a key already held is reported `already-authorized`, never re-imported). No `--host`: the config says which host is the publisher, and zero/several declared publishers, or another host already holding that key, are loud refusals. It grants key MATERIAL only — it changes NO role and is NOT a failover. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
+| `pinnace prune <id> [--keep <n>] [--apply] [--host <name>]` | Apply a site's retention policy on every node: unpin the superseded builds beyond the newest `keep`. DRY RUN unless `--apply` (and the dry run does every read and every check, including the cross-site guard, so its report is what a real run would do). `--keep` is a one-off count overriding the site's stored one; with neither, it refuses rather than guessing. Never unpins a cid another site currently resolves to. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName`, the eth.limo name they resolve to AND whether `https://<name>.limo/` actually serves (`ethLimoServes=true/false`, or `n/a` for a site that resolves no name), the two eth.limo mismatch axes below, network-announce, gateway-serves. The three external checks are three-valued: a check that could NOT run prints `unknown (<reason>)` (e.g. `announced=unknown (http 429)`), never `false` — only a check that ANSWERED reports a negative. |
 | `pinnace install-ci --system github --site <id> --output-dir <d> [--emit workflow\|steps] [--endpoint <url> [--replica-endpoint <url> ...]] [--set-mode ipfs\|ipns] [--build-command <c>] [--package-manager npm\|pnpm\|yarn] [--branch <b>] [--node-version <v>] [--action-ref <ref>] [--write [--force]]` | Emit a deploy pipeline and report the secrets to set. Your nodes are baked in as literal `--endpoint`/`--replica-endpoint` args (endpoints and site ids are not secrets, so they belong in the file, not in a CI settings panel), leaving ONE secret per node. `--emit steps` emits just the deploy step to paste into the workflow you already have; the default whole workflow adds checkout/install/build for `--package-manager`. Prints by default; `--write` installs it (and refuses to clobber without `--force`). |
 | `pinnace site <list\|add\|remove> ...` | Manage the sites a node serves (MFS wrappers + pins). |

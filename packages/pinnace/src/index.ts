@@ -144,10 +144,12 @@ export {
 	ethLimoUrl,
 	assertEnsNameIntent,
 	siteModeIntent,
+	siteKeepIntent,
 	EnsNameInferenceError,
 	SiteMetadataUnreadableError,
 	PRESERVE_ENS_NAME,
 	PRESERVE_SITE_MODE,
+	PRESERVE_SITE_KEEP,
 	DEFAULT_SITE_MODE,
 	SITE_CONTENT_ENTRY,
 	SITE_METADATA_ENTRY,
@@ -155,6 +157,7 @@ export {
 	type ResolvedSiteMetadata,
 	type EnsNameIntent,
 	type SiteModeIntent,
+	type SiteKeepIntent,
 	type ResolveSiteMetadataInput,
 } from './site/site-wrapper.js';
 export {
@@ -162,6 +165,7 @@ export {
 	removeSite,
 	addSite,
 	placeInMfs,
+	readSiteContentCid,
 	SITE_VERBS,
 	type SiteVerb,
 	type SiteListing,
@@ -170,6 +174,7 @@ export {
 	type RemoveSiteResult,
 	type AddSiteInput,
 	type AddSiteResult,
+	type PlaceResult,
 } from './site/site-management.js';
 export {
 	deploy,
@@ -181,6 +186,18 @@ export {
 	type DeployNodeOk,
 	type DeployNodeFailure,
 } from './deploy/deploy.js';
+export {
+	pruneSite,
+	prunePins,
+	nextHistory,
+	collectProtectedCids,
+	PruneKeepRequiredError,
+	type PruneSiteInput,
+	type PruneSiteResult,
+	type PrunePinsInput,
+	type PruneResult,
+	type PrunedCid,
+} from './site/site-retention.js';
 export {
 	pinExternal,
 	PinStageError,

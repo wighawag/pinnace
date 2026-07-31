@@ -42,6 +42,7 @@
  * client verbs and reuses the existing `/sites/<name>` MFS convention.
  */
 import type {KuboRpcClient} from '../rpc/kubo-rpc-client.js';
+import {nextHistory, prunePins, type PrunedCid} from './site-retention.js';
 import {
 	encodeSiteMetadata,
 	resolveSiteMetadataToWrite,
@@ -233,6 +234,27 @@ export async function addSite(input: AddSiteInput): Promise<AddSiteResult> {
 }
 
 /**
+ * What a placement did to the site's PREVIOUS content, beyond writing the new
+ * one: the superseded cid, the history now stored, and the outcome of any
+ * unpinning the site's `keep` policy asked for.
+ *
+ * Every part of it is BEST-EFFORT bookkeeping around a load-bearing write. The
+ * placement itself (content + metadata) is what must succeed; a node that cannot
+ * say what it held before simply records no history for this write, rather than
+ * failing a deploy over an accounting detail.
+ */
+export interface PlaceResult {
+	/** The cid now placed at `/sites/<id>/content`. */
+	cid: string;
+	/** What the site resolved to before this write, when it changed. */
+	previousCid?: string;
+	/** The superseded cids still held (and so still accountable), newest first. */
+	history: string[];
+	/** Cids the keep policy acted on, with each outcome. */
+	pruned: PrunedCid[];
+}
+
+/**
  * The MFS-placement step, writing the site's WRAPPER: `files/mkdir
  * /sites/<id> --parents` (the sites dir AND the wrapper), `files/rm
  * /sites/<id>/content --recursive --force` (clear any prior content, leaving
@@ -259,15 +281,44 @@ export async function placeInMfs(
 	id: string,
 	cid: string,
 	metadata: SiteMetadata,
-): Promise<void> {
+): Promise<PlaceResult> {
 	const content = siteContentPath(sitesDir, id);
+
+	// What this site resolved to BEFORE this write: read first, because the `cp`
+	// below replaces it. Best-effort by construction (see PlaceResult): a node
+	// that cannot answer must not turn a placement into a failure.
+	const previousCid = await readSiteContentCid(client, sitesDir, id);
+
 	await client.filesMkdir(siteWrapperPath(sitesDir, id), {parents: true});
 	await client.filesRm(content, {recursive: true, force: true});
 	await client.filesCp(`/ipfs/${cid}`, content);
+
+	// Bookkeeping, then (only if the site states a keep policy) the unpinning it
+	// asks for. Both happen BEFORE the metadata write, so what is stored is the
+	// history that survived: a cid whose unpin failed stays listed and is retried
+	// by the next prune, rather than being forgotten while still on disk.
+	const history = nextHistory(metadata.history, previousCid, cid);
+	const {pruned, history: retained} = await prunePins({
+		client,
+		sitesDir,
+		history,
+		...(metadata.keep !== undefined ? {keep: metadata.keep} : {}),
+		apply: true,
+	});
+
 	await client.filesWrite(
 		siteMetadataPath(sitesDir, id),
-		encodeSiteMetadata(metadata),
+		encodeSiteMetadata({
+			...metadata,
+			...(retained.length > 0 ? {history: retained} : {history: undefined}),
+		}),
 	);
+	return {
+		cid,
+		...(previousCid !== undefined && previousCid !== cid ? {previousCid} : {}),
+		history: retained,
+		pruned,
+	};
 }
 
 // ---------------------------------------------------------------------------

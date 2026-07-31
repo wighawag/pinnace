@@ -38,6 +38,7 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 		deriveIpnsId: [],
 		pinExternal: [],
 		runNodeCommand: [],
+		pruneSite: [],
 		listSites: [],
 		removeSite: [],
 		addSite: [],
@@ -103,6 +104,17 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			calls.runNodeCommand.push({verb, ctx: nodeCtx});
 			const result: NodeCommandResult = {verb, sites: []};
 			return result;
+		},
+		pruneSite: async (input) => {
+			calls.pruneSite.push(input);
+			return {
+				id: input.id,
+				keep: input.keep ?? 3,
+				stated: input.keep !== undefined,
+				before: [],
+				history: [],
+				pruned: [],
+			};
 		},
 		listSites: async (input) => {
 			calls.listSites.push(input);
@@ -301,6 +313,24 @@ const verbCases: VerbCase[] = [
 		verb: 'pinnace derive',
 		valid: ['derive', 'mysite'],
 		dispatch: 'deriveIpnsId',
+	},
+	{
+		verb: 'pinnace prune',
+		valid: [
+			'prune',
+			'mysite',
+			'--keep',
+			'3',
+			'--apply',
+			'--host',
+			'a',
+			'--host-endpoint.a',
+			'https://a.example',
+			'--host-token.a',
+			'tok',
+		],
+		dispatch: 'pruneSite',
+		accepts: '--keep',
 	},
 	{
 		verb: 'pinnace install-ci',

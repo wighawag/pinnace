@@ -256,13 +256,17 @@ describe('site add — place an existing /ipfs/<cid> into the MFS wrapper', () =
 });
 
 describe('placeInMfs — write the wrapper /sites/<id>/{content, metadata.json}', () => {
-	it('issues exactly mkdir wrapper / rm content / cp content / write metadata, in that order', async () => {
+	it('reads the superseded cid, then mkdir / rm / cp / write, in that order', async () => {
 		const mock = new MockKuboApi();
 		await placeInMfs(clientWith(mock), '/sites', 'alice.eth', 'bafycontent', {
 			ensName: 'alice.eth',
 			mode: 'ipns',
 		});
+		// The leading `files/stat` is the retention bookkeeping: what this site
+		// resolved to BEFORE this write, read first because the `cp` replaces it.
+		// Without it every re-deploy would leave an orphan pin nothing can see.
 		expect(mock.requests.map((r) => r.path)).toEqual([
+			'files/stat',
 			'files/mkdir',
 			'files/rm',
 			'files/cp',
