@@ -78,6 +78,18 @@ pinnace deploy --endpoint https://ipfs-publisher.example.com --set-mode ipns ./d
 pinnace status --endpoint https://ipfs-publisher.example.com
 ```
 
+A MULTI-node setup is expressible with args too: add `--replica-endpoint <url>` once per replica, after the publisher's `--endpoint`. They are numbered in the order given (`replica-1`, `replica-2`, ...), which is what names their env-only tokens, so reordering the flags reorders the tokens:
+
+```sh
+export PINNACE_HOST_PUBLISHER_TOKEN=<publisher token>
+export PINNACE_HOST_REPLICA_1_TOKEN=<replica token>
+
+pinnace deploy --endpoint https://ipfs-publisher.example.com \
+  --replica-endpoint https://ipfs-replica-01.example.com ./dist mysite
+```
+
+Both flags are global (either side of the verb) and refuse loudly rather than guessing: a bare one, a repeated `--endpoint`, the same replica url twice, or `--replica-endpoint` with no `--endpoint` (they are the replicas OF a publisher, so alone there is no host list to extend). Give the replicas whenever you deploy: content redundancy comes from the deploy/pin FAN-OUT, and a replica's `mirror` timer replicates the signed record, never the content, so a node you leave out keeps serving the previous CID.
+
 `--endpoint` is GLOBAL, like `--config`: write it on either side of the verb (`pinnace --endpoint <url> status` and `pinnace status --endpoint <url>` are the same command), but only once. Being the arg tier it REPLACES the file's hosts for that run (so it also narrows a multi-node config to one node); `--host-endpoint.<name> <url>` instead overrides the endpoint OF a host the file declares. `pinnace.json` is a convenience for multi-node / durable setups, not a requirement — and `derive` needs no node, and so no config, at all.
 
 Secrets are **env-only, never in the config file** (structurally: the resolver has no file path for them). Each host's bearer token is read from `PINNACE_HOST_<NAME>_TOKEN` (the name upper-cased), and the master from `PINNACE_MASTER`:
@@ -212,6 +224,41 @@ It derives `mysite`'s key from your master and imports it into the keystore of t
 
 With `--endpoint <url>` there is no config to read: that flag MINTS a single host named `publisher` with role `publisher`, so you are ASSERTING that this node is the publisher. pinnace cannot verify the claim (a box's real role lives in its cloud-init env, not over Kubo RPC) and, seeing one node, it cannot check for a second signer elsewhere either — exactly as `deploy --endpoint` already works.
 
+## Deploy from CI: `install-ci`
+
+`install-ci` writes the deploy pipeline for you and reports the secrets it needs. It emits a step that speaks the SAME surface you speak at your own shell: your nodes are literal `--endpoint` / `--replica-endpoint` args in the generated file, and the only repo secrets are the bearer tokens, under the same `PINNACE_HOST_<NAME>_TOKEN` names the CLI reads everywhere else. There is no CI-only env contract to learn.
+
+```sh
+# a whole starter workflow for a repo with no CI yet (prints it; --write installs it)
+pinnace install-ci --system github \
+  --endpoint https://ipfs-publisher.example.com \
+  --replica-endpoint https://ipfs-replica-01.example.com \
+  --site mysite --output-dir dist \
+  --package-manager pnpm --build-command "pnpm build" --write
+```
+
+The generated deploy step is a `uses:` of the composite action this package ships (`wighawag/pinnace/actions/deploy`), which owns the `pinnace deploy --json` call, the step outputs (`cid`, `ipns`, `mode`, `contenthash`, `url`) and the job summary. So the YAML in your repo cannot drift from the CLI behind it, and later steps can read `${{ steps.deploy.outputs.cid }}` for whatever else you automate. Pin it to an immutable ref with `--action-ref <sha>`.
+
+### It does not own your build
+
+Most repos already have a workflow that knows how to build them (monorepo filters, env vars, matrixes, PR jobs). For those, emit the deploy step ALONE and paste it in after your existing build:
+
+```sh
+pinnace install-ci --system github --emit steps \
+  --endpoint https://ipfs-publisher.example.com \
+  --site mandalas.eth --output-dir web/build --set-mode ipfs
+```
+
+The full-workflow target keeps the build to two knobs (`--package-manager` for the install + cache steps, `--build-command` for the build) rather than assuming npm. The output directory is always STATED (`--output-dir`) and never guessed: a repo with both a `dist` and a `build` would otherwise deploy the wrong one silently.
+
+### What the pipeline needs
+
+One bearer-token secret per node it names, and that is usually all. An `ipfs`-mode site signs nothing, so it needs no master at all. An `ipns`-mode site needs a key, but the publisher normally already HOLDS it: run `pinnace authorize <id>` once from your own machine (above) and CI deploys that name forever with no `PINNACE_MASTER` in the pipeline. The emitted report says exactly which secrets to set, by name.
+
+Omit `--endpoint` and the emitted pipeline carries no host args at all, deferring to a `pinnace.json` you commit (infrastructure only, no secrets). The report then cannot name your token secrets, because only that file knows your host names.
+
+For an `ipfs`-mode site the job summary prints the `ipfs://<cid>` to point your ENS contenthash at, because each build has its own address and that update is the step no tool can do for you. In `ipns` mode it prints the stable `ipns://<id>` and says nothing needs updating.
+
 ## Mirror content you did not build: `pin`
 
 Everything above deploys files you HAVE. `pin` is the other half: it takes content you only have an ADDRESS for — a CID, or someone's IPNS name — makes every node fetch and pin it, and files it in the same `/sites/<name>` wrapper, so a mirror is warmed, republished and reported exactly like a site you deployed. That is what turns your boxes into a pinning service for other people's content, not only for your own builds.
@@ -258,16 +305,16 @@ Two things this deliberately does NOT do. It does not hand you the SOURCE's key:
 | Command | What it does |
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
-| `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. |
+| `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--json] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. `--json` prints ONE machine-readable object (`cid`, `mode`, `ipns`, and the per-node `ok`/`failed` breakdown) instead of the human lines, for scripts and CI. |
 | `pinnace pin <cid> \| --from-ipns <source> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin content you only have an ADDRESS for on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. The source is EXACTLY ONE of the positional `<cid>` or `--from-ipns <source>`, which resolves an existing IPNS/DNSLink name to the cid it points at now (a snapshot, not a follow). With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows) — the one-command migration onto your own boxes. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace authorize [<id>]` | Grant the DECLARED publisher the per-site key derived from your master, so CI can deploy that name with no master (its primary job: run once locally, deploy from CI forever). Bare = every site the publisher holds in MFS; `<id>` = just that site, which need not exist yet. Idempotent (a key already held is reported `already-authorized`, never re-imported). No `--host`: the config says which host is the publisher, and zero/several declared publishers, or another host already holding that key, are loud refusals. It grants key MATERIAL only — it changes NO role and is NOT a failover. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
 | `pinnace status` | Per-site report across nodes: CID, IPNS id, the site's stored `mode` + `ensName`, the eth.limo name they resolve to AND whether `https://<name>.limo/` actually serves (`ethLimoServes=true/false`, or `n/a` for a site that resolves no name), the two eth.limo mismatch axes below, network-announce, gateway-serves. The three external checks are three-valued: a check that could NOT run prints `unknown (<reason>)` (e.g. `announced=unknown (http 429)`), never `false` — only a check that ANSWERED reports a negative. |
-| `pinnace install-ci --system github --build-command <c> --output-dir <d>` | Emit a deploy CI workflow and report the secrets/vars to set. |
+| `pinnace install-ci --system github --site <id> --output-dir <d> [--emit workflow\|steps] [--endpoint <url> [--replica-endpoint <url> ...]] [--set-mode ipfs\|ipns] [--build-command <c>] [--package-manager npm\|pnpm\|yarn] [--branch <b>] [--node-version <v>] [--action-ref <ref>] [--write [--force]]` | Emit a deploy pipeline and report the secrets to set. Your nodes are baked in as literal `--endpoint`/`--replica-endpoint` args (endpoints and site ids are not secrets, so they belong in the file, not in a CI settings panel), leaving ONE secret per node. `--emit steps` emits just the deploy step to paste into the workflow you already have; the default whole workflow adds checkout/install/build for `--package-manager`. Prints by default; `--write` installs it (and refuses to clobber without `--force`). |
 | `pinnace site <list\|add\|remove> ...` | Manage the sites a node serves (MFS wrappers + pins). |
 | `pinnace node <republish\|mirror\|warm\|status>` | The on-box agent verbs (run by the box's systemd timers; role-gated). |
 
-Global (either side of the command): `--config <path>` selects the `pinnace.json` (default `./pinnace.json`, whose ABSENCE is fine — a named-but-missing path fails loud), and `--endpoint <url>` supplies one publisher node instead of a config file (token still env-only). `--endpoint` may be given only ONCE: repeating it is a usage error rather than a silent pick.
+Global (either side of the command): `--config <path>` selects the `pinnace.json` (default `./pinnace.json`, whose ABSENCE is fine — a named-but-missing path fails loud), `--endpoint <url>` supplies one publisher node instead of a config file (token still env-only), and `--replica-endpoint <url>` (repeatable, only alongside `--endpoint`) adds that publisher's replicas, so a whole node set is expressible as args. `--endpoint` may be given only ONCE: repeating it is a usage error rather than a silent pick.
 
 Every node-touching verb (`deploy`, `pin`, `status`, `site`, `authorize`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
 

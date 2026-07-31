@@ -1,0 +1,187 @@
+# =============================================================================
+# pinnace deploy: the ONE deploy step every emitted pipeline uses.
+#
+#   - uses: wighawag/pinnace/actions/deploy@main
+#     with:
+#       endpoint: https://ipfs-publisher.example.com
+#       site: mysite.eth
+#       dir: dist
+#     env:
+#       PINNACE_HOST_PUBLISHER_TOKEN: ${{ secrets.PINNACE_HOST_PUBLISHER_TOKEN }}
+#
+# It owns the `npx pinnace deploy --json` call, the step outputs and the job
+# summary, so a generated workflow cannot drift from the CLI behind it. It takes
+# NO token inputs on purpose: bearer tokens (and the master, when a site needs
+# one) are read from the environment by the CLI itself, so this action never
+# handles a secret value.
+# =============================================================================
+name: pinnace deploy
+description: Deploy a built static site to your self-hosted IPFS node(s) with pinnace.
+
+inputs:
+  site:
+    description: 'The site id to deploy: its MFS home /sites/<id> and, in ipns mode, its key-derivation input.'
+    required: true
+  dir:
+    description: 'The directory holding the built static site (your build must have run already).'
+    required: true
+  endpoint:
+    description: "The publisher node's Kubo RPC url. Omit to use a committed pinnace.json instead."
+    required: false
+    default: ''
+  replica-endpoints:
+    description: 'Replica node urls, ONE PER LINE, in a stable order (they become replica-1, replica-2, ... and so decide their PINNACE_HOST_REPLICA_<N>_TOKEN names).'
+    required: false
+    default: ''
+  mode:
+    description: "ipfs | ipns. Leave empty to PRESERVE the mode the site already stores (the CLI's own rule)."
+    required: false
+    default: ''
+  config:
+    description: 'Path to a pinnace.json, when the node list lives in a file rather than in the inputs above.'
+    required: false
+    default: ''
+  version:
+    description: 'The pinnace version to run (e.g. 0.13.1). Empty uses the repo-local pinnace, or the latest published one if the repo has none.'
+    required: false
+    default: ''
+  summary:
+    description: 'Write a job summary (set to false to skip).'
+    required: false
+    default: 'true'
+
+outputs:
+  cid:
+    description: 'The deployed site CID (identical on every node that succeeded).'
+    value: ${{ steps.run.outputs.cid }}
+  ipns:
+    description: 'The IPNS id the site was published under, in ipns mode. Empty in ipfs mode.'
+    value: ${{ steps.run.outputs.ipns }}
+  mode:
+    description: 'The mode the deploy actually ran in (stated, or the site’s stored one).'
+    value: ${{ steps.run.outputs.mode }}
+  contenthash:
+    description: 'What an ENS contenthash should point at: ipns://<id> in ipns mode, ipfs://<cid> in ipfs mode.'
+    value: ${{ steps.run.outputs.contenthash }}
+  url:
+    description: 'A public gateway url for this build (dweb.link).'
+    value: ${{ steps.run.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: pinnace deploy
+      id: run
+      shell: bash
+      env:
+        INPUT_SITE: ${{ inputs.site }}
+        INPUT_DIR: ${{ inputs.dir }}
+        INPUT_ENDPOINT: ${{ inputs.endpoint }}
+        INPUT_REPLICA_ENDPOINTS: ${{ inputs.replica-endpoints }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        # Build the argv the same way `install-ci` reports it: infrastructure as
+        # args, secrets left to the environment (the CLI reads
+        # PINNACE_HOST_<NAME>_TOKEN itself, so they are never touched here).
+        args=(deploy --json)
+        if [ -n "$INPUT_ENDPOINT" ]; then
+          args+=(--endpoint "$INPUT_ENDPOINT")
+        fi
+        while IFS= read -r replica; do
+          replica="$(echo "$replica" | tr -d '[:space:]')"
+          if [ -n "$replica" ]; then
+            args+=(--replica-endpoint "$replica")
+          fi
+        done <<< "$INPUT_REPLICA_ENDPOINTS"
+        if [ -n "$INPUT_MODE" ]; then
+          args+=(--set-mode "$INPUT_MODE")
+        fi
+        if [ -n "$INPUT_CONFIG" ]; then
+          args+=(--config "$INPUT_CONFIG")
+        fi
+        args+=("$INPUT_DIR" "$INPUT_SITE")
+
+        pkg="pinnace"
+        if [ -n "$INPUT_VERSION" ]; then
+          pkg="pinnace@${INPUT_VERSION}"
+        fi
+
+        # --json puts ONE object on stdout, so the human-readable half of the log
+        # is the object itself; per-node failures are inside it (and on stderr).
+        out="${RUNNER_TEMP:-/tmp}/pinnace-deploy.json"
+        set +e
+        npx --yes "$pkg" "${args[@]}" > "$out"
+        status=$?
+        set -e
+        cat "$out"
+
+        # node, not jq: this action already requires node, and jq is not present
+        # on every runner image.
+        read_field() {
+          node -e '
+            const fs = require("fs");
+            let d = {};
+            try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+            const v = d[process.argv[2]];
+            process.stdout.write(v === undefined || v === null ? "" : String(v));
+          ' "$out" "$1"
+        }
+        cid="$(read_field cid)"
+        ipns="$(read_field ipns)"
+        mode="$(read_field mode)"
+
+        if [ -n "$ipns" ]; then
+          contenthash="ipns://${ipns}"
+          url="https://${ipns}.ipns.dweb.link/"
+        elif [ -n "$cid" ]; then
+          contenthash="ipfs://${cid}"
+          url="https://${cid}.ipfs.dweb.link/"
+        else
+          contenthash=""
+          url=""
+        fi
+
+        {
+          echo "cid=$cid"
+          echo "ipns=$ipns"
+          echo "mode=$mode"
+          echo "contenthash=$contenthash"
+          echo "url=$url"
+        } >> "$GITHUB_OUTPUT"
+
+        exit $status
+
+    - name: Summary
+      if: ${{ always() && inputs.summary != 'false' }}
+      shell: bash
+      env:
+        SITE: ${{ inputs.site }}
+        CID: ${{ steps.run.outputs.cid }}
+        IPNS: ${{ steps.run.outputs.ipns }}
+        MODE: ${{ steps.run.outputs.mode }}
+        CONTENTHASH: ${{ steps.run.outputs.contenthash }}
+        URL: ${{ steps.run.outputs.url }}
+      run: |
+        set -euo pipefail
+        {
+          echo "### pinnace deploy: \`${SITE}\`"
+          echo ""
+          if [ -z "${CID}" ]; then
+            echo "Deploy failed before a CID was produced. See the step log above."
+          else
+            echo "- CID: \`${CID}\`"
+            echo "- Preview: ${URL}"
+            if [ "${MODE}" = "ipns" ]; then
+              echo "- IPNS: \`${IPNS}\`"
+              echo "- ENS contenthash: \`${CONTENTHASH}\` (already points here, nothing to update)"
+            else
+              echo "- ENS contenthash: \`${CONTENTHASH}\`"
+              echo ""
+              echo "> \`ipfs\` mode addresses each build by its own CID, so this build is live only once you set the ENS contenthash above."
+            fi
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"

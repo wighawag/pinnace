@@ -46,11 +46,14 @@ The full setup guide (mental model, config + secrets, and the end-to-end provisi
 - **[packages/pinnace/README.md](packages/pinnace/README.md)** — install, configure, provision Hetzner nodes, deploy an `ipns` site, mirror external content with `pin`, and verify failover.
 - **[docs/failover.md](docs/failover.md)** — the failover runbook: recovering a name when the publisher dies (the replicas follow a DNS change; the record-sequence check tells you whether the handover took).
 
+Deploying from CI is `pinnace install-ci`: it emits either a whole starter workflow or just the deploy step to paste into the one you already have, with your nodes baked in as literal args and one bearer-token secret per node. Both forms `uses:` the composite action in [`actions/deploy`](actions/deploy/action.yml), which owns the `pinnace deploy --json` call, the step outputs and the job summary, so a generated pipeline cannot drift from the CLI behind it.
+
 ## Repository layout
 
 This is a pnpm monorepo.
 
 - `packages/pinnace/` — the published `pinnace` package (CLI + library).
+- `actions/deploy/` — the composite GitHub Action every emitted pipeline uses (`wighawag/pinnace/actions/deploy@<ref>`).
 - `CONTEXT.md` — the domain glossary (the vocabulary the code and docs use).
 - `docs/adr/` — architectural decision records (the frozen KDF, the no-client-signing boundary, the Kubo-owns-pinning boundary).
 - `work/` — the on-disk work contract (tasks, specs, notes) this repo is built with.

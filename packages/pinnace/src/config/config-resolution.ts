@@ -98,6 +98,21 @@ export interface ResolvedConfig {
  */
 export const CLI_ENDPOINT_HOST_NAME = 'publisher';
 
+/**
+ * The host name given to the Nth node supplied by the CLI's `--replica-endpoint`
+ * ({@link CliOverrides.replicaEndpoints}): `replica-1`, `replica-2`, ... in the
+ * order the operator typed them.
+ *
+ * Numbered rather than derived from the url because the NAME is what the
+ * env-only token convention keys off, and a hostname-derived name would make a
+ * token's env var change the day a box moves domain. `replica-1`'s token is
+ * read from `PINNACE_HOST_REPLICA_1_TOKEN` ({@link hostTokenEnvVar}) by the
+ * ordinary rule (non-alphanumerics collapse to `_`), no special case.
+ */
+export function cliReplicaHostName(index: number): string {
+	return `replica-${index + 1}`;
+}
+
 /** An env record (name → value). In production these come from `ldenv`. */
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -118,6 +133,25 @@ export interface CliOverrides {
 	 * endpoint OF a host the file already declares (by name).
 	 */
 	endpoint?: string;
+	/**
+	 * The REPLICA nodes' endpoints (`--replica-endpoint <url>`, repeatable), in
+	 * the order given, each resolving to a keyless replica host named
+	 * {@link cliReplicaHostName} whose token is env-only like every host's.
+	 *
+	 * They exist so a MULTI-NODE setup is expressible with args alone (the CI
+	 * case: a workflow bakes the endpoints as literal args and carries only the
+	 * tokens as secrets). Content redundancy comes from the deploy/pin FAN-OUT,
+	 * never from the on-box loop (a replica's `mirror` timer replicates the
+	 * signed RECORD, not the content), so a run that omits the replicas leaves
+	 * them holding the old CID.
+	 *
+	 * Only meaningful ALONGSIDE {@link CliOverrides.endpoint}: these are the
+	 * publisher's replicas, so with no `--endpoint` there is no arg-tier host list
+	 * to extend and they are IGNORED here (the CLI refuses that combination
+	 * loudly, before the resolver is reached, rather than silently half-applying
+	 * it to a file's hosts).
+	 */
+	replicaEndpoints?: string[];
 	/** Gateways override (replaces the file/env list). */
 	gateways?: string[];
 }
@@ -148,8 +182,9 @@ function envKey(...parts: string[]): string {
 export function resolveConfig(input: ResolveConfigInput): ResolvedConfig {
 	const {file, env, cli} = input;
 
-	// A CLI endpoint IS the host list (arg > env > file): one publisher node,
-	// no config file required. Its token stays env-only, like every host's.
+	// A CLI endpoint IS the host list (arg > env > file): one publisher node plus
+	// whatever replicas the operator named, no config file required. Every token
+	// stays env-only, keyed off the synthesised NAME like any other host's.
 	const hosts: HostConfig[] = cli.endpoint
 		? [
 				{
@@ -157,6 +192,12 @@ export function resolveConfig(input: ResolveConfigInput): ResolvedConfig {
 					endpoint: cli.endpoint,
 					role: 'publisher',
 				},
+				...(cli.replicaEndpoints ?? []).map((endpoint, i): HostConfig => ({
+					name: cliReplicaHostName(i),
+					endpoint,
+					role: 'replica',
+					publisherEndpoint: cli.endpoint,
+				})),
 			]
 		: (file.hosts ?? []).map((h) => {
 				const endpoint =

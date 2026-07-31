@@ -395,3 +395,172 @@ describe('sibling value-taking flags refuse their bare form the same way', () =>
 		expect(message).toContain('ipns');
 	});
 });
+
+describe('--replica-endpoint: the whole node set, expressed as args', () => {
+	/** The tokens the synthesised host names read (the ordinary naming rule). */
+	const argHostTokens = {
+		PINNACE_HOST_PUBLISHER_TOKEN: 'pub-token',
+		PINNACE_HOST_REPLICA_1_TOKEN: 'r1-token',
+		PINNACE_HOST_REPLICA_2_TOKEN: 'r2-token',
+	};
+
+	it('deploy fans out to the publisher AND every replica, each with its own token', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: argHostTokens});
+		const code = await run(
+			[
+				'--endpoint',
+				'https://pub.example',
+				'deploy',
+				'--replica-endpoint',
+				'https://r1.example',
+				'--replica-endpoint',
+				'https://r2.example',
+				'./dist',
+				'mysite',
+			],
+			context,
+		);
+		expect(err).toEqual([]);
+		expect(code).toBe(0);
+		// Content redundancy comes from THIS fan-out: a replica's `mirror` timer
+		// replicates the signed record, never the content.
+		expect(
+			(
+				calls.deploy[0] as {
+					targets: Array<{baseUrl: string; token: string; role: string}>;
+				}
+			).targets,
+		).toEqual([
+			{baseUrl: 'https://pub.example', token: 'pub-token', role: 'publisher'},
+			{baseUrl: 'https://r1.example', token: 'r1-token', role: 'replica'},
+			{baseUrl: 'https://r2.example', token: 'r2-token', role: 'replica'},
+		]);
+	});
+
+	it('is accepted on either side of the verb, like the other globals', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps, env: argHostTokens});
+		const before = await run(
+			[
+				'--endpoint',
+				'https://pub.example',
+				'--replica-endpoint',
+				'https://r1.example',
+				'status',
+			],
+			context,
+		);
+		expect(before).toBe(0);
+		expect(calls.statusReport.length).toBe(2);
+	});
+
+	it('refuses a BARE one (a typed flag must never mean nothing)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: argHostTokens});
+		const code = await run(
+			[
+				'--endpoint',
+				'https://pub.example',
+				'deploy',
+				'./dist',
+				'mysite',
+				'--replica-endpoint',
+			],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toMatch(/--replica-endpoint needs a value/);
+	});
+
+	it('refuses the same replica twice (a typo, not a redundancy instruction)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: argHostTokens});
+		const code = await run(
+			[
+				'--endpoint',
+				'https://pub.example',
+				'--replica-endpoint',
+				'https://r1.example',
+				'--replica-endpoint',
+				'https://r1.example',
+				'deploy',
+				'./dist',
+				'mysite',
+			],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toMatch(/given more than once/);
+	});
+
+	it('refuses replicas with no --endpoint (they are the replicas OF a publisher)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: argHostTokens});
+		const code = await run(
+			[
+				'deploy',
+				'--replica-endpoint',
+				'https://r1.example',
+				'./dist',
+				'mysite',
+			],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(calls.deploy.length).toBe(0);
+		expect(err.join('\n')).toMatch(/--replica-endpoint needs --endpoint/);
+	});
+});
+
+describe('deploy --json: one machine-readable object for CI', () => {
+	it('prints ONE json object carrying the cid, mode and per-node breakdown', async () => {
+		const {deps} = recordingDeps();
+		const {context, out} = ctx({
+			deps: {
+				...deps,
+				deploy: async () => ({
+					cid: 'bafyjson',
+					mode: 'ipns' as const,
+					ok: [
+						{
+							baseUrl: 'https://pub.example',
+							cid: 'bafyjson',
+							ipns: 'k51id',
+							published: true,
+						},
+					],
+					failed: [
+						{baseUrl: 'https://r1.example', error: new Error('node down')},
+					],
+					success: true,
+				}),
+			},
+		});
+		const code = await run(
+			[
+				'--endpoint',
+				'https://pub.example',
+				'deploy',
+				'--json',
+				'./dist',
+				'mysite',
+			],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(out).toHaveLength(1);
+		expect(JSON.parse(out[0])).toEqual({
+			cid: 'bafyjson',
+			mode: 'ipns',
+			ipns: 'k51id',
+			success: true,
+			ok: [{endpoint: 'https://pub.example', published: true, ipns: 'k51id'}],
+			// A partial deploy is DATA, not only a stderr line: the caller must be
+			// able to see which node did not get the build.
+			failed: [{endpoint: 'https://r1.example', error: 'node down'}],
+		});
+	});
+});

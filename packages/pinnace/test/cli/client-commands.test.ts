@@ -58,7 +58,9 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			calls.emitCi.push(input);
 			return {
 				system: 'github',
+				emit: input.emit ?? 'workflow',
 				workflow: {path: '.github/workflows/pinnace-deploy.yml', contents: ''},
+				writable: (input.emit ?? 'workflow') === 'workflow',
 				secrets: [],
 				vars: [],
 			};
@@ -621,7 +623,7 @@ describe('no pinnace.json — --endpoint + env token is a working single-node ta
 });
 
 describe('install-ci — dispatches to core emitCi with resolved args', () => {
-	it('parses args and calls core emitCi, reporting the workflow + secrets/vars', async () => {
+	it('parses args and calls core emitCi, reporting the workflow + secrets', async () => {
 		const {deps, calls} = recordingDeps();
 		const {context} = ctx({deps});
 		const code = await run(
@@ -629,6 +631,8 @@ describe('install-ci — dispatches to core emitCi with resolved args', () => {
 				'install-ci',
 				'--system',
 				'github',
+				'--site',
+				'mysite.eth',
 				'--build-command',
 				'npm run build',
 				'--output-dir',
@@ -640,8 +644,36 @@ describe('install-ci — dispatches to core emitCi with resolved args', () => {
 		expect(calls.emitCi.length).toBe(1);
 		expect(calls.emitCi[0]).toMatchObject({
 			system: 'github',
+			site: 'mysite.eth',
 			buildCommand: 'npm run build',
 			outputDir: 'dist',
+		});
+	});
+
+	it('carries the GLOBAL --endpoint/--replica-endpoint into the emitted pipeline', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps});
+		const code = await run(
+			[
+				'--endpoint',
+				'https://pub.example',
+				'install-ci',
+				'--system',
+				'github',
+				'--site',
+				'mysite.eth',
+				'--output-dir',
+				'dist',
+				'--replica-endpoint',
+				'https://rep.example',
+			],
+			context,
+		);
+		expect(code).toBe(0);
+		// The SAME flags that point a deploy at the boxes describe them to CI.
+		expect(calls.emitCi[0]).toMatchObject({
+			endpoint: 'https://pub.example',
+			replicaEndpoints: ['https://rep.example'],
 		});
 	});
 });

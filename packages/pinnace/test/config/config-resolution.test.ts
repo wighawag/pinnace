@@ -6,6 +6,7 @@ import {
 	hostTokenEnvVar,
 	MissingHostTokenError,
 	CLI_ENDPOINT_HOST_NAME,
+	cliReplicaHostName,
 	type PinnaceConfigFile,
 } from '../../src/config/config-resolution.js';
 import {deriveIpnsId} from '../../src/derive/ipns-key-derivation.js';
@@ -108,6 +109,58 @@ describe('the config file is OPTIONAL — a CLI endpoint yields a single-node ta
 		expect(() =>
 			resolveHostToken({hostName: CLI_ENDPOINT_HOST_NAME, env: {}}),
 		).toThrow(MissingHostTokenError);
+	});
+
+	it('--replica-endpoint adds keyless replicas, numbered in the order given', () => {
+		const cfg = resolveConfig({
+			file: {},
+			env: {},
+			cli: {
+				endpoint: 'https://pub.example',
+				replicaEndpoints: ['https://r1.example', 'https://r2.example'],
+			},
+		});
+		// A whole multi-node setup, expressed with args alone (the CI case).
+		expect(cfg.hosts).toEqual([
+			{
+				name: 'publisher',
+				endpoint: 'https://pub.example',
+				role: 'publisher',
+			},
+			{
+				name: cliReplicaHostName(0),
+				endpoint: 'https://r1.example',
+				role: 'replica',
+				publisherEndpoint: 'https://pub.example',
+			},
+			{
+				name: cliReplicaHostName(1),
+				endpoint: 'https://r2.example',
+				role: 'replica',
+				publisherEndpoint: 'https://pub.example',
+			},
+		]);
+		// Each one's token is env-only under the ORDINARY naming rule, so the
+		// ORDER of the flags is what decides which secret is which.
+		expect(hostTokenEnvVar(cfg.hosts[1].name)).toBe(
+			'PINNACE_HOST_REPLICA_1_TOKEN',
+		);
+		expect(hostTokenEnvVar(cfg.hosts[2].name)).toBe(
+			'PINNACE_HOST_REPLICA_2_TOKEN',
+		);
+	});
+
+	it('ignores replicas with no CLI endpoint (there is no arg-tier list to extend)', () => {
+		// The CLI refuses this combination loudly before the resolver is reached;
+		// the resolver simply never half-applies them to the FILE's hosts.
+		const cfg = resolveConfig({
+			file: fileConfig,
+			env: {},
+			cli: {replicaEndpoints: ['https://r1.example']},
+		});
+		expect(cfg.hosts.map((h) => h.name)).toEqual(
+			fileConfig.hosts!.map((h) => h.name),
+		);
 	});
 
 	it('a CLI endpoint WINS over the file hosts (arg > file), narrowing to that node', () => {

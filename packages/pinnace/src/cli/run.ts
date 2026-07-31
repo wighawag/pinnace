@@ -24,7 +24,8 @@
  * assemble per-host {@link KuboRpcClient}s from the resolved config and call
  * the site / authorize core.
  */
-import {readFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {dirname} from 'node:path';
 import {name, PINNACE_VERSION} from '../index.js';
 import {
 	NODE_VERBS,
@@ -96,9 +97,13 @@ import {
 } from '../pin/pin-external.js';
 import {
 	emitCi as coreEmitCi,
+	CI_EMIT_TARGETS,
+	PACKAGE_MANAGERS,
 	type EmitCiInput,
 	type EmittedCi,
 	type CiSystem,
+	type CiEmitTarget,
+	type PackageManager,
 } from '../ci/ci-emit.js';
 import {
 	statusReport as coreStatusReport,
@@ -123,6 +128,7 @@ import {
 	type EnvRecord,
 	type CliOverrides,
 	type HostRole,
+	type SiteMode,
 } from '../config/config-resolution.js';
 
 /**
@@ -221,6 +227,12 @@ interface ResolvedRunContext {
 	 * {@link cliOverridesFromFlags}.
 	 */
 	endpoint?: string;
+	/**
+	 * The GLOBAL `--replica-endpoint <url>` occurrences, in the order typed (the
+	 * ONE global flag that repeats on purpose). Stripped from the argv like
+	 * `--endpoint`, and only ever present ALONGSIDE it.
+	 */
+	replicaEndpoints?: string[];
 }
 
 /**
@@ -231,6 +243,8 @@ interface ResolvedRunContext {
 interface GlobalFlags {
 	/** `--config <path>`: which `pinnace.json` is the file layer. */
 	configPath?: string;
+	/** `--replica-endpoint <url>` (repeatable): the publisher's replica nodes. */
+	replicaEndpoints?: string[];
 	/** `--endpoint <url>`: the single node this run acts on. */
 	endpoint?: string;
 }
@@ -304,6 +318,10 @@ function resolveContext(
 		out: context.out ?? ((line) => console.log(line)),
 		err: context.err ?? ((line) => console.error(line)),
 		...(globals.endpoint !== undefined ? {endpoint: globals.endpoint} : {}),
+		...(globals.replicaEndpoints !== undefined &&
+		globals.replicaEndpoints.length > 0
+			? {replicaEndpoints: globals.replicaEndpoints}
+			: {}),
 	};
 }
 
@@ -325,6 +343,10 @@ function resolveContext(
  *  - `--endpoint <url>` is carried on {@link ResolvedRunContext.endpoint} to the
  *    verbs. A BARE or REPEATED one is a loud usage error here, BEFORE any
  *    config is loaded or any verb runs ({@link takeEndpointFlag}).
+ *  - `--replica-endpoint <url>` (REPEATABLE, and only alongside `--endpoint`)
+ *    adds the publisher's replicas to that arg-tier host list, so a whole
+ *    multi-node setup is expressible without a `pinnace.json`
+ *    ({@link takeReplicaEndpointFlags}).
  */
 export async function run(
 	argv: readonly string[],
@@ -341,7 +363,25 @@ export async function run(
 		err(`${name()}: ${endpointFlag.error}`);
 		return 1;
 	}
-	const {configPath, rest: postGlobal} = takeConfigFlag(endpointFlag.rest);
+	const replicaFlags = takeReplicaEndpointFlags(endpointFlag.rest);
+	if (replicaFlags.error !== undefined) {
+		err(`${name()}: ${replicaFlags.error}`);
+		return 1;
+	}
+	// The PAIRING check, which needs both flags parsed: replicas EXTEND the arg
+	// tier's host list, so alone they would either be dropped (a discarded
+	// targeting instruction) or half-applied to a file's hosts under names the
+	// file does not use. Neither is honest, so it is refused.
+	if (replicaFlags.replicaEndpoints.length > 0 && !endpointFlag.endpoint) {
+		err(
+			`${name()}: --replica-endpoint needs --endpoint <publisher url> too: ` +
+				'it names the replicas OF that publisher, and on its own there is no ' +
+				'host list to extend. Give both to describe your nodes as args, or ' +
+				'neither to use the hosts in pinnace.json',
+		);
+		return 1;
+	}
+	const {configPath, rest: postGlobal} = takeConfigFlag(replicaFlags.rest);
 
 	let rc: ResolvedRunContext;
 	try {
@@ -350,6 +390,7 @@ export async function run(
 			...(endpointFlag.endpoint !== undefined
 				? {endpoint: endpointFlag.endpoint}
 				: {}),
+			replicaEndpoints: replicaFlags.replicaEndpoints,
 		});
 	} catch (cause) {
 		// A loud, path-named failure only ever comes from an EXPLICIT --config;
@@ -514,6 +555,74 @@ function takeEndpointFlag(argv: readonly string[]): {
 	return {...(endpoint !== undefined ? {endpoint} : {}), rest};
 }
 
+/**
+ * Split the GLOBAL `--replica-endpoint <url>` occurrences off the argv, the way
+ * {@link takeEndpointFlag} splits `--endpoint`.
+ *
+ * This is the ONE global flag that REPEATS on purpose: it names the publisher's
+ * replica nodes, and a setup has as many as it has boxes. Order is preserved,
+ * because it is what numbers them (`replica-1`, `replica-2`, ...) and therefore
+ * what decides each one's env-only token variable
+ * (`PINNACE_HOST_REPLICA_1_TOKEN`). Reordering the flags renames the tokens, so
+ * the order is part of the contract, not incidental.
+ *
+ * It exists so a MULTI-NODE run is expressible with args alone, which is what
+ * CI needs (endpoints baked as literal args in the workflow, only the tokens as
+ * secrets). Without it, args-only CI could reach a single node, and since a
+ * replica's `mirror` timer replicates the signed RECORD and never the content,
+ * the other boxes would silently keep serving the previous CID.
+ *
+ * Refused loudly (as an `error` string, keeping this pure):
+ *  - a BARE flag, exactly as `--endpoint`: a typed flag must never mean nothing.
+ *  - the SAME url twice: two hosts pointing at one box would need two different
+ *    tokens for the same node, so it is a typo, not a redundancy instruction.
+ *
+ * NOT refused here: `--replica-endpoint` with no `--endpoint`. That check needs
+ * both flags parsed, so it lives in {@link run} (which has them) rather than in
+ * this single-flag scanner.
+ */
+function takeReplicaEndpointFlags(argv: readonly string[]): {
+	replicaEndpoints: string[];
+	rest: string[];
+	error?: string;
+} {
+	const rest: string[] = [];
+	const replicaEndpoints: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] !== '--replica-endpoint') {
+			rest.push(argv[i]);
+			continue;
+		}
+		const next = argv[i + 1];
+		const hasValue = next !== undefined && !next.startsWith('--');
+		const value = hasValue ? next : undefined;
+		if (hasValue) i++;
+		if (value === undefined || value === '') {
+			return {
+				replicaEndpoints,
+				rest,
+				error:
+					"--replica-endpoint needs a value: a replica node's Kubo RPC url, " +
+					'as --replica-endpoint <url> (repeat it once per replica, after ' +
+					'--endpoint <publisher url>)',
+			};
+		}
+		if (replicaEndpoints.includes(value)) {
+			return {
+				replicaEndpoints,
+				rest,
+				error:
+					`--replica-endpoint '${value}' given more than once; each one names ` +
+					'a DIFFERENT replica node (they are numbered replica-1, replica-2, ' +
+					'... in the order given, and each reads its own ' +
+					'PINNACE_HOST_REPLICA_<N>_TOKEN)',
+			};
+		}
+		replicaEndpoints.push(value);
+	}
+	return {replicaEndpoints, rest};
+}
+
 /** A parsed argv split into `--flag value` map + bare positionals. */
 interface ParsedArgs {
 	flags: Record<string, string>;
@@ -656,7 +765,10 @@ async function runDeploy(
 	argv: readonly string[],
 	rc: ResolvedRunContext,
 ): Promise<number> {
-	const {flags, positionals} = parseArgs(argv, ENS_NAME_BOOLEAN_FLAGS);
+	const {flags, positionals} = parseArgs(argv, [
+		'json',
+		...ENS_NAME_BOOLEAN_FLAGS,
+	]);
 	if (!refuseUnknownFlags('pinnace deploy', flags, VERB_FLAGS.deploy, rc))
 		return 1;
 	if (!refuseBareFlags('pinnace deploy', flags, rc)) return 1;
@@ -676,7 +788,7 @@ async function runDeploy(
 	const mode = siteModeIntentFromFlags('pinnace deploy', flags, siteId, rc);
 	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
 
-	const cli = cliOverridesFromFlags(flags, rc.endpoint);
+	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace deploy: ${NO_HOSTS_HINT}`);
@@ -743,6 +855,32 @@ async function runDeploy(
 		}
 		throw error;
 	}
+	if (flags['json'] !== undefined) {
+		// MACHINE mode: ONE json object on stdout and nothing else, so a caller can
+		// pipe it straight into jq (the CI step reads `.cid` to set a step output).
+		// Failures are still described IN the object rather than only on stderr,
+		// because a partial deploy is data the caller must be able to see. The exit code is
+		// unchanged, so `set -e` behaves identically with and without --json.
+		const ipns = result.ok.find((node) => node.published)?.ipns;
+		rc.out(
+			JSON.stringify({
+				cid: result.cid,
+				mode: result.mode,
+				...(ipns ? {ipns} : {}),
+				success: result.success,
+				ok: result.ok.map((node) => ({
+					endpoint: node.baseUrl,
+					published: node.published,
+					...(node.ipns ? {ipns: node.ipns} : {}),
+				})),
+				failed: result.failed.map((failure) => ({
+					endpoint: failure.baseUrl,
+					error: failure.error.message,
+				})),
+			}),
+		);
+		return result.success ? 0 : 1;
+	}
 	rc.out(`cid: ${result.cid}`);
 	for (const ok of result.ok) {
 		rc.out(
@@ -755,13 +893,43 @@ async function runDeploy(
 	return result.success ? 0 : 1;
 }
 
+/** `install-ci`'s value-less flags (see {@link parseArgs}'s `booleanFlags`). */
+const INSTALL_CI_BOOLEAN_FLAGS = ['write', 'force'] as const;
+
+/** The one-line usage `install-ci` prints beside a missing-flag refusal. */
+const INSTALL_CI_USAGE =
+	'usage: pinnace install-ci --system github --site <id> --output-dir <dir> \\\n' +
+	'         [--endpoint <url> [--replica-endpoint <url> ...]] \\\n' +
+	'         [--emit workflow|steps] [--set-mode ipfs|ipns] \\\n' +
+	'         [--build-command <cmd>] [--package-manager npm|pnpm|yarn] \\\n' +
+	'         [--branch <b>] [--node-version <v>] [--action-ref <ref>] [--write [--force]]';
+
 /**
- * `install-ci --system <s> --build-command <c> --output-dir <d> [--branch <b>]
- * [--node-version <v>]` -> core {@link ClientDeps.emitCi}. Prints the workflow
- * path/contents and reports the secrets/vars the operator must set.
+ * `install-ci --system <s> --site <id> --output-dir <d> [--emit workflow|steps]
+ * [--build-command <c>] [--package-manager npm|pnpm|yarn] [--set-mode <m>]
+ * [--branch <b>] [--node-version <v>] [--action-ref <ref>] [--write [--force]]`
+ * -> core {@link ClientDeps.emitCi}.
+ *
+ * THE NODES COME FROM THE GLOBAL FLAGS. `--endpoint` / `--replica-endpoint` are
+ * stripped before any verb parses, so this verb reads them off
+ * {@link ResolvedRunContext} exactly as the node-touching verbs do, and BAKES
+ * them into the emitted pipeline as literal args. That is deliberate: the flags
+ * an operator uses to point a deploy at their boxes are the same flags that
+ * describe those boxes to CI, with the same loud bare/repeat/pairing rules, so
+ * there is one way to name a node in this CLI, not two.
+ *
+ * Emitting with NO endpoint is legal and means "this repo commits a
+ * pinnace.json": the emitted deploy carries no host args, and the CLI resolves
+ * the file at run time (failing loudly there if the repo has none).
+ *
+ * PRINTS by default, WRITES only when asked (`--write`), and refuses to
+ * overwrite an existing file without `--force`. A generated workflow lands in a
+ * repo's CI, so silently replacing one is not a default worth having; and the
+ * `steps` fragment is never writable, because it is YAML to paste INTO a
+ * workflow, not a workflow.
  */
 function runInstallCi(argv: readonly string[], rc: ResolvedRunContext): number {
-	const {flags} = parseArgs(argv);
+	const {flags} = parseArgs(argv, INSTALL_CI_BOOLEAN_FLAGS);
 	if (
 		!refuseUnknownFlags(
 			'pinnace install-ci',
@@ -773,34 +941,120 @@ function runInstallCi(argv: readonly string[], rc: ResolvedRunContext): number {
 		return 1;
 	if (!refuseBareFlags('pinnace install-ci', flags, rc)) return 1;
 	const system = flags['system'];
-	const buildCommand = flags['build-command'];
+	const site = flags['site'];
 	const outputDir = flags['output-dir'];
 	const missing = missingFlags({
 		system,
-		'build-command': buildCommand,
+		site,
 		'output-dir': outputDir,
 	});
 	if (missing.length > 0) {
 		rc.err(
-			`pinnace install-ci: missing required flag(s): ${missing.join(', ')}`,
+			`pinnace install-ci: missing required flag(s): ${missing.join(', ')}\n${INSTALL_CI_USAGE}`,
+		);
+		return 1;
+	}
+
+	const emit = flags['emit'] ?? 'workflow';
+	if (!CI_EMIT_TARGETS.includes(emit as CiEmitTarget)) {
+		rc.err(
+			`pinnace install-ci: --emit must be one of ${CI_EMIT_TARGETS.join(
+				' | ',
+			)} ('workflow' = a whole starter workflow, 'steps' = just the deploy ` +
+				`step to paste into the workflow you already have); got '${emit}'`,
+		);
+		return 1;
+	}
+	const packageManager = flags['package-manager'];
+	if (
+		packageManager !== undefined &&
+		!PACKAGE_MANAGERS.includes(packageManager as PackageManager)
+	) {
+		rc.err(
+			`pinnace install-ci: --package-manager must be one of ${PACKAGE_MANAGERS.join(
+				' | ',
+			)}; got '${packageManager}'`,
+		);
+		return 1;
+	}
+	// The SAME allow-list deploy/pin judge --set-mode against: one concept, one
+	// rule. Stating nothing emits no --set-mode at all, so each deploy PRESERVES.
+	const modeFlag = flags['set-mode'];
+	if (modeFlag !== undefined && modeFlag !== 'ipfs' && modeFlag !== 'ipns') {
+		rc.err(
+			`pinnace install-ci: --set-mode must be 'ipfs' or 'ipns' (omit it to ` +
+				`preserve whatever mode the site already stores); got '${modeFlag}'`,
+		);
+		return 1;
+	}
+	if (emit === 'steps' && flags['build-command'] !== undefined) {
+		rc.err(
+			'pinnace install-ci: --build-command means nothing with --emit steps: ' +
+				'the fragment is the deploy step ALONE, pasted after the build your ' +
+				'workflow already does',
 		);
 		return 1;
 	}
 
 	const input: EmitCiInput = {
 		system: system as CiSystem,
-		buildCommand,
+		emit: emit as CiEmitTarget,
+		site,
 		outputDir,
+		...(rc.endpoint !== undefined ? {endpoint: rc.endpoint} : {}),
+		...(rc.replicaEndpoints !== undefined
+			? {replicaEndpoints: rc.replicaEndpoints}
+			: {}),
+		...(modeFlag !== undefined ? {mode: modeFlag as SiteMode} : {}),
 	};
+	if (flags['build-command']) input.buildCommand = flags['build-command'];
+	if (packageManager) input.packageManager = packageManager as PackageManager;
 	if (flags['branch']) input.branch = flags['branch'];
 	if (flags['node-version']) input.nodeVersion = flags['node-version'];
+	if (flags['action-ref']) input.actionRef = flags['action-ref'];
 
-	const emitted = rc.deps.emitCi(input);
-	rc.out(`workflow: ${emitted.workflow.path}`);
-	rc.out(emitted.workflow.contents);
+	let emitted: EmittedCi;
+	try {
+		emitted = rc.deps.emitCi(input);
+	} catch (error) {
+		rc.err(`pinnace install-ci: ${(error as Error).message}`);
+		return 1;
+	}
+
+	if (flags['write'] !== undefined) {
+		if (!emitted.writable) {
+			rc.err(
+				`pinnace install-ci: --write cannot write the '${emitted.emit}' ` +
+					'output: it is a fragment to paste into a workflow you already ' +
+					'have, not a workflow of its own. Drop --write (or emit the whole ' +
+					'workflow with --emit workflow)',
+			);
+			return 1;
+		}
+		const path = emitted.workflow.path;
+		if (existsSync(path) && flags['force'] === undefined) {
+			rc.err(
+				`pinnace install-ci: ${path} already exists; re-run with --force to ` +
+					'overwrite it (a generated workflow lands in your CI, so it is ' +
+					'never replaced silently)',
+			);
+			return 1;
+		}
+		mkdirSync(dirname(path), {recursive: true});
+		writeFileSync(path, emitted.workflow.contents);
+		rc.out(`wrote ${path}`);
+	} else {
+		rc.out(
+			emitted.writable
+				? `workflow: ${emitted.workflow.path} (re-run with --write to create it)`
+				: `paste these steps into your workflow (${emitted.workflow.path}):`,
+		);
+		rc.out(emitted.workflow.contents);
+	}
 	if (emitted.secrets.length > 0) {
-		rc.out('Required secrets (Settings -> Secrets):');
-		for (const s of emitted.secrets) rc.out(`  ${s.name} — ${s.description}`);
+		rc.out('Required secrets (Settings -> Secrets and variables -> Actions):');
+		for (const s of emitted.secrets)
+			rc.out(`  ${s.name}${s.optional ? ' (optional)' : ''}: ${s.description}`);
 	}
 	if (emitted.vars.length > 0) {
 		rc.out('Required variables (Settings -> Variables):');
@@ -822,7 +1076,7 @@ async function runStatus(
 	if (!refuseUnknownFlags('pinnace status', flags, VERB_FLAGS.status, rc))
 		return 1;
 	if (!refuseBareFlags('pinnace status', flags, rc)) return 1;
-	const cli = cliOverridesFromFlags(flags, rc.endpoint);
+	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace status: ${NO_HOSTS_HINT}`);
@@ -1093,7 +1347,7 @@ async function runPin(
 	const mode = siteModeIntentFromFlags('pinnace pin', flags, pinName, rc);
 	if (!mode) return 1; // siteModeIntentFromFlags already emitted the error.
 
-	const cli = cliOverridesFromFlags(flags, rc.endpoint);
+	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace pin: ${NO_HOSTS_HINT}`);
@@ -1481,6 +1735,7 @@ const VERB_FLAGS = {
 			'set-mode',
 			'set-ens-name',
 			'unset-ens-name',
+			'json',
 			...CONFIG_OVERRIDE_FLAGS,
 		],
 		prefixes: HOST_OVERRIDE_PREFIXES,
@@ -1506,9 +1761,26 @@ const VERB_FLAGS = {
 	},
 	/** `derive <id>` is a local KDF over env: no flags at all, and no node. */
 	derive: {exact: []},
-	/** The CI workflow inputs. */
+	/**
+	 * The CI pipeline inputs. The NODES are not here: `--endpoint` /
+	 * `--replica-endpoint` are globals, stripped before this check, and the verb
+	 * reads them off the run context.
+	 */
 	'install-ci': {
-		exact: ['system', 'build-command', 'output-dir', 'branch', 'node-version'],
+		exact: [
+			'system',
+			'emit',
+			'site',
+			'set-mode',
+			'output-dir',
+			'build-command',
+			'package-manager',
+			'branch',
+			'node-version',
+			'action-ref',
+			'write',
+			'force',
+		],
 	},
 	/** `--host` SELECTS the one node the site verbs act on. */
 	site: {
@@ -1643,8 +1915,9 @@ function missingFlags(required: Record<string, string | undefined>): string[] {
  */
 function cliOverridesFromFlags(
 	flags: Record<string, string>,
-	endpoint?: string,
+	globals: {endpoint?: string; replicaEndpoints?: string[]} = {},
 ): CliOverrides {
+	const {endpoint, replicaEndpoints} = globals;
 	const cli: CliOverrides = {};
 	const hostToken: Record<string, string> = {};
 	const hostEndpoint: Record<string, string> = {};
@@ -1657,6 +1930,10 @@ function cliOverridesFromFlags(
 	if (Object.keys(hostToken).length > 0) cli.hostToken = hostToken;
 	if (Object.keys(hostEndpoint).length > 0) cli.hostEndpoint = hostEndpoint;
 	if (endpoint) cli.endpoint = endpoint;
+	// Replicas EXTEND the arg-tier host list, so they are only meaningful with an
+	// --endpoint; `run` refuses the lone form before any verb is reached.
+	if (endpoint && replicaEndpoints && replicaEndpoints.length > 0)
+		cli.replicaEndpoints = replicaEndpoints;
 	if (flags['gateways'])
 		cli.gateways = flags['gateways']
 			.split(',')
@@ -1695,7 +1972,7 @@ async function runSiteCli(
 		return 1;
 	}
 
-	const cli = cliOverridesFromFlags(flags, rc.endpoint);
+	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	const client = buildHostClient('pinnace site', flags['host'], cfg, rc, cli);
 	if (!client) return 1; // buildHostClient already emitted the loud error.
@@ -1913,7 +2190,7 @@ async function runAuthorize(
 		return 1;
 	}
 
-	const cli = cliOverridesFromFlags(flags, rc.endpoint);
+	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
 		rc.err(`pinnace authorize: ${NO_HOSTS_HINT}`);
