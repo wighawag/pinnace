@@ -490,7 +490,12 @@ describe('renderStatusHtml: per-site row', () => {
 			],
 		});
 		// Nothing to ask -> no verdict at all, never `unknown` and never a cross.
-		const row = html.slice(html.indexOf('<tbody>'), html.indexOf('</tbody>'));
+		// The card is the slice from this site's id header to the end of the page
+		// body (there is only the one site here).
+		const row = html.slice(
+			html.indexOf('class="site-id"'),
+			html.indexOf('</section>'),
+		);
 		expect(row).not.toContain('unknown');
 		expect(row).not.toContain('class="no"');
 		expect(row).not.toContain('foreign');
@@ -578,7 +583,10 @@ describe('renderStatusHtml: the record sequence column', () => {
 			generated: '2026-07-25T10:11:12.000Z',
 			sites: [site],
 		});
-		return html.slice(html.indexOf('<tbody>'), html.indexOf('</tbody>'));
+		return html.slice(
+			html.indexOf('class="site-id"'),
+			html.indexOf('</section>'),
+		);
 	}
 
 	it('shows a known sequence as the number', () => {
@@ -598,9 +606,9 @@ describe('renderStatusHtml: the record sequence column', () => {
 			ipns: 'k51alice',
 			sequence: {state: 'known', sequence: 0},
 		});
-		// The seq CELL itself carries the number (the announced/gateway cells in
-		// this fixture legitimately read `unknown`, so assert the cell, not the row).
-		expect(row).toContain('<td><code>0</code></td>');
+		// The seq FIELD itself carries the number (the announced/gateway fields in
+		// this fixture legitimately read `unknown`, so assert the field, not the row).
+		expect(row).toContain('<dd><code>0</code></dd>');
 	});
 
 	it('shows an unreadable sequence NEUTRALLY with its reason, never as a number', () => {
@@ -620,7 +628,10 @@ describe('renderStatusHtml: the record sequence column', () => {
 describe('renderStatusHtml: long identifiers stay readable in narrow columns', () => {
 	// The live defect (2026-07-30): eleven columns squeezed the cid/ipns cells and
 	// `word-break: break-all` shredded a 59-character CIDv1 into a
-	// one-character-per-line ribbon, making the whole table unreadable.
+	// one-character-per-line ribbon, making the whole table unreadable. The fix
+	// is structural: each id now gets its OWN line in a card (full card width), so
+	// the FULL value is shown in an inverted-background badge — no elision, no
+	// shredding.
 	const CID = 'bafybeigbxdgiqmsxwsuocolyhfhlgxf4dgqtfxd4gorw45gcvh5vmdakey';
 	const IPNS = 'k51qzi5uqu5dlqzk68fn2fkxlm774pc2qotnpwno7c8lt5d2b3rbqx82lweflz';
 
@@ -631,12 +642,13 @@ describe('renderStatusHtml: long identifiers stay readable in narrow columns', (
 		});
 	}
 
-	it('middle-elides the cid and ipns in the VISIBLE label', () => {
+	it('shows the FULL cid and ipns as readable id badges (not elided)', () => {
 		const out = html();
-		expect(out).toContain('bafybeigbx\u2026mdakey');
-		expect(out).toContain('k51qzi5uqu\u2026lweflz');
-		// The full opaque string is not rendered as visible text any more.
-		expect(out).not.toContain(`<code>${CID}</code>`);
+		// The whole opaque string is shown as the visible id badge on its own line.
+		expect(out).toContain(`<code class="id">${CID}</code>`);
+		expect(out).toContain(`<code class="id">${IPNS}</code>`);
+		// Nothing is middle-elided any more.
+		expect(out).not.toContain('\u2026');
 	});
 
 	it('keeps the FULL value in the href and the title, so nothing is lost', () => {
@@ -647,16 +659,17 @@ describe('renderStatusHtml: long identifiers stay readable in narrow columns', (
 		expect(out).toContain(`title="${IPNS}"`);
 	});
 
-	it('no longer breaks identifiers character-by-character', () => {
+	it('wraps long identifiers at the card width instead of character-by-character', () => {
 		expect(html()).not.toContain('word-break: break-all');
+		expect(html()).toContain('overflow-wrap: anywhere');
 	});
 
-	it('leaves a SHORT value untouched (eliding it would cost more than it saves)', () => {
+	it('leaves a SHORT value untouched (shown in full, no elision)', () => {
 		const out = renderStatusHtml({
 			generated: '2026-07-25T10:11:12.000Z',
 			sites: [{id: 'x', cid: 'bafyshort', ipns: 'k51short'}],
 		});
-		expect(out).toContain('<code>bafyshort</code>');
+		expect(out).toContain('<code class="id">bafyshort</code>');
 		expect(out).not.toContain('\u2026');
 	});
 
@@ -677,10 +690,10 @@ describe('renderStatusHtml: long identifiers stay readable in narrow columns', (
 			],
 		});
 		expect(out).toContain(`title="unknown (${reason})"`);
-		// ...but the visible text is one short line, not a wall in a narrow cell.
-		const cell = out.slice(out.indexOf('<tbody>'), out.indexOf('</tbody>'));
+		// ...but the visible text is one short line, not a wall in a field.
+		const card = out.slice(out.indexOf('site-id'), out.indexOf('</section>'));
 		const visible = /<span class="unknown"[^>]*>([^<]*)<\/span>/.exec(
-			cell,
+			card,
 		)![1]!;
 		expect(visible.length).toBeLessThanOrEqual(32);
 		expect(visible.endsWith('\u2026')).toBe(true);

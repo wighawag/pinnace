@@ -4,7 +4,7 @@
  * `pinnace node status` already produces a machine-readable report and the
  * command layer writes it as `status.json` into the node's dashboard dir (a
  * Caddy `file_server` vhost). This module turns the SAME data into an
- * `index.html` so `https://<dashboard-domain>/` shows a readable per-site table
+ * `index.html` so `https://<dashboard-domain>/` shows a readable per-site view
  * instead of raw JSON. It re-gathers NOTHING: the report is passed in.
  *
  * The renderer is a PURE function ({@link renderStatusHtml}): report in, HTML
@@ -35,6 +35,15 @@
  * `onUnitActiveSec` in ../provision/cloud-init.ts): a much faster reload would
  * just re-fetch identical bytes. The rendered `generated` timestamp is shown
  * prominently so a viewer sees the real data age regardless of reload timing.
+ *
+ * LAYOUT: each site is a CARD, not a row in a wide table. The old eleven-column
+ * table overflowed its centered column (long nowrap cells pushed it past the
+ * viewport, so the page read as off-centre) and squeezed the opaque cid/ipns
+ * identifiers into cells that had to be middle-elided to fit — making them hard
+ * to read and to compare across nodes. A card gives each identifier its OWN line
+ * at the card's full width, so the FULL value can be shown (nothing elided, the
+ * link `href`/`title` and `status.json` still carry it too) and an INVERTED
+ * background badge sets the opaque ids apart from the human-readable fields.
  */
 import {ensNameDisplay, type EnsNameDisplay} from './ens-name-display.js';
 import {
@@ -147,7 +156,7 @@ export interface StatusPageSite {
 
 /**
  * What the page renders: the node identity, WHEN the data was gathered, and one
- * row per site. A {@link ../status/status-report.js#StatusReport} plus the
+ * card per site. A {@link ../status/status-report.js#StatusReport} plus the
  * `generated` stamp the command layer writes into `status.json` satisfies this.
  */
 export interface StatusPageReport {
@@ -155,7 +164,7 @@ export interface StatusPageReport {
 	peerId?: string;
 	/** ISO-8601 timestamp of when the report was produced (the freshness signal). */
 	generated: string;
-	/** One row per site discovered under MFS `/sites/*`. */
+	/** One card per site discovered under MFS `/sites/*`. */
 	sites: readonly StatusPageSite[];
 }
 
@@ -184,12 +193,14 @@ export function renderStatusHtml(
 		1,
 		Math.round(options.refreshSeconds ?? DEFAULT_STATUS_REFRESH_SECONDS),
 	);
-	const peerId = report.peerId ? escapeHtml(report.peerId) : 'unknown';
+	const peerId = report.peerId
+		? idBadge(escapeHtml(report.peerId))
+		: idBadge('unknown');
 	const generated = escapeHtml(report.generated);
-	const rows =
+	const cards =
 		report.sites.length > 0
-			? report.sites.map(renderSiteRow).join('\n')
-			: `\t\t\t<tr><td class="empty" colspan="10">no sites yet (nothing under the node's MFS sites dir)</td></tr>`;
+			? report.sites.map(renderSiteCard).join('\n')
+			: '\t\t<p class="empty">no sites yet (nothing under the node&apos;s MFS sites dir)</p>';
 
 	return `<!doctype html>
 <html lang="en">
@@ -204,30 +215,26 @@ ${PAGE_CSS}
 </head>
 <body>
 	<h1>pinnace node status</h1>
-	<p class="meta">node <code>${peerId}</code></p>
+	<p class="meta">node ${peerId}</p>
 	<p class="meta">generated <time datetime="${generated}">${generated}</time>, reloading every ${refresh}s</p>
-	<table>
-		<thead>
-			<tr><th>site</th><th>cid</th><th>ipns</th><th>seq</th><th>mode</th><th>ens name</th><th>eth.limo</th><th>origin</th><th>freshness</th><th>announced</th><th>gateway</th></tr>
-		</thead>
-		<tbody>
-${rows}
-		</tbody>
-	</table>
-	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites. The <em>origin</em> and <em>freshness</em> columns report what eth.limo resolved and served through its own cache, not a read of the ENS record: a <em>stale</em> cid shortly after a deploy is normal propagation lag.</p>
+	<main>
+${cards}
+	</main>
+	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites. The <em>origin</em> and <em>freshness</em> fields report what eth.limo resolved and served through its own cache, not a read of the ENS record: a <em>stale</em> cid shortly after a deploy is normal propagation lag.</p>
 </body>
 </html>
 `;
 }
 
 /**
- * Render one site's table row: id, gateway-linked cid + ipns, the `mode` its
- * MFS metadata stores, its ENS name (stored or inferred, see
- * {@link renderEnsName}), the eth.limo name that resolves to AND whether it
- * serves, the two eth.limo resolution axes (origin + freshness), then the two
- * CID health indicators.
+ * Render one site's CARD: a header with the site id, then a definition list of
+ * fields. The opaque identifiers (cid, ipns) each get their OWN line as an
+ * {@link idBadge} (an inverted-background `<code class="id">`) at the card's
+ * full width, so the FULL value is shown and stays readable — no middle-elision,
+ * no one-character-per-line shredding. The link `href`/`title` and `status.json`
+ * carry the full value too, so showing it loses nothing.
  */
-function renderSiteRow(site: StatusPageSite): string {
+function renderSiteCard(site: StatusPageSite): string {
 	const cid = site.cid
 		? gatewayLink(
 				site.cid,
@@ -242,7 +249,7 @@ function renderSiteRow(site: StatusPageSite): string {
 		: '<span class="none">none</span>';
 	// The record sequence: a plain number when known, the reason when not, and
 	// `none` when this node holds no key for the site. Never a bare 0 for an
-	// unread sequence (that IS the failure this column exposes).
+	// unread sequence (that IS the failure this field exposes).
 	const sequence =
 		site.sequence === undefined
 			? '<span class="none">none</span>'
@@ -257,7 +264,7 @@ function renderSiteRow(site: StatusPageSite): string {
 	// mistaken for an override the site stores), the explicit opt-out, and a site
 	// with no name at all.
 	const ensName = renderEnsName(ensNameDisplay(site));
-	// The eth.limo cell answers BOTH questions: which name would be warmed, and
+	// The eth.limo field answers BOTH questions: which name would be warmed, and
 	// does it actually serve? The verdict is appended only when the report HAS
 	// one (see StatusPageSite.ethLimoServes) — a site with no name to probe shows
 	// `none` and no red flag.
@@ -271,22 +278,31 @@ function renderSiteRow(site: StatusPageSite): string {
 				: ` ${indicator(site.ethLimoServes)}`)
 		: '<span class="none">none</span>';
 	return (
-		`\t\t\t<tr><th scope="row">${escapeHtml(site.id)}</th>` +
-		`<td>${cid}</td><td>${ipns}</td><td>${sequence}</td>` +
-		`<td>${mode}</td><td>${ensName}</td><td>${ethLimo}</td>` +
-		`<td>${renderOrigin(site.ethLimoOrigin)}</td>` +
-		`<td>${renderFreshness(site.ethLimoFreshness)}</td>` +
-		`<td>${indicator(site.announced)}</td><td>${indicator(site.gatewayServes)}</td></tr>`
+		`\t\t<section class="site">\n` +
+		`\t\t\t<h2 class="site-id">${escapeHtml(site.id)}</h2>\n` +
+		`\t\t\t<dl class="fields">\n` +
+		`\t\t\t\t<div class="field"><dt>content cid</dt><dd>${cid}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>ipns</dt><dd>${ipns}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>sequence</dt><dd>${sequence}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>mode</dt><dd>${mode}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>ens name</dt><dd>${ensName}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>eth.limo</dt><dd>${ethLimo}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>origin</dt><dd>${renderOrigin(site.ethLimoOrigin)}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>freshness</dt><dd>${renderFreshness(site.ethLimoFreshness)}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>announced</dt><dd>${indicator(site.announced)}</dd></div>\n` +
+		`\t\t\t\t<div class="field"><dt>gateway</dt><dd>${indicator(site.gatewayServes)}</dd></div>\n` +
+		`\t\t\t</dl>\n` +
+		`\t\t</section>`
 	);
 }
 
 /**
- * The `origin` cell: is the ENS name resolving through THIS site?
+ * The `origin` field: is the ENS name resolving through THIS site?
  *
  *  - `ours`    — green, like any other answered-yes,
  *  - `foreign` — the RED negative, NAMING what it points at instead: this is
  *    the one state that is a genuine "we asked, and the answer is no", and the
- *    whole reason the column exists (a live box was green everywhere while
+ *    whole reason the field exists (a live box was green everywhere while
  *    eth.limo served through another publisher's name),
  *  - `frozen`  — ATTENTION (not red): the record is a valid immutable cid, it
  *    just will not follow the next deploy,
@@ -295,8 +311,9 @@ function renderSiteRow(site: StatusPageSite): string {
  *    verdict at all.
  *
  * It reports what ETH.LIMO RESOLVED (through its cache), never a read of the
- * ENS record — the column header stays `origin` for that reason, and the page's
- * footer note says so.
+ * ENS record — the field label stays `origin` for that reason, and the page's
+ * footer note says so. The path it names is shown in FULL (an id badge) now that
+ * the card gives it a whole line.
  */
 function renderOrigin(origin: EthLimoOrigin | undefined): string {
 	if (origin === undefined) return '<span class="none">none</span>';
@@ -305,13 +322,11 @@ function renderOrigin(origin: EthLimoOrigin | undefined): string {
 			return '<span class="ok">ours</span>';
 		case 'foreign':
 			return (
-				'<span class="no">foreign</span> ' +
-				`<code title="${escapeHtml(origin.path)}">${escapeHtml(abbreviate(origin.path))}</code>`
+				'<span class="no">foreign</span> ' + idBadge(escapeHtml(origin.path))
 			);
 		case 'frozen':
 			return (
-				'<span class="warn">frozen</span> ' +
-				`<code title="${escapeHtml(origin.path)}">${escapeHtml(abbreviate(origin.path))}</code>`
+				'<span class="warn">frozen</span> ' + idBadge(escapeHtml(origin.path))
 			);
 		case 'unknown':
 			return reasonCell('unknown', `unknown (${origin.reason})`);
@@ -319,11 +334,11 @@ function renderOrigin(origin: EthLimoOrigin | undefined): string {
 }
 
 /**
- * The `freshness` cell: is the served root this site's CURRENT cid? `current`
+ * The `freshness` field: is the served root this site's CURRENT cid? `current`
  * is green; `stale` NAMES the served cid in a NEUTRAL attention style, never
  * the red negative (a gateway lagging a fresh deploy is normal propagation, and
  * cids that differ only in encoding read as stale too); `unknown` carries its
- * reason; ABSENT means nothing was asked.
+ * reason; ABSENT means nothing was asked. The served cid is shown in FULL.
  */
 function renderFreshness(freshness: EthLimoFreshness | undefined): string {
 	if (freshness === undefined) return '<span class="none">none</span>';
@@ -333,7 +348,7 @@ function renderFreshness(freshness: EthLimoFreshness | undefined): string {
 		case 'stale':
 			return (
 				'<span class="warn">stale</span> ' +
-				`<code title="${escapeHtml(freshness.servedCid)}">${escapeHtml(abbreviate(freshness.servedCid))}</code>`
+				idBadge(escapeHtml(freshness.servedCid))
 			);
 		case 'unknown':
 			return reasonCell('unknown', `unknown (${freshness.reason})`);
@@ -341,7 +356,7 @@ function renderFreshness(freshness: EthLimoFreshness | undefined): string {
 }
 
 /**
- * Render the `ens name` cell from its display state: the NAME in `<code>` when
+ * Render the `ens name` field from its display state: the NAME in `<code>` when
  * there is one, with an inferred name carrying a muted `(inferred)` hint so it
  * stays visually distinct from a stored one (an inferred name FOLLOWS the
  * `.eth` id, a stored one OVERRIDES it — not the same thing). The two nameless
@@ -364,48 +379,31 @@ function renderEnsName(display: EnsNameDisplay): string {
 	}
 }
 
-/** A gateway link: escaped label, escaped href (already URI-encoded). */
+/** A gateway link: the FULL identifier as an id badge, escaped href + title. */
 function gatewayLink(label: string, href: string): string {
 	return (
 		`<a href="${escapeHtml(href)}" title="${escapeHtml(label)}">` +
-		`<code>${escapeHtml(abbreviate(label))}</code></a>`
+		`${idBadge(escapeHtml(label))}</a>`
 	);
 }
 
 /**
- * How many characters of a long opaque identifier are shown before it is
- * middle-elided. A CIDv1 is ~59 characters and an IPNS id ~62; at eleven columns
- * that is far more than a cell can hold, and since `code` breaks anywhere the
- * browser shreds them into a one-character-per-line ribbon that makes the whole
- * table unreadable (observed live, 2026-07-30).
- *
- * The head is what distinguishes one identifier from another at a glance
- * (`bafybei...` vs `k51qzi5...` and the divergence just after), and the tail is
- * what an operator compares when checking two values match, so BOTH ends are
- * kept and only the indistinct middle goes.
+ * An opaque identifier rendered as an INVERTED-background badge
+ * (`<code class="id">`): a dark chip with light text in light mode and the
+ * reverse in dark mode, so the id stands apart from the human-readable fields.
+ * It gets its OWN line at the card's full width and wraps anywhere (long CIDs
+ * and IPNS ids never shred into a one-character-per-line ribbon), and it is
+ * shown in FULL — no middle-elision — so it stays readable and comparable.
  */
-const ABBREV_HEAD = 10;
-const ABBREV_TAIL = 6;
-
-/**
- * Middle-elide a long identifier for DISPLAY only. The full value always
- * survives in the link's `href` and its `title` tooltip, and in `status.json`,
- * so nothing is actually lost: this is a rendering concern, not a data one.
- *
- * Short values pass through untouched (eliding them would cost more characters
- * than it saves), and the ellipsis is a real … so a copied string is visibly
- * truncated rather than looking like a valid-but-wrong id.
- */
-function abbreviate(value: string): string {
-	if (value.length <= ABBREV_HEAD + ABBREV_TAIL + 1) return value;
-	return `${value.slice(0, ABBREV_HEAD)}\u2026${value.slice(-ABBREV_TAIL)}`;
+function idBadge(escapedValue: string): string {
+	return `<code class="id">${escapedValue}</code>`;
 }
 
 /**
- * A long free-text reason (a Kubo error, an eth.limo path) rendered in a narrow
- * cell: abbreviated to one line, with the FULL text in a `title` tooltip.
- * Reasons are already length-capped by `shortReason`, but 120 characters is
- * still far more than a cell can show.
+ * A long free-text reason (a Kubo error, an eth.limo path) rendered in a field:
+ * abbreviated to one line, with the FULL text in a `title` tooltip. Reasons are
+ * already length-capped by `shortReason`, but 120 characters is still far more
+ * than a field label wants on one line.
  */
 function reasonCell(cssClass: string, text: string, full?: string): string {
 	return (
@@ -463,27 +461,65 @@ function escapeHtml(value: string): string {
 
 /** The page's INLINE stylesheet (no external asset may be required). */
 const PAGE_CSS = `	:root { color-scheme: light dark; }
+	html { background: #f5f6f8; }
+	* { box-sizing: border-box; }
 	body {
-		margin: 2rem auto; max-width: 60rem; padding: 0 1rem;
-		font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+		max-width: 46rem; margin: 2rem auto; padding: 0 1rem;
+		font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+		color: #1f2937;
 	}
-	h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
-	.meta { margin: 0.25rem 0; color: #666; font-size: 0.9rem; }
-	.foot { margin-top: 1.5rem; color: #666; font-size: 0.8rem; }
-	table { border-collapse: collapse; width: 100%; margin-top: 1.5rem; }
-	th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #8883; }
-	thead th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: #666; }
-	/* Identifiers are middle-elided for display (see abbreviate()), so they no
-	   longer need break-all, which is what shredded a 59-character CID into a
-	   one-character-per-line ribbon when eleven columns squeezed the cell. */
-	code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; white-space: nowrap; }
-	td { white-space: nowrap; }
-	/* The site id is the row's label and may be long; let it wrap rather than
-	   widen the table. */
-	th[scope="row"] { white-space: normal; word-break: break-word; }
+	h1 { font-size: 1.4rem; margin: 0 0 0.5rem; }
+	.meta { margin: 0.2rem 0; color: #6b7280; font-size: 0.9rem; }
+	.foot { margin-top: 1.5rem; color: #6b7280; font-size: 0.8rem; }
+	main { margin-top: 1rem; }
+	.site {
+		background: #fff; border: 1px solid #e5e7eb; border-radius: 0.6rem;
+		padding: 1rem 1.25rem; margin-top: 1rem;
+	}
+	.site-id {
+		font-size: 1.1rem; margin: 0 0 0.6rem; padding-bottom: 0.4rem;
+		border-bottom: 1px solid #eef0f3;
+	}
+	.fields { margin: 0; }
+	.field {
+		display: grid; grid-template-columns: minmax(7rem, 9rem) 1fr;
+		gap: 0.6rem; padding: 0.2rem 0; align-items: start;
+	}
+	.field dt {
+		color: #6b7280; font-size: 0.78rem; font-weight: 600;
+		text-transform: uppercase; letter-spacing: 0.04em; padding-top: 0.15rem;
+	}
+	.field dd { margin: 0; min-width: 0; }
+	a { color: #1d4ed8; text-decoration: none; }
+	a:hover { text-decoration: underline; }
+	code {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.85rem;
+	}
+	/* An opaque id gets its OWN line as an INVERTED badge: a dark chip with light
+	   text (the reverse in dark mode) so it stands apart from readable fields, and
+	   overflow-wrap lets a long CID/IPNS id fold at the card width instead of
+	   shredding into one character per line. */
+	.id {
+		display: inline-block; max-width: 100%; padding: 0.12rem 0.42rem;
+		border-radius: 0.35rem; background: #0f172a; color: #e2e8f0;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.82rem; overflow-wrap: anywhere; word-break: break-word;
+	}
 	.ok { color: #157f3d; font-weight: 600; }
 	.no { color: #b3261e; font-weight: 600; }
 	/* ATTENTION, deliberately NOT the .no red: a stale cid or a frozen ENS record
 	   is something to look at, not a failed check. */
 	.warn { color: #8a6100; font-weight: 600; }
-	.none, .empty, .inferred, .unknown { color: #666; }`;
+	.none, .empty, .inferred, .unknown { color: #6b7280; }
+	@media (prefers-color-scheme: dark) {
+		html { background: #0b0f17; }
+		body { color: #e5e7eb; }
+		.site { background: #111827; border-color: #1f2937; }
+		.site-id { border-color: #1f2937; }
+		.field dt { color: #94a3b8; }
+		.meta, .foot { color: #94a3b8; }
+		a { color: #93c5fd; }
+		/* The id badge inverts with the scheme: light chip on the dark page. */
+		.id { background: #e2e8f0; color: #0f172a; }
+	}`;
