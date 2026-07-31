@@ -37,6 +37,10 @@ inputs:
     description: "ipfs | ipns. Leave empty to PRESERVE the mode the site already stores (the CLI's own rule)."
     required: false
     default: ''
+  promote-to:
+    description: 'The LIVE site id this one is a staging site for. Only changes the job summary: it turns the printed CID into the exact two steps that publish it (promote, then move the ENS record). Meaningless in ipns mode, where a deploy IS the publish.'
+    required: false
+    default: ''
   config:
     description: 'Path to a pinnace.json, when the node list lives in a file rather than in the inputs above.'
     required: false
@@ -160,6 +164,8 @@ runs:
       shell: bash
       env:
         SITE: ${{ inputs.site }}
+        PROMOTE_TO: ${{ inputs.promote-to }}
+        ENDPOINT: ${{ inputs.endpoint }}
         CID: ${{ steps.run.outputs.cid }}
         IPNS: ${{ steps.run.outputs.ipns }}
         MODE: ${{ steps.run.outputs.mode }}
@@ -167,21 +173,50 @@ runs:
         URL: ${{ steps.run.outputs.url }}
       run: |
         set -euo pipefail
+
+        # The summary is where an operator LOOKS, so an ipfs-mode build spells
+        # out the manual half no tool can do for it: pinnace cannot write an ENS
+        # record, and (with a staging site) must not move the live pointer on its
+        # own. Printing the exact commands beats remembering them a week later.
+        endpoint_arg=""
+        if [ -n "${ENDPOINT}" ]; then
+          endpoint_arg=" --endpoint ${ENDPOINT}"
+        fi
+
         {
           echo "### pinnace deploy: \`${SITE}\`"
           echo ""
           if [ -z "${CID}" ]; then
             echo "Deploy failed before a CID was produced. See the step log above."
+          elif [ "${MODE}" = "ipns" ]; then
+            echo "- CID: \`${CID}\`"
+            echo "- Preview: ${URL}"
+            echo "- IPNS: \`${IPNS}\`"
+            echo "- ENS contenthash: \`${CONTENTHASH}\` (already points here, nothing to update)"
+          elif [ -n "${PROMOTE_TO}" ]; then
+            echo "- CID: \`${CID}\`"
+            echo "- Preview: ${URL}"
+            echo ""
+            echo "This is a **staging** build: \`${PROMOTE_TO}\` still serves whatever it served before."
+            echo "To publish it, in this order:"
+            echo ""
+            echo '```sh'
+            echo "# 1. point ${PROMOTE_TO} at this exact build (content is already pinned, so this is instant)"
+            echo "pnpm pinnace pin --from-site ${SITE} --as ${PROMOTE_TO}${endpoint_arg}"
+            echo '```'
+            echo ""
+            echo "2. set the ENS contenthash of \`${PROMOTE_TO}\` to:"
+            echo ""
+            echo '```'
+            echo "${CONTENTHASH}"
+            echo '```'
+            echo ""
+            echo "> Order matters: promote first, so the node is already serving and warming this cid when the record moves. The previous build stays pinned throughout, so nothing goes dark."
           else
             echo "- CID: \`${CID}\`"
             echo "- Preview: ${URL}"
-            if [ "${MODE}" = "ipns" ]; then
-              echo "- IPNS: \`${IPNS}\`"
-              echo "- ENS contenthash: \`${CONTENTHASH}\` (already points here, nothing to update)"
-            else
-              echo "- ENS contenthash: \`${CONTENTHASH}\`"
-              echo ""
-              echo "> \`ipfs\` mode addresses each build by its own CID, so this build is live only once you set the ENS contenthash above."
-            fi
+            echo "- ENS contenthash: \`${CONTENTHASH}\`"
+            echo ""
+            echo "> \`ipfs\` mode addresses each build by its own CID, so this build is live only once you set the ENS contenthash above."
           fi
         } >> "$GITHUB_STEP_SUMMARY"

@@ -920,7 +920,7 @@ const INSTALL_CI_BOOLEAN_FLAGS = ['write', 'force'] as const;
 const INSTALL_CI_USAGE =
 	'usage: pinnace install-ci --system github --site <id> --output-dir <dir> \\\n' +
 	'         [--endpoint <url> [--replica-endpoint <url> ...]] \\\n' +
-	'         [--emit workflow|steps] [--set-mode ipfs|ipns] \\\n' +
+	'         [--emit workflow|steps] [--set-mode ipfs|ipns] [--promote-to <id>] \\\n' +
 	'         [--build-command <cmd>] [--package-manager npm|pnpm|yarn] \\\n' +
 	'         [--branch <b>] [--node-version <v>] [--action-ref <ref>] [--write [--force]]';
 
@@ -1160,6 +1160,7 @@ function runInstallCi(argv: readonly string[], rc: ResolvedRunContext): number {
 	if (flags['branch']) input.branch = flags['branch'];
 	if (flags['node-version']) input.nodeVersion = flags['node-version'];
 	if (flags['action-ref']) input.actionRef = flags['action-ref'];
+	if (flags['promote-to']) input.promoteTo = flags['promote-to'];
 
 	let emitted: EmittedCi;
 	try {
@@ -1995,6 +1996,7 @@ const VERB_FLAGS = {
 			'system',
 			'emit',
 			'site',
+			'promote-to',
 			'set-mode',
 			'output-dir',
 			'build-command',

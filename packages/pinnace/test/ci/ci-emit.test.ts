@@ -238,6 +238,36 @@ describe('emitCi: the emitted YAML is valid and matches the action', () => {
 		expect(result.workflow.contents).not.toContain('Install deps');
 	});
 
+	it('passes promote-to through, for the summary’s publish recipe', () => {
+		const result = emitCi(
+			baseInput({
+				site: 'mysite-staging',
+				promoteTo: 'mysite.eth',
+				mode: 'ipfs',
+			}),
+		);
+		const parsed = parseYaml(result.workflow.contents);
+		const deploy = (
+			parsed.jobs.deploy.steps as Array<Record<string, unknown>>
+		).at(-1)!;
+		expect((deploy.with as {'promote-to': string})['promote-to']).toBe(
+			'mysite.eth',
+		);
+		// And it is a real input of the action, not a name only the emitter knows.
+		expect(Object.keys(actionDefinition().inputs)).toContain('promote-to');
+	});
+
+	it('refuses a promotion target that makes no sense', () => {
+		// ipns re-signs its own name: there is nothing to promote.
+		expect(() =>
+			emitCi(baseInput({promoteTo: 'mysite.eth', mode: 'ipns'})),
+		).toThrow(/ipns/);
+		// Staging into itself is not staging.
+		expect(() =>
+			emitCi(baseInput({site: 'mysite.eth', promoteTo: 'mysite.eth'})),
+		).toThrow(/two\s+different ids/);
+	});
+
 	it('pins the action to a chosen ref', () => {
 		expect(
 			emitCi(baseInput({actionRef: 'abc123'})).workflow.contents,

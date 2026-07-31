@@ -142,6 +142,18 @@ export interface EmitCiInput {
 	/** The site id to deploy (the MFS home + IPNS key input). REQUIRED. */
 	site: string;
 	/**
+	 * The LIVE site id this one STAGES for, when {@link site} is a staging id.
+	 *
+	 * It changes no behaviour: it makes the job summary print the two steps that
+	 * publish the build (`pin --from-site` then the ENS record), with the ids and
+	 * the cid filled in. That is worth a flag because those are the steps a tool
+	 * cannot take for you, and the summary is where someone is already looking.
+	 *
+	 * Meaningless in `ipns` mode, where the deploy re-signs the name itself and
+	 * there is nothing to promote.
+	 */
+	promoteTo?: string;
+	/**
 	 * The mode to STATE on every deploy (`--set-mode`). Omitted => the emitted
 	 * command states nothing, so each deploy PRESERVES the mode the site already
 	 * stores. That is the rule the CLI has, not a CI-specific default.
@@ -325,6 +337,7 @@ function renderDeployStep(input: EmitCiInput): string {
 	lines.push(`    site: ${input.site}`);
 	if (input.mode) lines.push(`    mode: ${input.mode}`);
 	lines.push(`    dir: ${input.outputDir}`);
+	if (input.promoteTo) lines.push(`    promote-to: ${input.promoteTo}`);
 	const names = hostNames(input);
 	if (names.length > 0) {
 		lines.push('  env:');
@@ -527,6 +540,21 @@ export function emitCi(input: EmitCiInput): EmittedCi {
 			'emitCi requires an `outputDir`: the directory your build writes the ' +
 				'static site to. It is never guessed: a repo with both a `dist` and ' +
 				'a `build` would deploy the wrong one silently',
+		);
+	}
+	if (input.promoteTo && input.mode === 'ipns') {
+		throw new Error(
+			`emitCi got promoteTo '${input.promoteTo}' with mode 'ipns': an ipns ` +
+				'deploy re-signs its own name, so there is no staging build to ' +
+				'promote. Staging exists for `ipfs` mode, where the address changes ' +
+				'with every build and only a human can move the record',
+		);
+	}
+	if (input.promoteTo && input.promoteTo === input.site) {
+		throw new Error(
+			`emitCi got promoteTo '${input.promoteTo}' equal to the site it ` +
+				'deploys: a staging site and the live site it promotes into are two ' +
+				'different ids (that is the whole point of staging)',
 		);
 	}
 	if ((input.replicaEndpoints ?? []).length > 0 && !input.endpoint) {
