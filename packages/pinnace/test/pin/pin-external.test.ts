@@ -7,6 +7,7 @@ import {
 	PinPublisherRequiredError,
 	PinDerivedKeyRequiredError,
 	PinSourceResolveError,
+	PinSiteResolveError,
 	type PinTarget,
 } from '../../src/pin/pin-external.js';
 import {removeSite} from '../../src/site/site-management.js';
@@ -1184,5 +1185,142 @@ describe('pinExternal — REFUSES to write metadata it could not read', () => {
 		});
 		expect(result.success).toBe(true);
 		expect(metadataOf(a)).toEqual({ensName: '', mode: 'ipfs'});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// `--from-site <id>`: PROMOTE the current cid of a site the nodes already hold
+// (the staging -> live step). A site wrapper means "the cid this name resolves
+// to", so CI deploys builds to a staging id and a human promotes one; the
+// promotion reads the source's cid from MFS on ONE node and fans THAT cid out.
+// ---------------------------------------------------------------------------
+
+const STAGING_ID = 'mysite-staging';
+const STAGED_CID = 'bafystagedbuild';
+
+/**
+ * A node holding `<sitesDir>/<STAGING_ID>/content` at {@link STAGED_CID}, while
+ * every OTHER `files/stat` answers with the node's default. The arg-scoped
+ * response is what makes the source read observable as a read of that exact
+ * path (rather than of the wrapper, whose own hash is not the site's cid).
+ */
+function staging(mock: MockKuboApi, cid = STAGED_CID): MockKuboApi {
+	mock.onArg('files/stat', `/sites/${STAGING_ID}/content`, {
+		json: {Hash: cid, Type: 'directory'},
+	});
+	return mock;
+}
+
+describe('pinExternal: fromSite promotes a staging site to a live one', () => {
+	it('reads the source cid from ONE node, then pins it on EVERY node', async () => {
+		const a = staging(mockNode('https://node-a.test'));
+		const b = staging(mockNode('https://node-b.test'), 'bafyshouldnotwin');
+
+		const result = await pinExternal({
+			targets: [targetWith(a, 'token-a'), targetWith(b, 'token-b')],
+			fromSite: STAGING_ID,
+			name: 'mysite.eth',
+		});
+
+		// ONE resolution, fanned out: node-b's own (divergent) view is NOT used,
+		// so an unevenly-landed deploy cannot promote two different builds.
+		expect(result.cid).toBe(STAGED_CID);
+		expect(result.ok.map((n) => n.cid)).toEqual([STAGED_CID, STAGED_CID]);
+		for (const mock of [a, b]) {
+			expect(mock.requestsFor('pin/add')[0].query.get('arg')).toBe(STAGED_CID);
+			expect(mock.requestsFor('files/cp')[0].query.get('arg')).toBe(
+				`/ipfs/${STAGED_CID}`,
+			);
+		}
+		// And it says WHERE it read the cid: nodes can disagree, so this is data.
+		expect(result.fromSite).toBe(STAGING_ID);
+		expect(result.resolvedBy).toBe('https://node-a.test');
+	});
+
+	it('prefers the PUBLISHER’s view of the source site', async () => {
+		const replica = staging(mockNode('https://replica.test'), 'bafyoldreplica');
+		const publisher = staging(mockNode('https://publisher.test'));
+		const result = await pinExternal({
+			targets: [
+				targetWith(replica, 'token-r', {role: 'replica'}),
+				targetWith(publisher, 'token-p', {role: 'publisher'}),
+			],
+			fromSite: STAGING_ID,
+			name: 'mysite.eth',
+			mode: 'ipfs',
+		});
+		// The publisher is listed SECOND but is read FIRST: it is the node whose
+		// view is authoritative (it is the one that signs names).
+		expect(result.resolvedBy).toBe('https://publisher.test');
+		expect(result.cid).toBe(STAGED_CID);
+	});
+
+	it('leaves the DESTINATION’s own metadata alone (not the source’s)', async () => {
+		// The live site publishes an ipns name; the staging site is plain ipfs.
+		const node = staging(mockNode('https://publisher.test'));
+		node.on('key/list', {
+			json: {Keys: [{Name: GOLDEN_NAME, Id: GOLDEN_IPNS_ID}]},
+		});
+		holdingMetadata(node, '{"mode":"ipns","ensName":"live.eth"}');
+
+		const result = await pinExternal({
+			targets: [targetWith(node, 'token-a', {role: 'publisher'})],
+			fromSite: STAGING_ID,
+			name: GOLDEN_NAME,
+			derived: derivedForGoldenName(),
+		});
+
+		// Promotion PRESERVES what the destination stores: a promotion must never
+		// silently demote a published site because staging happened to be `ipfs`.
+		expect(result.mode).toBe('ipns');
+		expect(metadataOf(node)).toEqual({mode: 'ipns', ensName: 'live.eth'});
+		expect(node.requestsFor('name/publish')[0].query.get('arg')).toBe(
+			`/ipfs/${STAGED_CID}`,
+		);
+	});
+
+	it('refuses a source that no node holds, before pinning anything', async () => {
+		const a = new MockKuboApi('https://node-a.test');
+		// No arg-scoped answer for the staging path, and stat fails outright.
+		a.on('files/stat', {status: 500, text: 'file does not exist'});
+		const refusal = await pinExternal({
+			targets: [targetWith(a, 'token-a')],
+			fromSite: STAGING_ID,
+			name: 'mysite.eth',
+			mode: 'ipfs',
+		}).catch((e: unknown) => e);
+		expect(refusal).toBeInstanceOf(PinSiteResolveError);
+		expect((refusal as Error).message).toContain(STAGING_ID);
+		expect(a.requestsFor('pin/add').length).toBe(0);
+		expect(a.requestsFor('files/write').length).toBe(0);
+	});
+
+	it('refuses promoting a site onto itself (a no-op dressed as a promotion)', async () => {
+		const a = staging(mockNode('https://node-a.test'));
+		await expect(
+			pinExternal({
+				targets: [targetWith(a, 'token-a')],
+				fromSite: STAGING_ID,
+				name: STAGING_ID,
+				mode: 'ipfs',
+			}),
+		).rejects.toThrow(/from itself/);
+		expect(a.requests.length).toBe(0);
+	});
+
+	it('takes EXACTLY ONE source (cid / fromIpns / fromSite)', async () => {
+		const a = staging(resolvingNode('https://node-a.test'));
+		for (const extra of [{cid: EXTERNAL_CID}, {fromIpns: SOURCE_NAME}]) {
+			await expect(
+				pinExternal({
+					targets: [targetWith(a, 'token-a')],
+					fromSite: STAGING_ID,
+					name: 'mysite.eth',
+					mode: 'ipfs',
+					...extra,
+				}),
+			).rejects.toThrow(/exactly one source/);
+		}
+		expect(a.requests.length).toBe(0);
 	});
 });

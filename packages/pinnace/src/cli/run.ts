@@ -90,6 +90,7 @@ import {
 import {
 	pinExternal as corePinExternal,
 	PinSourceResolveError,
+	PinSiteResolveError,
 	PinDerivedKeyRequiredError,
 	type PinExternalInput,
 	type PinExternalResult,
@@ -1255,7 +1256,8 @@ function runDerive(argv: readonly string[], rc: ResolvedRunContext): number {
 /** The two forms of the `pin` verb: one source each, never both, never neither. */
 const PIN_USAGE =
 	'usage: pinnace pin <cid> --as <name> [--set-mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]\n' +
-	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [--set-mode ipfs|ipns] [--host <name>] [--no-recursive] [--set-ens-name [<name>] | --unset-ens-name]';
+	'   or: pinnace pin --from-ipns <source-ipns-name> --as <name> [...]   (migrate an IPNS name)\n' +
+	'   or: pinnace pin --from-site <source-site-id> --as <name> [...]     (promote a staging site)';
 
 /**
  * `pin <cid> --as <name> [--set-mode ipfs|ipns] [--host <name>] [--no-recursive]` ->
@@ -1316,6 +1318,7 @@ async function runPin(
 	if (!refuseBareFlags('pinnace pin', flags, rc)) return 1;
 	const [cid] = positionals;
 	const fromIpns = flags['from-ipns'];
+	const fromSite = flags['from-site'];
 	const pinName = flags['as'];
 	if (!pinName) {
 		rc.err(`pinnace pin: --as <name> is required\n${PIN_USAGE}`);
@@ -1325,19 +1328,34 @@ async function runPin(
 	// --set-ens-name infers from (as the site id is for deploy).
 	const ensName = ensNameIntent('pinnace pin', flags, pinName, rc);
 	if (!ensName) return 1; // ensNameIntent already emitted the loud error.
-	// EXACTLY ONE source: the cid the operator has, or the IPNS name to resolve
-	// one from. Two sources is a contradiction; none is nothing to pin.
-	if (cid && fromIpns) {
+	// EXACTLY ONE source: the cid the operator has, the IPNS name to resolve one
+	// from, or the site to promote one from. Two sources is a contradiction; none
+	// is nothing to pin.
+	const sources = [
+		...(cid ? [`the positional <cid> ('${cid}')`] : []),
+		...(fromIpns ? [`--from-ipns ('${fromIpns}')`] : []),
+		...(fromSite ? [`--from-site ('${fromSite}')`] : []),
+	];
+	if (sources.length > 1) {
 		rc.err(
-			`pinnace pin: give exactly one source: the positional <cid> ('${cid}') ` +
-				`or --from-ipns ('${fromIpns}'), not both\n${PIN_USAGE}`,
+			`pinnace pin: give exactly one source, but got ${sources.length}: ` +
+				`${sources.join(' and ')}\n${PIN_USAGE}`,
 		);
 		return 1;
 	}
-	if (!cid && !fromIpns) {
+	if (sources.length === 0) {
 		rc.err(
-			'pinnace pin: give exactly one source: a positional <cid>, or ' +
-				`--from-ipns <name> to migrate from an existing IPNS name\n${PIN_USAGE}`,
+			'pinnace pin: give exactly one source: a positional <cid>, ' +
+				'--from-ipns <name> to migrate from an existing IPNS name, or ' +
+				`--from-site <id> to promote the current cid of a site on your nodes\n${PIN_USAGE}`,
+		);
+		return 1;
+	}
+	if (fromSite && fromSite === pinName) {
+		rc.err(
+			`pinnace pin: --from-site '${fromSite}' is the same site as --as ` +
+				`'${pinName}': --from-site names the site to take a cid FROM (a staging ` +
+				'id), and --as names the site to point at it',
 		);
 		return 1;
 	}
@@ -1418,7 +1436,7 @@ async function runPin(
 	try {
 		result = await rc.deps.pinExternal({
 			targets,
-			...(fromIpns ? {fromIpns} : {cid: cid as string}),
+			...(fromIpns ? {fromIpns} : fromSite ? {fromSite} : {cid: cid as string}),
 			name: pinName,
 			recursive: flags['no-recursive'] === undefined,
 			...(mode.kind === 'set' ? {mode: mode.mode} : {}),
@@ -1432,6 +1450,7 @@ async function runPin(
 		// unset master could not supply.
 		if (
 			error instanceof PinSourceResolveError ||
+			error instanceof PinSiteResolveError ||
 			error instanceof PinDerivedKeyRequiredError
 		) {
 			rc.err(`pinnace pin: ${error.message}`);
@@ -1439,11 +1458,18 @@ async function runPin(
 		}
 		throw error;
 	}
-	// Migrating: say WHAT the source name currently points at (and whose view).
+	// Migrating or promoting: say WHAT the source currently points at, and whose
+	// view of it was taken (nodes can disagree, so `resolvedBy` is not noise).
 	if (result.fromIpns) {
 		rc.out(
 			`resolved ipns ${result.fromIpns} -> ${result.cid}` +
 				`${result.resolvedBy ? ` (via ${result.resolvedBy})` : ''}`,
+		);
+	}
+	if (result.fromSite) {
+		rc.out(
+			`promoting site ${result.fromSite} -> ${result.cid}` +
+				`${result.resolvedBy ? ` (as held by ${result.resolvedBy})` : ''}`,
 		);
 	}
 	rc.out(
@@ -1745,6 +1771,7 @@ const VERB_FLAGS = {
 		exact: [
 			'as',
 			'from-ipns',
+			'from-site',
 			'host',
 			'no-recursive',
 			'set-mode',

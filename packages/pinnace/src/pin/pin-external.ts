@@ -39,6 +39,25 @@
  * ipns-mode external pin inherits the same grace-window machinery as a deployed
  * ipns site with no extra wiring.
  *
+ * PROMOTING FROM A STAGING SITE (`fromSite`, the CLI's `--from-site <id>`).
+ * The third source, and the one that makes an `ipfs`-mode site safe to build in
+ * CI. A site wrapper MEANS "the cid this name resolves to", so CI must not write
+ * the LIVE id: deploying every build straight to `/sites/<live>` makes the box
+ * warm a cid nobody resolves, report `freshness=stale` forever, and leave the
+ * cid the ENS record actually points at UNTRACKED (and so eligible for any
+ * retention policy). Instead CI deploys to a staging id, and a human promotes:
+ *
+ *   pinnace deploy ./dist mandalas-staging                      # CI, every push
+ *   pinnace pin --from-site mandalas-staging --as mandalas.eth  # human, when happy
+ *
+ * The promotion reads the staging site's current cid from MFS on ONE node
+ * ({@link resolveSiteSource}, publisher first) and fans THAT cid out, so every
+ * node ends on the same content even if a previous deploy landed unevenly. The
+ * content is usually already local, which makes the promotion nearly free; a
+ * node that does NOT hold it (a replica added later) fetches it like any other
+ * pin. The destination keeps its OWN metadata: an omitted mode/ensName preserves
+ * what the DESTINATION stores, never what the source stores.
+ *
  * VOCABULARY — `pin` vs `deploy` vs `site add` (CONTEXT.md; kept distinct on
  * purpose, none of the three re-means another):
  *  - **deploy** builds a **CAR** from LOCAL files and `dag/import`s it: the
@@ -93,7 +112,7 @@
  * resolves, and what the resolved value may contain).
  */
 import {KuboRpcClient, type FetchLike} from '../rpc/kubo-rpc-client.js';
-import {placeInMfs} from '../site/site-management.js';
+import {placeInMfs, readSiteContentCid} from '../site/site-management.js';
 import {
 	assertEnsNameIntent,
 	resolveSiteMetadataToWrite,
@@ -156,6 +175,25 @@ export interface PinExternalInput {
 	 * follow: re-calling re-resolves (see the module JSDoc).
 	 */
 	fromIpns?: string;
+	/**
+	 * PROMOTE instead: the id of a site ALREADY on the nodes, whose current
+	 * content cid is read from its MFS wrapper and pinned under {@link name}.
+	 *
+	 * This is the staging -> live step. CI deploys builds to a staging id, which
+	 * keeps `/sites/<live id>` meaning what it should mean (the cid the world
+	 * resolves), and a human promotes one of those builds when they are ready to
+	 * point a name at it. Without it, a CI deploy straight to the live id makes
+	 * the node warm a cid nobody resolves, report `freshness=stale` forever, and
+	 * leave the LIVE cid untracked (so a retention policy could reclaim the very
+	 * build the ENS record points at).
+	 *
+	 * Resolved on ONE node (see {@link resolveSiteSource}) and then fanned out, so
+	 * every node is promoted to the SAME cid even if a previous deploy landed
+	 * unevenly. Nothing else differs: same pin, same MFS placement, same publish.
+	 * The destination keeps its OWN metadata (an omitted mode/ensName preserves
+	 * what `<name>` stores, never what the SOURCE site stores).
+	 */
+	fromSite?: string;
 	/** The name to track it under: its MFS entry `/sites/<name>` (a site `id`). */
 	name: string;
 	/** Pin the whole DAG (default true) rather than the root block alone. */
@@ -215,6 +253,36 @@ export class PinStageError extends Error {
 	) {
 		super(message, {cause});
 		this.name = 'PinStageError';
+	}
+}
+
+/**
+ * The SOURCE SITE ({@link PinExternalInput.fromSite}) could not be read on ANY
+ * target: it does not exist there, it holds no resolvable content, or every node
+ * failed to answer. Thrown BEFORE anything is pinned, so a failed promotion
+ * leaves the destination site exactly as it was.
+ */
+export class PinSiteResolveError extends Error {
+	constructor(
+		/** The source site id that could not be read. */
+		readonly fromSite: string,
+		/** What each target answered when asked for that site's content cid. */
+		readonly failures: Array<{baseUrl: string; error?: Error}>,
+	) {
+		super(
+			`could not read the current content cid of site '${fromSite}' on ` +
+				(failures.length === 0
+					? 'any node: there are no pin targets to read it from'
+					: `any of the ${failures.length} pin target(s): ` +
+						`${failures
+							.map(
+								(f) =>
+									`${f.baseUrl} (${f.error ? f.error.message : 'no such site there'})`,
+							)
+							.join('; ')}. Has anything been deployed to '${fromSite}' yet ` +
+						'(`pinnace status` lists the sites each node holds)?'),
+		);
+		this.name = 'PinSiteResolveError';
 	}
 }
 
@@ -336,7 +404,9 @@ export interface PinExternalResult {
 	cid: string;
 	/** The SOURCE IPNS name this pin was migrated from, when it was. */
 	fromIpns?: string;
-	/** The node that resolved {@link fromIpns} to {@link cid}, when migrating. */
+	/** The SOURCE SITE this pin was promoted from, when it was. */
+	fromSite?: string;
+	/** The node the source was resolved on, when there was one to resolve. */
 	resolvedBy?: string;
 	/** The name it is tracked under on every successful node. */
 	name: string;
@@ -376,13 +446,14 @@ interface PinPlan {
  * `Promise.allSettled` so one unreachable/failing node never sinks the others;
  * always RESOLVES with the per-node breakdown (callers inspect `success`).
  *
- * With `fromIpns` instead of `cid`, the source name is resolved FIRST (on the
- * first target that answers) and everything below runs on the resolved cid.
+ * With `fromIpns` or `fromSite` instead of `cid`, that source is resolved FIRST
+ * (on one node) and everything below runs on the resolved cid.
  *
- * @throws unless EXACTLY ONE source (`cid` XOR `fromIpns`) is given, or if
- * `name` is empty: a nameless pin would be untrackable (nothing to place in
- * MFS, so nothing would show on the dashboard).
+ * @throws unless EXACTLY ONE source (`cid` XOR `fromIpns` XOR `fromSite`) is
+ * given, or if `name` is empty: a nameless pin would be untrackable (nothing to
+ * place in MFS, so nothing would show on the dashboard).
  * @throws {PinSourceResolveError} when `fromIpns` resolves on no target.
+ * @throws {PinSiteResolveError} when `fromSite` cannot be read on any target.
  * @throws {PinPublisherRequiredError} in `ipns` mode when no target can sign.
  * @throws {PinDerivedKeyRequiredError} in `ipns` mode without the `derived` key.
  * @throws {EnsNameInferenceError} for a bare `--set-ens-name` (the `infer`
@@ -400,19 +471,38 @@ export async function pinExternal(
 	input: PinExternalInput,
 ): Promise<PinExternalResult> {
 	const {targets, name} = input;
-	if (input.cid && input.fromIpns) {
+	// EXACTLY ONE source. Enumerated rather than checked pairwise so adding a
+	// fourth source cannot quietly create an unchecked combination.
+	const sources = [
+		...(input.cid ? ['cid'] : []),
+		...(input.fromIpns ? ['fromIpns'] : []),
+		...(input.fromSite ? ['fromSite'] : []),
+	];
+	if (sources.length > 1) {
 		throw new Error(
-			'pinExternal takes exactly one source: a `cid` to pin, OR `fromIpns` ' +
-				'(an IPNS name to resolve a cid from). Both were given',
+			'pinExternal takes exactly one source: a `cid` to pin, `fromIpns` (an ' +
+				'IPNS name to resolve a cid from) or `fromSite` (a site on the nodes to ' +
+				`promote the current cid of). Got: ${sources.join(', ')}`,
 		);
 	}
-	if (!input.cid && !input.fromIpns) {
+	if (sources.length === 0) {
 		throw new Error(
-			'pinExternal requires exactly one source: a `cid` to pin, or `fromIpns` ' +
-				'(an IPNS name to resolve to its current cid)',
+			'pinExternal requires exactly one source: a `cid` to pin, `fromIpns` (an ' +
+				'IPNS name to resolve to its current cid) or `fromSite` (a site on the ' +
+				'nodes to promote the current cid of)',
 		);
 	}
 	if (!name) throw new Error('pinExternal requires a `name` to track it under');
+	if (input.fromSite === name) {
+		// Promoting a site onto ITSELF would re-place the cid it already holds: at
+		// best a no-op dressed as a promotion, at worst a rollback the operator
+		// thinks is a promotion (they meant to name the OTHER site).
+		throw new Error(
+			`pinExternal cannot promote '${name}' from itself: \`fromSite\` names the ` +
+				'site to take a cid FROM (e.g. a staging id), and `name` is the site to ' +
+				'point at it',
+		);
+	}
 	// The pin's `name` IS the site id, so it is what a bare --set-ens-name would
 	// infer from. Checked here, with the other refusals, before any node is
 	// touched (and before the source name is even resolved).
@@ -436,16 +526,19 @@ export async function pinExternal(
 	// MIGRATE: turn the SOURCE name into the cid it points at RIGHT NOW. This is
 	// the only network call before the fan-out, and it happens AFTER the refusals
 	// above so a rejected pin never touches a node.
+	const sitesDir = input.sitesDir ?? DEFAULT_SITES_DIR;
 	const resolved = input.fromIpns
 		? await resolveIpnsSource(targets, input.fromIpns)
-		: undefined;
+		: input.fromSite
+			? await resolveSiteSource(targets, input.fromSite, sitesDir)
+			: undefined;
 	const cid = resolved?.cid ?? (input.cid as string);
 
 	const plan: PinPlan = {
 		cid,
 		name,
 		recursive: input.recursive ?? true,
-		sitesDir: input.sitesDir ?? DEFAULT_SITES_DIR,
+		sitesDir,
 		mode,
 		ensName,
 		...(input.derived ? {derived: input.derived} : {}),
@@ -479,7 +572,11 @@ export async function pinExternal(
 	return {
 		cid: plan.cid,
 		...(resolved
-			? {fromIpns: input.fromIpns as string, resolvedBy: resolved.resolvedBy}
+			? {
+					...(input.fromIpns ? {fromIpns: input.fromIpns} : {}),
+					...(input.fromSite ? {fromSite: input.fromSite} : {}),
+					resolvedBy: resolved.resolvedBy,
+				}
 			: {}),
 		name,
 		recursive: plan.recursive,
@@ -551,6 +648,51 @@ async function resolveIpnsSource(
 		}
 	}
 	throw new PinSourceResolveError(fromIpns, failures);
+}
+
+/**
+ * Resolve the SOURCE SITE to the cid it currently points at: the PROMOTION read.
+ *
+ * PUBLISHER FIRST, then the remaining targets in order, taking the first node
+ * that answers. Order matters here in a way it does not for a cid: nodes can
+ * legitimately DISAGREE (a previous deploy may have landed on some and failed on
+ * others), and the publisher is the node whose view is authoritative, since it
+ * is the one that signs names and the one every other resolution in this module
+ * already prefers. The later targets are a REACHABILITY fallback so a down
+ * publisher does not block a promotion, and the node that answered is REPORTED
+ * (`resolvedBy`) so the operator can see whose view they promoted.
+ *
+ * Resolving ONCE and fanning that single cid out is the point: reading
+ * per-node would promote different content to different nodes and call it one
+ * promotion.
+ *
+ * @throws {PinSiteResolveError} when no target holds the site (or none answers).
+ */
+async function resolveSiteSource(
+	targets: PinTarget[],
+	fromSite: string,
+	sitesDir: string,
+): Promise<{cid: string; resolvedBy: string}> {
+	const ordered = [...targets].sort(
+		(a, b) => Number(canSign(b)) - Number(canSign(a)),
+	);
+	const failures: Array<{baseUrl: string; error?: Error}> = [];
+	for (const target of ordered) {
+		try {
+			const cid = await readSiteContentCid(
+				clientFor(target),
+				sitesDir,
+				fromSite,
+			);
+			if (cid) return {cid, resolvedBy: target.baseUrl};
+			// A node that simply does not have the site is not an ERROR (it may have
+			// been added after that site's last deploy); it just cannot answer.
+			failures.push({baseUrl: target.baseUrl});
+		} catch (cause) {
+			failures.push({baseUrl: target.baseUrl, error: asError(cause)});
+		}
+	}
+	throw new PinSiteResolveError(fromSite, failures);
 }
 
 /** The per-node client every step of the pin speaks through (one per target). */

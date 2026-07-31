@@ -187,6 +187,7 @@ export {
 	PinPublisherRequiredError,
 	PinDerivedKeyRequiredError,
 	PinSourceResolveError,
+	PinSiteResolveError,
 	type PinExternalInput,
 	type PinExternalResult,
 	type PinTarget,

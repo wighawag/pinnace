@@ -295,6 +295,24 @@ async function lsSites(
 	return names;
 }
 
+/**
+ * The CID a site's wrapper currently points at (`files/stat --hash` of
+ * `<sitesDir>/<id>/content`), or undefined when the site does not exist / has no
+ * resolvable content.
+ *
+ * Exported because it is the seam PROMOTION reads: `pin --from-site <id>` needs
+ * one node's answer to "what is this site serving right now?", and the wrapper's
+ * CONTENT subpath is that answer (the wrapper dir's OWN hash is not the site's
+ * cid, a distinction {@link removeSite} exists to get right too).
+ */
+export async function readSiteContentCid(
+	client: KuboRpcClient,
+	sitesDir: string,
+	id: string,
+): Promise<string | undefined> {
+	return statCid(client, siteContentPath(sitesDir, id));
+}
+
 /** Stat an MFS path for its current CID, or undefined if it cannot be resolved. */
 async function statCid(
 	client: KuboRpcClient,

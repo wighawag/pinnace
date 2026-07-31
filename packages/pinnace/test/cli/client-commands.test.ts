@@ -1,6 +1,9 @@
 import {describe, it, expect} from 'vitest';
 import {run, type ClientDeps, type RunContext} from '../../src/cli/run.js';
-import {PinSourceResolveError} from '../../src/pin/pin-external.js';
+import {
+	PinSourceResolveError,
+	PinSiteResolveError,
+} from '../../src/pin/pin-external.js';
 import {
 	DeployDerivedKeyRequiredError,
 	DeployPublisherRequiredError,
@@ -84,6 +87,12 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 				...(input.fromIpns
 					? {
 							fromIpns: input.fromIpns,
+							resolvedBy: input.targets[0]?.baseUrl,
+						}
+					: {}),
+				...(input.fromSite
+					? {
+							fromSite: input.fromSite,
 							resolvedBy: input.targets[0]?.baseUrl,
 						}
 					: {}),
@@ -1437,6 +1446,92 @@ describe('pin --from-ipns <source>: MIGRATE from an existing IPNS name', () => {
 		expect(code).toBe(1);
 		expect(err.join('\n')).toContain('k51nothere');
 		expect(err.join('\n')).toContain('routing: not found');
+	});
+});
+
+describe('pin --from-site <id>: PROMOTE a staging site to the live one', () => {
+	it('hands the SOURCE SITE (not a cid) to the core and reports what it promoted', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, out} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', '--from-site', 'mysite-staging', '--as', 'mysite.eth'],
+			context,
+		);
+		expect(code).toBe(0);
+		const input = calls.pinExternal[0] as {
+			cid?: string;
+			fromIpns?: string;
+			fromSite?: string;
+			name: string;
+			mode?: string;
+			targets: Array<{baseUrl: string}>;
+		};
+		expect(input.fromSite).toBe('mysite-staging');
+		expect(input.cid).toBeUndefined();
+		expect(input.fromIpns).toBeUndefined();
+		expect(input.name).toBe('mysite.eth');
+		// No --set-mode stated, so the DESTINATION's stored mode is preserved: a
+		// promotion must not demote a published site to whatever staging is.
+		expect(input.mode).toBeUndefined();
+		// Every configured node, so a replica that never held the build gets it.
+		expect(input.targets.map((t) => t.baseUrl)).toEqual([
+			'https://a.example',
+			'https://b.example',
+		]);
+		expect(out.join('\n')).toContain('promoting site mysite-staging');
+	});
+
+	it('rejects more than one source, naming each one given', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			[
+				'pin',
+				'--from-site',
+				'mysite-staging',
+				'--from-ipns',
+				'k51source',
+				'--as',
+				'mysite.eth',
+			],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toContain('--from-site');
+		expect(err.join('\n')).toContain('--from-ipns');
+	});
+
+	it('rejects promoting a site onto itself', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context, err} = ctx({deps, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', '--from-site', 'mysite.eth', '--as', 'mysite.eth'],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(calls.pinExternal.length).toBe(0);
+		expect(err.join('\n')).toMatch(/same site/);
+	});
+
+	it('reports a source site no node holds, loudly and with the node’s words', async () => {
+		const {deps} = recordingDeps();
+		const failing: ClientDeps = {
+			...deps,
+			pinExternal: async (input) => {
+				throw new PinSiteResolveError(input.fromSite ?? '', [
+					{baseUrl: 'https://a.example'},
+				]);
+			},
+		};
+		const {context, err} = ctx({deps: failing, env: {...hostTokenEnv}});
+		const code = await run(
+			['pin', '--from-site', 'never-deployed', '--as', 'mysite.eth'],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(err.join('\n')).toContain('never-deployed');
+		expect(err.join('\n')).toContain('no such site there');
 	});
 });
 
