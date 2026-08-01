@@ -13,8 +13,12 @@
  * (dashboard dir ONLY, never a global path).
  *
  * The page is a SINGLE self-contained static file: inline CSS, no external
- * assets, and NO client-side JS (the data is baked in at render time). Its only
- * outbound URLs are the per-site public-gateway links.
+ * assets. The data is baked in at render time; the only client-side JS is a
+ * TINY progressive-enhancement script for the copy-to-clipboard buttons on the
+ * opaque identifiers (CID, IPNS). It degrades gracefully: without JS the data
+ * is still fully visible, the gateway links still work, and meta-refresh still
+ * reloads the page — the script only ADDS the one-tap copy convenience. Its
+ * only outbound URLs are the per-site public-gateway links.
  *
  * Its imports are two sibling LEAVES that resolve nothing — {@link ensNameDisplay}
  * (which only reads the two report fields this row already holds) and the
@@ -44,6 +48,16 @@
  * at the card's full width, so the FULL value can be shown (nothing elided, the
  * link `href`/`title` and `status.json` still carry it too) and an INVERTED
  * background badge sets the opaque ids apart from the human-readable fields.
+ *
+ * GROUPING: a card has a CORE group of fields that apply to EVERY site (cid,
+ * ipns, sequence, mode, announced, gateway) and an ENS group (ens name,
+ * eth.limo, origin, freshness) shown ONLY when the site resolves an ENS name to
+ * warm (`ensNameToWarm` is set). The ENS fields are meaningless for a site that
+ * resolves no name — they would read as a wall of `none`, obscuring the fields
+ * that actually carry signal — so they are omitted entirely rather than shown
+ * as empty. An opted-out site (stored `ensName: ""`) resolves no name to warm, so
+ * it shows no ENS group: the opt-out is a deliberate choice, and an operator who
+ * made it does not need four empty ENS cells reminding them of it.
  */
 import {ensNameDisplay, type EnsNameDisplay} from './ens-name-display.js';
 import {
@@ -180,10 +194,11 @@ export interface RenderStatusHtmlOptions {
 
 /**
  * Render a status report as a single self-contained HTML page (inline CSS, no
- * external assets, no client JS, meta-refresh auto-reload). PURE: same report
- * in, same bytes out. Every report-supplied string is HTML-escaped, and the
- * gateway links are URL-component-encoded, so an odd site `id`/`cid`/`ipns` can
- * neither break the markup nor escape an attribute.
+ * external assets, a tiny progressive-enhancement script for copy buttons,
+ * meta-refresh auto-reload). PURE: same report in, same bytes out. Every
+ * report-supplied string is HTML-escaped, and the gateway links are
+ * URL-component-encoded, so an odd site `id`/`cid`/`ipns` can neither break the
+ * markup nor escape an attribute.
  */
 export function renderStatusHtml(
 	report: StatusPageReport,
@@ -221,17 +236,35 @@ ${PAGE_CSS}
 ${cards}
 	</main>
 	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites. The <em>origin</em> and <em>freshness</em> fields report what eth.limo resolved and served through its own cache, not a read of the ENS record: a <em>stale</em> cid shortly after a deploy is normal propagation lag.</p>
+<script>
+(function(){
+	var d = document;
+	d.addEventListener('click', function(e){
+		var b = e.target.closest ? e.target.closest('button.copy') : null;
+		if (!b) return;
+		var v = b.getAttribute('data-copy');
+		if (!v || !navigator.clipboard) return;
+		navigator.clipboard.writeText(v).then(function(){
+			b.classList.add('copied');
+			b.textContent = 'copied';
+			setTimeout(function(){ b.classList.remove('copied'); b.textContent = 'copy'; }, 1200);
+		});
+	});
+})();
+	</script>
 </body>
 </html>
 `;
 }
 
 /**
- * Render one site's CARD: a header with the site id, then a definition list of
- * fields. The opaque identifiers (cid, ipns) each get their OWN line as an
- * {@link idBadge} (an inverted-background `<code class="id">`) at the card's
- * full width, so the FULL value is shown and stays readable — no middle-elision,
- * no one-character-per-line shredding. The link `href`/`title` and `status.json`
+ * Render one site's CARD: a header with the site id, then a CORE group of
+ * fields that apply to every site, and (only when the site resolves an ENS name
+ * to warm) an ENS group. The opaque identifiers (cid, ipns) each get their OWN
+ * line as an {@link idBadge} (an inverted-background `<code class="id">`) at
+ * the card's full width, so the FULL value is shown and stays readable — no
+ * middle-elision, no one-character-per-line shredding — with a one-tap
+ * {@link copyButton} beside them. The link `href`/`title` and `status.json`
  * carry the full value too, so showing it loses nothing.
  */
 function renderSiteCard(site: StatusPageSite): string {
@@ -239,13 +272,13 @@ function renderSiteCard(site: StatusPageSite): string {
 		? gatewayLink(
 				site.cid,
 				`https://${uriPart(site.cid)}.${IPFS_GATEWAY_HOST}/`,
-			)
+			) + copyButton(site.cid, 'content cid')
 		: '<span class="none">none</span>';
 	const ipns = site.ipns
 		? gatewayLink(
 				site.ipns,
 				`https://${uriPart(site.ipns)}.${IPNS_GATEWAY_HOST}/`,
-			)
+			) + copyButton(site.ipns, 'ipns')
 		: '<span class="none">none</span>';
 	// The record sequence: a plain number when known, the reason when not, and
 	// `none` when this node holds no key for the site. Never a bare 0 for an
@@ -259,40 +292,84 @@ function renderSiteCard(site: StatusPageSite): string {
 	const mode = site.mode
 		? `<code>${escapeHtml(site.mode)}</code>`
 		: '<span class="none">none</span>';
+	// The CORE fields: cid, ipns, sequence, mode, and the two IPFS-network health
+	// checks (announced, gateway). These apply to every site regardless of ENS.
+	const coreFields = [
+		field('content cid', cid),
+		field('ipns', ipns),
+		field('sequence', sequence),
+		field('mode', mode),
+		field('announced', indicator(site.announced)),
+		field('gateway', indicator(site.gatewayServes)),
+	].join('\n');
+	// The ENS group: shown ONLY when the site resolves an ENS name to warm
+	// (`ensNameToWarm` is set). For a site that resolves no name (an opt-out, a
+	// non-`.eth` id, or a report path that does no resolving) the four ENS fields
+	// are all `none`/not-applicable, so showing them adds noise without signal.
+	const ensSection = site.ensNameToWarm ? renderEnsFields(site) : '';
+	return (
+		`\t\t<section class="site">\n` +
+		`\t\t\t<h2 class="site-id">${escapeHtml(site.id)}</h2>\n` +
+		`\t\t\t<dl class="fields">\n${coreFields}\n\t\t\t</dl>\n` +
+		ensSection +
+		`\t\t</section>`
+	);
+}
+
+/**
+ * Render the ENS group of fields: `ens name`, `eth.limo`, `origin`, and
+ * `freshness`. These are meaningful ONLY for a site that resolves an ENS name to
+ * warm, so this is called only when `ensNameToWarm` is set. The group is set off
+ * by a small subheading and a top border so it reads as a distinct block within
+ * the card.
+ */
+function renderEnsFields(site: StatusPageSite): string {
 	// The FOUR ensName states read differently on the page (ensNameDisplay): a
 	// stored name, an INFERRED one (the name the box warms, marked so it is not
 	// mistaken for an override the site stores), the explicit opt-out, and a site
-	// with no name at all.
+	// with no name at all. When this function is reached, the site DOES warm a name,
+	// so the display is `stored` or `inferred` (never `opted-out` or `none`).
 	const ensName = renderEnsName(ensNameDisplay(site));
 	// The eth.limo field answers BOTH questions: which name would be warmed, and
 	// does it actually serve? The verdict is appended only when the report HAS
 	// one (see StatusPageSite.ethLimoServes) — a site with no name to probe shows
 	// `none` and no red flag.
-	const ethLimo = site.ensNameToWarm
-		? gatewayLink(
-				`${site.ensNameToWarm}.${ETH_LIMO_HOST}`,
-				`https://${uriPart(site.ensNameToWarm)}.${ETH_LIMO_HOST}/`,
-			) +
-			(site.ethLimoServes === undefined
-				? ''
-				: ` ${indicator(site.ethLimoServes)}`)
-		: '<span class="none">none</span>';
+	const ethLimo =
+		gatewayLink(
+			`${site.ensNameToWarm}.${ETH_LIMO_HOST}`,
+			`https://${uriPart(site.ensNameToWarm!)}.${ETH_LIMO_HOST}/`,
+		) +
+		(site.ethLimoServes === undefined
+			? ''
+			: ` ${indicator(site.ethLimoServes)}`);
+	const fields = [
+		field('ens name', ensName),
+		field('eth.limo', ethLimo),
+		field('origin', renderOrigin(site.ethLimoOrigin)),
+		field('freshness', renderFreshness(site.ethLimoFreshness)),
+	].join('\n');
 	return (
-		`\t\t<section class="site">\n` +
-		`\t\t\t<h2 class="site-id">${escapeHtml(site.id)}</h2>\n` +
-		`\t\t\t<dl class="fields">\n` +
-		`\t\t\t\t<div class="field"><dt>content cid</dt><dd>${cid}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>ipns</dt><dd>${ipns}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>sequence</dt><dd>${sequence}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>mode</dt><dd>${mode}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>ens name</dt><dd>${ensName}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>eth.limo</dt><dd>${ethLimo}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>origin</dt><dd>${renderOrigin(site.ethLimoOrigin)}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>freshness</dt><dd>${renderFreshness(site.ethLimoFreshness)}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>announced</dt><dd>${indicator(site.announced)}</dd></div>\n` +
-		`\t\t\t\t<div class="field"><dt>gateway</dt><dd>${indicator(site.gatewayServes)}</dd></div>\n` +
-		`\t\t\t</dl>\n` +
-		`\t\t</section>`
+		`\t\t\t<h3 class="group">ENS</h3>\n` +
+		`\t\t\t<dl class="fields">\n${fields}\n\t\t\t</dl>\n`
+	);
+}
+
+/** A single `<dt>`/`<dd>` field row inside a `<dl class="fields">`. */
+function field(label: string, value: string): string {
+	return `\t\t\t\t<div class="field"><dt>${label}</dt><dd>${value}</dd></div>`;
+}
+
+/**
+ * A one-tap copy-to-clipboard button for an opaque identifier (CID, IPNS). The
+ * value is carried in a `data-copy` attribute (HTML-escaped) and the actual
+ * clipboard write is done by the page's tiny progressive-enhancement script
+ * (see {@link renderStatusHtml}). Without JS the button is inert and the value
+ * remains visible, selectable, and linked — nothing is lost.
+ */
+function copyButton(value: string, label: string): string {
+	return (
+		`<button class="copy" type="button" data-copy="${escapeHtml(value)}"` +
+		` title="copy ${escapeHtml(label)} to clipboard">copy</button>`
 	);
 }
 
@@ -480,6 +557,13 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 		font-size: 1.1rem; margin: 0 0 0.6rem; padding-bottom: 0.4rem;
 		border-bottom: 1px solid #eef0f3;
 	}
+	/* The ENS group subheading: a small uppercase label set off by a top border,
+	   so the ENS fields read as a distinct block within the card. */
+	.group {
+		font-size: 0.78rem; font-weight: 600; text-transform: uppercase;
+		letter-spacing: 0.04em; color: #6b7280; margin: 0.8rem 0 0.3rem;
+		padding-top: 0.5rem; border-top: 1px solid #eef0f3;
+	}
 	.fields { margin: 0; }
 	.field {
 		display: grid; grid-template-columns: minmax(7rem, 9rem) 1fr;
@@ -512,6 +596,17 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 	   is something to look at, not a failed check. */
 	.warn { color: #8a6100; font-weight: 600; }
 	.none, .empty, .inferred, .unknown { color: #6b7280; }
+	/* The copy-to-clipboard button beside an opaque identifier: a small,
+	   unobtrusive text button that turns green + says "copied" on success
+	   (driven by the page's tiny progressive-enhancement script). Without JS
+	   it is inert — the value stays visible, selectable, and linked. */
+	.copy {
+		margin-left: 0.4rem; padding: 0.08rem 0.4rem; border: 1px solid #d1d5db;
+		border-radius: 0.3rem; background: transparent; color: #6b7280;
+		font: inherit; font-size: 0.72rem; cursor: pointer; vertical-align: middle;
+	}
+	.copy:hover { border-color: #9ca3af; color: #374151; }
+	.copy.copied { border-color: #157f3d; color: #157f3d; }
 	@media (prefers-color-scheme: dark) {
 		html { background: #0b0f17; }
 		body { color: #e5e7eb; }
@@ -519,7 +614,11 @@ const PAGE_CSS = `	:root { color-scheme: light dark; }
 		.site-id { border-color: #1f2937; }
 		.field dt { color: #94a3b8; }
 		.meta, .foot { color: #94a3b8; }
+		.group { color: #94a3b8; border-color: #1f2937; }
 		a { color: #93c5fd; }
 		/* The id badge inverts with the scheme: light chip on the dark page. */
 		.id { background: #e2e8f0; color: #0f172a; }
+		.copy { border-color: #374151; color: #94a3b8; }
+		.copy:hover { border-color: #6b7280; color: #e5e7eb; }
+		.copy.copied { border-color: #4ade80; color: #4ade80; }
 	}`;

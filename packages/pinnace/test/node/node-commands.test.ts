@@ -809,7 +809,15 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 			);
 			expect(html).toContain('>ipns<');
 			expect(html).toContain('href="https://alice.eth.limo/"');
-			expect(html).toContain('opted out');
+			// The opt-out site shows NO ENS group: an operator who opted out does not
+			// need four empty ENS fields reminding them. The ENS-name-to-warm is
+			// carried in the JSON (above) but the HTML view hides it.
+			const optoutRow = html.slice(
+				html.indexOf('optout.eth'),
+				html.indexOf('>bob<'),
+			);
+			expect(optoutRow).not.toContain('opted out');
+			expect(optoutRow).not.toContain('class="group"');
 			// The eth.limo column shows the NAME and whether it serves: alice's row
 			// is the only `no` on the page (the other two probed nothing, and the
 			// CID checks this fake op did not run read `unknown`, never `no`).

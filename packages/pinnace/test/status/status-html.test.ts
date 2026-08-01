@@ -114,7 +114,11 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(html).not.toContain('bafybob.limo');
 	});
 
-	it('distinguishes an ensName opt-out ("") from a site that stores none', () => {
+	it('hides ENS fields for a site that opts out (""), and for one that stores none', () => {
+		// Both an explicit opt-out (ensName "") and a site with no name to warm show
+		// NO ENS group at all: the four ENS fields are all not-applicable, so showing
+		// them would be noise. An operator who opted out does not need four empty ENS
+		// cells reminding them; a site that resolves no name has nothing to show.
 		const html = renderStatusHtml({
 			generated: '2026-07-25T10:11:12.000Z',
 			sites: [
@@ -126,12 +130,17 @@ describe('renderStatusHtml: per-site row', () => {
 			html.indexOf('optout.eth'),
 			html.indexOf('plain.eth'),
 		);
-		expect(optoutRow).toContain('opted out');
-		// The site that stores NO ensName is not reported as an opt-out.
+		// Neither site shows the ENS group or any ENS field label.
+		expect(optoutRow).not.toContain('class="group"');
+		expect(optoutRow).not.toContain('ens name');
+		expect(optoutRow).not.toContain('eth.limo');
+		expect(optoutRow).not.toContain('opted out');
 		const plainRow = html.slice(html.indexOf('plain.eth'));
-		expect(plainRow).not.toContain('opted out');
-		// It still warms by inference from its `.eth` id, which the report resolved.
+		expect(plainRow).not.toContain('class="group"');
+		expect(plainRow).not.toContain('ens name');
+		// Neither warms an eth.limo name.
 		expect(html).not.toContain('optout.eth.limo');
+		expect(html).not.toContain('plain.eth.limo');
 	});
 
 	it('shows an INFERRED ensName as the name, marked inferred (never `none`)', () => {
@@ -475,7 +484,7 @@ describe('renderStatusHtml: per-site row', () => {
 		expect(html).toContain('/ipfs/bafycurrent');
 	});
 
-	it('leaves BOTH axes blank for a site with no ENS name to ask about', () => {
+	it('hides the ENS group entirely for a site with no ENS name to ask about', () => {
 		const html = renderStatusHtml({
 			generated: '2026-07-25T10:11:12.000Z',
 			sites: [
@@ -489,22 +498,25 @@ describe('renderStatusHtml: per-site row', () => {
 				},
 			],
 		});
-		// Nothing to ask -> no verdict at all, never `unknown` and never a cross.
-		// The card is the slice from this site's id header to the end of the page
-		// body (there is only the one site here).
+		// No ENS name to warm -> no ENS group at all, so no ENS field labels appear,
+		// and no verdicts (never `unknown`, never the red cross, never `foreign`/`stale`).
 		const row = html.slice(
 			html.indexOf('class="site-id"'),
 			html.indexOf('</section>'),
 		);
+		expect(row).not.toContain('class="group"');
+		expect(row).not.toContain('ens name');
+		expect(row).not.toContain('eth.limo');
+		expect(row).not.toContain('origin');
+		expect(row).not.toContain('freshness');
 		expect(row).not.toContain('unknown');
 		expect(row).not.toContain('class="no"');
 		expect(row).not.toContain('foreign');
 		expect(row).not.toContain('stale');
-		// Both axes read as the muted "nothing to report", like the eth.limo cell
-		// and, for this keyless ipfs-mode site, the ipns and seq cells: an
-		// ipfs-addressed site has no name of ours, so there is no sequence to ask
-		// about and the cell must read as not-applicable, never as a failed read.
-		expect(row.match(/<span class="none">none<\/span>/g)?.length).toBe(5);
+		// The core fields that ARE not-applicable read as the muted `none`: an
+		// ipfs-addressed site has no IPNS id and no record sequence, so those two
+		// cells read as not-applicable, never as a failed read.
+		expect(row.match(/<span class="none">none<\/span>/g)?.length).toBe(2);
 	});
 
 	it('says so plainly when the node has no sites yet (fresh box)', () => {
@@ -517,7 +529,7 @@ describe('renderStatusHtml: per-site row', () => {
 	});
 });
 
-describe('renderStatusHtml: auto-reload via meta-refresh (no client JS)', () => {
+describe('renderStatusHtml: auto-reload via meta-refresh', () => {
 	it('defaults to the named ~300s constant aligned with the status timer', () => {
 		expect(DEFAULT_STATUS_REFRESH_SECONDS).toBe(300);
 		const html = renderStatusHtml(reportFixture());
@@ -534,12 +546,15 @@ describe('renderStatusHtml: auto-reload via meta-refresh (no client JS)', () => 
 });
 
 describe('renderStatusHtml: self-contained + escaped', () => {
-	it('has inline CSS and no external assets or client JS', () => {
+	it('has inline CSS, no external assets, and only the copy-button script', () => {
 		const html = renderStatusHtml(reportFixture());
 		expect(html).toContain('<style>');
-		expect(html).not.toMatch(/<script/i);
+		// The page has exactly ONE inline script: the progressive-enhancement copy
+		// button handler. No external assets, no other scripts.
+		expect(html).toMatch(/<script>/);
 		expect(html).not.toMatch(/<link\b/i);
 		expect(html).not.toMatch(/\ssrc=/i);
+		expect(html).not.toMatch(/<script[^>]/i);
 		// The only outbound URLs are the per-site gateway links.
 		const urls = html.match(/https?:\/\/[^"\s]+/g) ?? [];
 		expect(
@@ -561,7 +576,12 @@ describe('renderStatusHtml: self-contained + escaped', () => {
 				},
 			],
 		});
-		expect(html).not.toMatch(/<script/i);
+		// A site-controlled `<script>` string must be ESCAPED, never rendered as a
+		// real tag. The page's OWN script (the copy-button handler) is the only real
+		// `<script>` element; any `<script>` inside site data is escaped to
+		// `&lt;script&gt;`.
+		const realScripts = html.match(/<script>/g) ?? [];
+		expect(realScripts).toHaveLength(1); // the page's own copy-button script
 		expect(html).not.toContain('<evil>');
 		expect(html).toContain('&lt;script&gt;');
 		expect(html).toContain('&amp;');
@@ -574,6 +594,91 @@ describe('renderStatusHtml: self-contained + escaped', () => {
 		expect(renderStatusHtml(reportFixture())).toBe(
 			renderStatusHtml(reportFixture()),
 		);
+	});
+});
+
+describe('renderStatusHtml: copy-to-clipboard buttons on opaque identifiers', () => {
+	it('adds a copy button beside the CID and IPNS badges', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'alice.eth', cid: 'bafyalice', ipns: 'k51alice', mode: 'ipns'}],
+		});
+		// The CID and IPNS each get a copy button with the raw value in data-copy.
+		expect(html).toContain('data-copy="bafyalice"');
+		expect(html).toContain('data-copy="k51alice"');
+		expect(html).toContain('class="copy"');
+		expect(html).toContain('copy content cid to clipboard');
+		expect(html).toContain('copy ipns to clipboard');
+	});
+
+	it('does NOT add a copy button when the identifier is absent', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'bob', cid: 'bafybob', mode: 'ipfs'}],
+		});
+		// Bob has a CID (copy button) but no IPNS (no copy button for ipns).
+		expect(html).toContain('data-copy="bafybob"');
+		expect(html).not.toContain('copy ipns to clipboard');
+	});
+
+	it('escapes the value in the data-copy attribute', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [{id: 'evil', cid: 'bafy"<>', mode: 'ipfs'}],
+		});
+		expect(html).toContain('data-copy="bafy&quot;&lt;&gt;"');
+		expect(html).not.toContain('data-copy="bafy">');
+	});
+});
+
+describe('renderStatusHtml: ENS field grouping', () => {
+	it('groups ENS fields under a subheading, separate from the core fields', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{
+					id: 'alice.eth',
+					cid: 'bafyalice',
+					mode: 'ipns',
+					ensNameToWarm: 'alice.eth',
+					ethLimoServes: checkAnswer(true),
+					ethLimoOrigin: {state: 'ours'},
+					ethLimoFreshness: {state: 'current'},
+				},
+			],
+		});
+		const card = html.slice(
+			html.indexOf('class="site-id"'),
+			html.indexOf('</section>'),
+		);
+		// The ENS group heading appears AFTER the core dl closes.
+		expect(card).toContain('<h3 class="group">ENS</h3>');
+		// Core fields come first, ENS fields after the subheading.
+		const groupIdx = card.indexOf('class="group"');
+		expect(card.slice(0, groupIdx)).toContain('announced');
+		expect(card.slice(0, groupIdx)).toContain('gateway');
+		expect(card.slice(groupIdx)).toContain('ens name');
+		expect(card.slice(groupIdx)).toContain('eth.limo');
+		expect(card.slice(groupIdx)).toContain('origin');
+		expect(card.slice(groupIdx)).toContain('freshness');
+	});
+
+	it('shows NO ENS group when the site resolves no name to warm', () => {
+		const html = renderStatusHtml({
+			generated: '2026-07-25T10:11:12.000Z',
+			sites: [
+				{id: 'blog', cid: 'bafyblog', ipns: 'k51blog', mode: 'ipns'},
+			],
+		});
+		const card = html.slice(
+			html.indexOf('class="site-id"'),
+			html.indexOf('</section>'),
+		);
+		expect(card).not.toContain('class="group"');
+		expect(card).not.toContain('ens name');
+		expect(card).not.toContain('eth.limo');
+		expect(card).not.toContain('origin');
+		expect(card).not.toContain('freshness');
 	});
 });
 
