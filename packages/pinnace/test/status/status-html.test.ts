@@ -601,7 +601,9 @@ describe('renderStatusHtml: copy-to-clipboard buttons on opaque identifiers', ()
 	it('adds a copy button beside the CID and IPNS badges', () => {
 		const html = renderStatusHtml({
 			generated: '2026-07-25T10:11:12.000Z',
-			sites: [{id: 'alice.eth', cid: 'bafyalice', ipns: 'k51alice', mode: 'ipns'}],
+			sites: [
+				{id: 'alice.eth', cid: 'bafyalice', ipns: 'k51alice', mode: 'ipns'},
+			],
 		});
 		// The CID and IPNS each get a copy button with the raw value in data-copy.
 		expect(html).toContain('data-copy="bafyalice"');
@@ -666,9 +668,7 @@ describe('renderStatusHtml: ENS field grouping', () => {
 	it('shows NO ENS group when the site resolves no name to warm', () => {
 		const html = renderStatusHtml({
 			generated: '2026-07-25T10:11:12.000Z',
-			sites: [
-				{id: 'blog', cid: 'bafyblog', ipns: 'k51blog', mode: 'ipns'},
-			],
+			sites: [{id: 'blog', cid: 'bafyblog', ipns: 'k51blog', mode: 'ipns'}],
 		});
 		const card = html.slice(
 			html.indexOf('class="site-id"'),
