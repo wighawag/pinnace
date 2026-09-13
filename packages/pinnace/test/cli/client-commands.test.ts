@@ -1175,9 +1175,10 @@ describe('pin <cid> --as <name> — dispatches to core pinExternal (all nodes)',
 		const failing: ClientDeps = {
 			...deps,
 			pinExternal: async (input) => ({
-				cid: input.cid,
+				cid: input.cid as string,
 				name: input.name,
 				recursive: true,
+				mode: input.mode ?? 'ipfs',
 				ok: [],
 				failed: input.targets.map((t) => ({
 					baseUrl: t.baseUrl,

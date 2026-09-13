@@ -43,7 +43,8 @@
 	"scripts": {
 		"build": "tsc",
 		"dev": "as-soon -w src pnpm build",
-		"test": "vitest run",
+		"typecheck": "tsc --noEmit -p tsconfig.test.json",
+		"test": "pnpm typecheck && vitest run",
 		"test:watch": "vitest"
 	}
 }

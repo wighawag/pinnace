@@ -77,6 +77,8 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			calls.emitCi.push(input);
 			return {
 				system: 'github',
+				emit: input.emit ?? 'workflow',
+				writable: (input.emit ?? 'workflow') === 'workflow',
 				workflow: {path: '.github/workflows/pinnace-deploy.yml', contents: ''},
 				secrets: [],
 				vars: [],

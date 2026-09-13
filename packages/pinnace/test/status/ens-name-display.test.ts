@@ -41,7 +41,9 @@ describe('ensNameDisplay — the four states an ENS name reads as', () => {
 		// classifier is handed the RESULT and never re-derives it, so it cannot
 		// disagree with what the box will actually warm. A site whose id WOULD
 		// infer one still reads as none until the report resolves it.
-		const siteWithEthId = {id: 'ronan.eth'};
-		expect(ensNameDisplay(siteWithEthId)).toEqual({kind: 'none'});
+		// NOTE: the classifier's input carries no `id` at all (that is the point
+		// of the comment above), so "a site whose id would infer one" is, to this
+		// function, simply a site with neither field set.
+		expect(ensNameDisplay({})).toEqual({kind: 'none'});
 	});
 });

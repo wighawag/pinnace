@@ -1,0 +1,30 @@
+{
+	// TYPECHECK-ONLY config covering the test suite as well as `src`.
+	//
+	// The build config (`tsconfig.json`) includes ONLY `src/**/*.ts`, because
+	// `rootDir: ./src` + `outDir: ./dist` is what makes the published package's
+	// layout right — widening its `include` to the tests would put `dist/src/`
+	// and `dist/test/` in the tarball.
+	//
+	// The cost of that, until this file existed, was that NOTHING typechecked
+	// the tests: `pnpm build` was green while a test file called a core function
+	// with the wrong shape, and the mistake only surfaced as a runtime failure
+	// inside `vitest` (vitest transpiles per-file and does not typecheck either).
+	// That bit for real: a `ClientDeps` stub in `test/cli/unknown-flag.test.ts`
+	// went stale when a core result type gained required fields, and `tsc` had
+	// nothing to say about it.
+	//
+	// So this config emits nothing (`noEmit`) and exists purely to be checked.
+	// It inherits every strictness setting from the build config, so the tests
+	// are held to the same bar as `src` rather than a looser one.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		// `rootDir`/`outDir` are meaningless with `noEmit` and would otherwise
+		// reject `test/**` for sitting outside the build's `rootDir`.
+		"rootDir": ".",
+		"outDir": null
+	},
+	"include": ["src/**/*.ts", "test/**/*.ts"],
+	"exclude": ["node_modules", "dist"]
+}

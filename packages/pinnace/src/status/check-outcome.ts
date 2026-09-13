@@ -115,8 +115,16 @@ export function checkAnswer(yes: boolean): CheckOutcome {
  * `fetch failed`, `no peer id`, ...). The reason is normalised to one short
  * line, and is never empty: an unknown with nothing to say is still an unknown,
  * so it falls back to {@link UNKNOWN_CHECK_REASON}.
+ *
+ * The return type is the NARROW `unknown` variant, not the whole
+ * {@link CheckOutcome} union: this function only ever produces that one state,
+ * and saying so lets a caller read `.reason` without re-narrowing something
+ * that was never in doubt. It is a subtype of `CheckOutcome`, so every existing
+ * caller is unaffected.
  */
-export function checkUnknown(reason: string): CheckOutcome {
+export function checkUnknown(
+	reason: string,
+): Extract<CheckOutcome, {state: 'unknown'}> {
 	return {state: 'unknown', reason: shortReason(reason)};
 }
 

@@ -193,12 +193,21 @@ describe('guard: another configured host already holds the key (two signers race
 	it('names the holder, the site and the sequence-number hazard in the message', async () => {
 		const pub = nodeHolding({});
 		const other = nodeHolding({mysite: 'k51elsewhere'}, 'https://b.example');
-		const error = await authorizePublisher({
-			publisher: publisherTarget(pub),
-			others: [{name: 'replica-01', client: clientWith(other)}],
-			ids: ['mysite'],
-			deriveKey,
-		}).catch((e: unknown) => e as Error);
+		let error: Error | undefined;
+		try {
+			await authorizePublisher({
+				publisher: publisherTarget(pub),
+				others: [{name: 'replica-01', client: clientWith(other)}],
+				ids: ['mysite'],
+				deriveKey,
+			});
+		} catch (caught) {
+			error = caught as Error;
+		}
+		// Asserted, not assumed: a refusal that stopped refusing must not pass
+		// here as a green assertion on an undefined message.
+		expect(error).toBeInstanceOf(Error);
+		if (!error) throw new Error('unreachable');
 
 		expect(error.message).toContain('replica-01');
 		expect(error.message).toContain('mysite');
