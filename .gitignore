@@ -5,3 +5,6 @@
 node_modules/
 
 runbook/*
+
+# agent tooling artifacts
+.pi-subagents/

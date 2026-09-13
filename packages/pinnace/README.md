@@ -179,9 +179,9 @@ That is the whole first deploy: in `ipns` mode `deploy` PROVISIONS its own key. 
 
 After this the on-box timers run the record loop automatically: the publisher re-signs + exports the record, replicas mirror + re-announce it, and if the publisher goes down the replicas keep the name alive from their cached record within its validity window (~72h from the last signing). That is a grace window, not a handover: recovering the name beyond it means another box signing, which is a short DNS-led procedure rather than a command — see the [failover runbook](https://github.com/wighawag/pinnace/blob/main/docs/failover.md).
 
-### 6. Change a site's metadata (just re-deploy)
+### 6. Change a site's metadata (re-deploy, or `update` when you have no build)
 
-A site's metadata is changed by re-running `deploy` (idempotent) — there is no `update` verb and no file to edit. Flags you omit preserve what the site already stores:
+A site's metadata is never a file you edit: it is written by the verb that touches the site. If you are deploying anyway, a re-`deploy` carries the change (it is idempotent), and flags you omit preserve what the site already stores:
 
 ```sh
 # a plain re-deploy: mode + ensName preserved, so this keeps signing ipns://
@@ -198,6 +198,17 @@ pinnace --config pinnace.json deploy ./site ronan.eth --set-ens-name
 ```
 
 Write the BARE `--set-ens-name` last (or immediately before another `--flag`): it takes an OPTIONAL value, so `--set-ens-name ./site` would read `./site` as the name.
+
+When you do NOT have the build — an `ipfs`-mode site that is live, whose `./dist` is long gone — `update` changes the same metadata on the site as it stands, using the cid your nodes already hold. It is the one-command promotion to a mutable name:
+
+```sh
+# promote a live ipfs-mode site to ipns and give it an eth.limo name to warm
+pinnace --config pinnace.json update --set-mode ipns --set-ens-name mysite.eth mysite
+
+pinnace derive mysite   # the k51... to put in the ENS contenthash
+```
+
+It takes the SAME `--set-mode` / `--set-ens-name` / `--set-keep` flags as `deploy`, resolved the same way (omitting preserves), and in `ipns` mode it publishes the record pointing at the cid the site already resolves to. What it does NOT do is place content: it cannot move a site to a new build, and it refuses if the publisher does not hold the site at all (there would be no stored mode to preserve, and guessing `ipfs` there would unpublish a live name). To move a site to a different build you still want `deploy`, or `pin --from-site <staging id> --as <live id>`.
 
 The same four ensName forms, and the same `--set-mode`, apply to `pinnace pin`.
 
@@ -311,7 +322,7 @@ pinnace deploy --set-keep 3 ./dist mysite
 pinnace deploy --unset-keep ./dist mysite
 ```
 
-Like `--set-mode` and `--set-ens-name`, omitting both flags PRESERVES, so a routine deploy never turns retention on, off, or up. The policy is applied as each deploy/pin writes, and can also be run on its own:
+Like `--set-mode` and `--set-ens-name`, omitting both flags PRESERVES, so a routine deploy never turns retention on, off, or up. The policy is applied as each `deploy`/`pin`/`update` writes, and can also be run on its own:
 
 ```sh
 pinnace prune mysite               # DRY RUN: what it would unpin, on every node
@@ -320,6 +331,8 @@ pinnace prune mysite --keep 1 --apply   # a one-off count, overriding the stored
 ```
 
 `prune` is a dry run until `--apply`, and the dry run performs every read and every check, so what it prints is what a real run would do. A site with no stored policy and no `--keep` is a refusal, not a guess.
+
+(`update` applies the policy too, on the same terms as `deploy`/`pin`: `pinnace update --set-keep 2 mysite` both records the policy and acts on it.)
 
 Two invariants hold in both paths. Nothing is ever unpinned that another site currently resolves to, because a Kubo recursive pin is not reference-counted and sites SHARE cids routinely (promoting a staging build leaves two sites on one cid); a cid skipped for that reason is reported, and stays listed. And a cid leaves the history only once it has actually been unpinned, so a failed unpin is retried by the next prune instead of being forgotten while still on disk.
 
@@ -352,6 +365,7 @@ Two things this deliberately does NOT do. It does not hand you the SOURCE's key:
 | --- | --- |
 | `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
 | `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--set-keep <n> \| --unset-keep] [--json] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. `--json` prints ONE machine-readable object (`cid`, `mode`, `ipns`, and the per-node `ok`/`failed` breakdown) instead of the human lines, for scripts and CI. |
+| `pinnace update [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--set-keep <n> \| --unset-keep] [--json] <id>` | Change a LIVE site's metadata (`mode`, `ensName`, `keep`) WITHOUT rebuilding or re-placing its content: reads the site's current CID from MFS, writes the resolved `metadata.json`, and in `ipns` mode publishes the IPNS record pointing at that existing CID. The same mode/ensName/keep flags as `deploy` and `pin`, resolved the same way (stated > stored > default; omitting preserves). Use this to promote an `ipfs`-mode site to `ipns` (or set an ENS name, or a retention policy) when you no longer have the build artifacts — `pinnace update --set-mode ipns --set-ens-name mysite.eth mysite`. |
 | `pinnace pin <cid> \| --from-ipns <source> \| --from-site <id> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin content you only have an ADDRESS for on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. The source is EXACTLY ONE of: the positional `<cid>`; `--from-ipns <source>`, which resolves an existing IPNS/DNSLink name to the cid it points at now (a snapshot, not a follow); or `--from-site <id>`, which PROMOTES the current cid of a site your nodes already hold (the staging to live step, read on one node and fanned out). With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows), which is the one-command migration onto your own boxes. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |
 | `pinnace authorize [<id>]` | Grant the DECLARED publisher the per-site key derived from your master, so CI can deploy that name with no master (its primary job: run once locally, deploy from CI forever). Bare = every site the publisher holds in MFS; `<id>` = just that site, which need not exist yet. Idempotent (a key already held is reported `already-authorized`, never re-imported). No `--host`: the config says which host is the publisher, and zero/several declared publishers, or another host already holding that key, are loud refusals. It grants key MATERIAL only — it changes NO role and is NOT a failover. |
 | `pinnace derive <id>` (alias `ipns-id`) | Print a site's `k51...` IPNS id from master + id, no deploy/network. |
@@ -363,7 +377,7 @@ Two things this deliberately does NOT do. It does not hand you the SOURCE's key:
 
 Global (either side of the command): `--config <path>` selects the `pinnace.json` (default `./pinnace.json`, whose ABSENCE is fine — a named-but-missing path fails loud), `--endpoint <url>` supplies one publisher node instead of a config file (token still env-only), and `--replica-endpoint <url>` (repeatable, only alongside `--endpoint`) adds that publisher's replicas, so a whole node set is expressible as args. `--endpoint` may be given only ONCE: repeating it is a usage error rather than a silent pick.
 
-Every node-touching verb (`deploy`, `pin`, `status`, `site`, `authorize`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
+Every node-touching verb (`deploy`, `update`, `pin`, `status`, `site`, `authorize`) also accepts, after the verb, `--host-endpoint.<name> <url>` / `--host-token.<name> <t>` (override one configured host).
 
 A flag you type must never mean nothing, and that covers its NAME as well as its value. Any value-taking flag written with NO value (at the end of the line, or immediately followed by another `--flag`) is a usage error naming it, so a mistyped `pinnace deploy --endpoint --set-mode ipns ./dist mysite` refuses instead of dropping the endpoint and quietly deploying to every host in `pinnace.json`. And any flag a verb does not accept is refused too, naming it and listing what that verb does accept, before anything runs: `pinnace pin --from-ipns <src> --as mysite --mode ipns` fails with "`--mode` was RENAMED: did you mean `--set-mode`?" rather than parsing, being read by nobody, and pinning as `ipfs` with no IPNS record published. The two globals above are stripped first, so they are accepted on either side of every command and never reported as unknown.
 

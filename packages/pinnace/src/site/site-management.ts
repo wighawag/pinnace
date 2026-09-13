@@ -267,8 +267,18 @@ export interface PlaceResult {
  *
  * IDEMPOTENT: re-placing a site REPLACES both parts — the content (rm + cp) and
  * the metadata (`files/write` truncates, so a re-write never leaves a tail of
- * the previous JSON). Re-running `deploy` for the same `id` is therefore how a
- * site's metadata is changed; there is no separate `update` verb.
+ * the previous JSON). Re-running `deploy` for the same `id` is therefore one way
+ * a site's metadata is changed, and the only one for an operator who is placing
+ * content anyway.
+ *
+ * The OTHER way deliberately does NOT come through here: `update`
+ * (`../update/update-site.ts`) changes a live site's metadata when the operator
+ * has no build to place, so it writes `metadata.json` DIRECTLY rather than
+ * calling this. That bypass costs it the two things this function does around
+ * the write, and it re-does exactly one of them: it calls {@link prunePins}
+ * itself, so `--set-keep` is applied and not merely recorded. It does NOT
+ * re-do {@link nextHistory}, and must not — nothing is superseded when the
+ * content cid does not move.
  *
  * `metadata` is REQUIRED, not defaulted here: what a site's metadata says is the
  * CALLER's knowledge (deploy/pin know the mode they ran in), and a default

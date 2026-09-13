@@ -33,6 +33,7 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 	const calls: Record<string, unknown[]> = {
 		provision: [],
 		deploy: [],
+		updateSite: [],
 		emitCi: [],
 		statusReport: [],
 		deriveIpnsId: [],
@@ -59,6 +60,24 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 				cid: 'bafyStub',
 				mode: input.mode ?? 'ipfs',
 				ok: [{baseUrl: 'https://a', cid: 'bafyStub', published: false}],
+				failed: [],
+				success: true,
+			};
+		},
+		updateSite: async (input) => {
+			calls.updateSite.push(input);
+			return {
+				cid: 'bafyStub',
+				mode: input.mode ?? 'ipfs',
+				diverged: [],
+				ok: [
+					{
+						baseUrl: 'https://a',
+						cid: 'bafyStub',
+						published: false,
+						pruned: [],
+					},
+				],
 				failed: [],
 				success: true,
 			};
@@ -269,6 +288,27 @@ const verbCases: VerbCase[] = [
 			'mysite',
 		],
 		dispatch: 'deploy',
+		accepts: '--set-mode',
+	},
+	{
+		verb: 'pinnace update',
+		valid: [
+			'update',
+			'--set-mode',
+			'ipns',
+			'--set-ens-name',
+			'mysite.eth',
+			'--set-keep',
+			'3',
+			'--gateways',
+			'https://g.example/ipfs/{cid}',
+			'--host-endpoint.a',
+			'https://a2.example',
+			'--host-token.a',
+			'tok-a',
+			'mysite',
+		],
+		dispatch: 'updateSite',
 		accepts: '--set-mode',
 	},
 	{
@@ -564,6 +604,11 @@ describe('the per-host override flags are PREFIX-shaped and stay accepted', () =
 				name: 'deploy',
 				argv: ['deploy', './dist', 'mysite'],
 				dispatch: 'deploy',
+			},
+			{
+				name: 'update',
+				argv: ['update', 'mysite'],
+				dispatch: 'updateSite',
 			},
 			{
 				name: 'pin',

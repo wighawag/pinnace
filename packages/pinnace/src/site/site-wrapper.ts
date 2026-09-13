@@ -631,9 +631,166 @@ export async function readSiteMetadataForWrite(
 	id: string,
 ): Promise<SiteMetadata> {
 	const metadataPath = siteMetadataPath(sitesDir, id);
-	// `/sites/<id>/metadata.json` as segments, so the walk up is the same code
-	// for a nested sites dir as for `/sites`.
-	const segments = metadataPath.split('/').filter(Boolean);
+	let present: boolean;
+	try {
+		present = await establishMfsPresence(client, metadataPath);
+	} catch (error) {
+		if (error instanceof MfsPresenceUnknownError) {
+			throw new SiteMetadataUnreadableError(
+				id,
+				client.baseUrl,
+				error.step,
+				error.reason,
+			);
+		}
+		throw error;
+	}
+	// A successful listing that does not carry the file: a real absence.
+	if (!present) return {};
+	// `metadata.json` is positively THERE, so a failed read is an OUTAGE.
+	try {
+		return parseSiteMetadata(await client.filesRead(metadataPath));
+	} catch (cause) {
+		throw new SiteMetadataUnreadableError(
+			id,
+			client.baseUrl,
+			`files/read ${metadataPath}`,
+			cause,
+		);
+	}
+}
+
+/**
+ * A site's CONTENT could not be established: the node is down, unreachable, or
+ * answering 401. The strict counterpart of the swallowed
+ * `files/stat` in `readSiteContentCid`, for the paths that must not mistake an
+ * OUTAGE for "this node does not have the site".
+ *
+ * CONTEXT.md's Conventions make this a rule, not a preference: a check that
+ * could not RUN never reports a definitive negative. Telling an operator to
+ * deploy to a node whose real problem is a rotated token sends them to fix the
+ * wrong thing.
+ */
+export class SiteContentUnreadableError extends Error {
+	constructor(
+		/** The site whose content could not be established. */
+		readonly id: string,
+		/** The node that could not answer (its Kubo RPC base URL). */
+		readonly baseUrl: string,
+		/** The Kubo step that failed, e.g. `files/ls /sites/blog`. */
+		readonly step: string,
+		/** The underlying Kubo failure. */
+		cause?: unknown,
+	) {
+		super(
+			`could not establish whether site '${id}' has content on ${baseUrl} ` +
+				`(${step} failed: ` +
+				`${cause instanceof Error ? cause.message : String(cause)}). ` +
+				`This is NOT the same as the site being absent there — the node did ` +
+				`not answer. Fix the node (is it up, is its token still valid?) and ` +
+				`retry.`,
+			{cause},
+		);
+		this.name = 'SiteContentUnreadableError';
+	}
+}
+
+/**
+ * What a strict content read established: the site's current content cid, or a
+ * POSITIVE absence (a successful listing that does not carry `content`).
+ * An outage is neither — it throws {@link SiteContentUnreadableError}.
+ */
+export type SiteContentRead = {kind: 'present'; cid: string} | {kind: 'absent'};
+
+/**
+ * Read a site's content cid for a caller that must tell ABSENCE from an OUTAGE
+ * — the strict counterpart of {@link readSiteContentCid} (which swallows every
+ * failure into `undefined`, right for discovery and wrong anywhere a refusal or
+ * a write hangs off the answer).
+ *
+ * Absence is established POSITIVELY by the same walk-up
+ * {@link readSiteMetadataForWrite} uses ({@link establishMfsPresence}): the
+ * first MFS level that ANSWERS decides, and a level that says the path below
+ * exists while that level will not answer is an outage wearing an absence's
+ * clothes.
+ *
+ * @throws {SiteContentUnreadableError} for any failure that is not a positive
+ * absence.
+ */
+export async function readSiteContentCidForWrite(
+	client: KuboRpcClient,
+	sitesDir: string,
+	id: string,
+): Promise<SiteContentRead> {
+	const contentPath = siteContentPath(sitesDir, id);
+	let present: boolean;
+	try {
+		present = await establishMfsPresence(client, contentPath);
+	} catch (error) {
+		if (error instanceof MfsPresenceUnknownError) {
+			throw new SiteContentUnreadableError(
+				id,
+				client.baseUrl,
+				error.step,
+				error.reason,
+			);
+		}
+		throw error;
+	}
+	if (!present) return {kind: 'absent'};
+	try {
+		const stat = await client.filesStat<{Hash?: string}>(contentPath);
+		if (!stat?.Hash) {
+			throw new Error('files/stat answered without a Hash');
+		}
+		return {kind: 'present', cid: stat.Hash};
+	} catch (cause) {
+		// `content` is positively THERE, so a failed stat is an outage.
+		throw new SiteContentUnreadableError(
+			id,
+			client.baseUrl,
+			`files/stat ${contentPath}`,
+			cause,
+		);
+	}
+}
+
+/**
+ * The DEEPEST step of a walk-up that would not answer, so the caller can name
+ * it in its own domain error. Internal: never leaves this module.
+ */
+class MfsPresenceUnknownError extends Error {
+	constructor(
+		readonly step: string,
+		readonly reason: unknown,
+	) {
+		super(step);
+		this.name = 'MfsPresenceUnknownError';
+	}
+}
+
+/**
+ * Establish whether an MFS path EXISTS, positively — the shared walk-up behind
+ * both strict readers, so the "absence must be proven, never inferred from a
+ * failure" rule has ONE implementation and cannot drift between the metadata
+ * and the content halves of a wrapper.
+ *
+ *  1. `files/ls` the path's PARENT. Listed -> present. Not listed -> a genuine
+ *     absence (a first deploy, or a fresh box with no `/sites` at all).
+ *  2. The parent would not list? WALK UP — its parents, then the MFS root
+ *     (which always exists). The first level that ANSWERS decides.
+ *  3. A level that says the path below EXISTS while that level will not answer
+ *     is an OUTAGE, not an absence: stop and report it.
+ *  4. Nothing answered at all -> {@link MfsPresenceUnknownError}.
+ *
+ * Kubo's error TEXT is never inspected (brittle across versions); the SHAPE of
+ * a successful listing is the signal.
+ */
+async function establishMfsPresence(
+	client: KuboRpcClient,
+	path: string,
+): Promise<boolean> {
+	const segments = path.split('/').filter(Boolean);
 	/** The DEEPEST step that failed — what an eventual refusal reports. */
 	let failure: {step: string; cause: unknown} | undefined;
 
@@ -650,28 +807,15 @@ export async function readSiteMetadataForWrite(
 			continue;
 		}
 		// A successful listing WITHOUT the next segment: a real absence.
-		if (!entries.includes(child)) return {};
-		if (depth === segments.length - 1) {
-			// `metadata.json` is positively THERE, so a failed read is an outage.
-			try {
-				return parseSiteMetadata(await client.filesRead(metadataPath));
-			} catch (cause) {
-				throw new SiteMetadataUnreadableError(
-					id,
-					client.baseUrl,
-					`files/read ${metadataPath}`,
-					cause,
-				);
-			}
-		}
+		if (!entries.includes(child)) return false;
+		// The deepest level listed it: the path is positively THERE.
+		if (depth === segments.length - 1) return true;
 		// This level says the path below EXISTS, but that level would not answer.
 		break;
 	}
 
-	throw new SiteMetadataUnreadableError(
-		id,
-		client.baseUrl,
-		failure?.step ?? `files/ls ${metadataPath}`,
+	throw new MfsPresenceUnknownError(
+		failure?.step ?? `files/ls ${path}`,
 		failure?.cause,
 	);
 }

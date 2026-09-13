@@ -139,6 +139,9 @@ export {
 	parseSiteMetadata,
 	readSiteMetadata,
 	readSiteMetadataForWrite,
+	readSiteContentCidForWrite,
+	SiteContentUnreadableError,
+	type SiteContentRead,
 	resolveSiteMetadataToWrite,
 	resolveEnsNameToWarm,
 	ethLimoUrl,
@@ -198,6 +201,17 @@ export {
 	type PruneResult,
 	type PrunedCid,
 } from './site/site-retention.js';
+export {
+	updateSite,
+	UpdateSiteMissingError,
+	UpdatePublisherRequiredError,
+	UpdateDerivedKeyRequiredError,
+	type UpdateSiteInput,
+	type UpdateSiteTarget,
+	type UpdateSiteResult,
+	type UpdateNodeOk,
+	type UpdateNodeFailure,
+} from './update/update-site.js';
 export {
 	pinExternal,
 	PinStageError,
