@@ -5,7 +5,7 @@
  * the core, and formats the result. ALL behaviour lives in the core (CONTEXT.md
  * `core vs cli`); nothing here re-implements domain logic.
  *
- * The client-facing verbs (provision, deploy, update, pin, prune, install-ci,
+ * The client-facing verbs (provision, deploy, set, pin, prune, install-ci,
  * status, derive)
  * and the config/env layer dispatch through an injectable {@link RunContext} seam:
  *  - {@link RunContext.deps} are the core functions each verb calls (defaults to
@@ -98,14 +98,14 @@ import {
 	type PruneSiteResult,
 } from '../site/site-retention.js';
 import {
-	updateSite as coreUpdateSite,
-	UpdatePublisherRequiredError as UpdatePublisherRequiredErr,
-	UpdateDerivedKeyRequiredError as UpdateDerivedKeyRequiredErr,
-	UpdateSiteMissingError as UpdateSiteMissingErr,
-	type UpdateSiteInput,
-	type UpdateSiteResult,
-	type UpdateSiteTarget,
-} from '../update/update-site.js';
+	setSiteMetadata as coreSetSiteMetadata,
+	SetPublisherRequiredError as SetPublisherRequiredErr,
+	SetDerivedKeyRequiredError as SetDerivedKeyRequiredErr,
+	SetSiteMissingError as SetSiteMissingErr,
+	type SetSiteMetadataInput,
+	type SetSiteMetadataResult,
+	type SetSiteMetadataTarget,
+} from '../set/set-site-metadata.js';
 import {
 	pinExternal as corePinExternal,
 	PinSourceResolveError,
@@ -163,8 +163,8 @@ export interface ClientDeps {
 	provision(input: ProvisionInput): ProvisionResult;
 	/** `deploy` -> the multi-target CAR deploy. */
 	deploy(input: DeployInput): Promise<DeployResult>;
-	/** `update` -> change a live site's metadata (mode/ensName/keep) without rebuilding. */
-	updateSite(input: UpdateSiteInput): Promise<UpdateSiteResult>;
+	/** `set` -> change a live site's metadata (mode/ensName/keep) without rebuilding. */
+	setSiteMetadata(input: SetSiteMetadataInput): Promise<SetSiteMetadataResult>;
 	/** `install-ci` -> the CI workflow emitter. */
 	emitCi(input: EmitCiInput): EmittedCi;
 	/** `status` -> the per-site status report. */
@@ -196,7 +196,7 @@ export interface ClientDeps {
 const DEFAULT_DEPS: ClientDeps = {
 	provision: coreProvision,
 	deploy: coreDeploy,
-	updateSite: coreUpdateSite,
+	setSiteMetadata: coreSetSiteMetadata,
 	emitCi: coreEmitCi,
 	statusReport: coreStatusReport,
 	deriveIpnsId: coreDeriveIpnsId,
@@ -458,8 +458,8 @@ export async function run(
 	if (command === 'deploy') {
 		return runDeploy(rest, rc);
 	}
-	if (command === 'update') {
-		return runUpdate(rest, rc);
+	if (command === 'set') {
+		return runSet(rest, rc);
 	}
 	if (command === 'install-ci') {
 		return runInstallCi(rest, rc);
@@ -929,14 +929,14 @@ async function runDeploy(
 	return result.success ? 0 : 1;
 }
 
-/** `update`'s usage hint. */
-const UPDATE_USAGE =
-	'usage: pinnace update [--set-mode ipfs|ipns] [--set-ens-name [<name>] | --unset-ens-name] ' +
+/** `set`'s usage hint. */
+const SET_USAGE =
+	'usage: pinnace set [--set-mode ipfs|ipns] [--set-ens-name [<name>] | --unset-ens-name] ' +
 	'[--set-keep <n> | --unset-keep] <id>';
 
 /**
- * `update [--set-mode ipfs|ipns] [--set-ens-name [<name>] | --unset-ens-name]
- * [--set-keep <n> | --unset-keep] <id>` -> core {@link ClientDeps.updateSite}.
+ * `set [--set-mode ipfs|ipns] [--set-ens-name [<name>] | --unset-ens-name]
+ * [--set-keep <n> | --unset-keep] <id>` -> core {@link ClientDeps.setSiteMetadata}.
  * Changes a live site's metadata WITHOUT rebuilding: reads the current content
  * CID from MFS, writes the resolved `metadata.json`, and in `ipns` mode on a
  * publisher publishes the IPNS record pointing at that existing CID. No CAR is
@@ -948,13 +948,13 @@ const UPDATE_USAGE =
  * resolved value is written to every node.
  *
  * `ipns` mode either produces a working name or refuses: if the publisher holds
- * no key and no `PINNACE_MASTER` is exported, the update REFUSES before writing
+ * no key and no `PINNACE_MASTER` is exported, it REFUSES before writing
  * anything, naming the three options (export the master, run `authorize`, or
  * `--set-mode ipfs`). The CLI derives the key OPTIMISTICALLY (whenever a master
  * is available and the resolved mode COULD be `ipns`), because only the core
  * knows the stored mode and the publisher's keystore.
  */
-async function runUpdate(
+async function runSet(
 	argv: readonly string[],
 	rc: ResolvedRunContext,
 ): Promise<number> {
@@ -963,36 +963,35 @@ async function runUpdate(
 		...ENS_NAME_BOOLEAN_FLAGS,
 		...KEEP_BOOLEAN_FLAGS,
 	]);
-	if (!refuseUnknownFlags('pinnace update', flags, VERB_FLAGS.update, rc))
-		return 1;
-	if (!refuseBareFlags('pinnace update', flags, rc)) return 1;
+	if (!refuseUnknownFlags('pinnace set', flags, VERB_FLAGS.set, rc)) return 1;
+	if (!refuseBareFlags('pinnace set', flags, rc)) return 1;
 	const [siteId] = positionals;
 	if (!siteId) {
-		rc.err(`pinnace update: ${UPDATE_USAGE}`);
+		rc.err(`pinnace set: ${SET_USAGE}`);
 		return 1;
 	}
 	if (positionals.length > 1) {
 		rc.err(
-			`pinnace update: expected exactly one site id, got ` +
-				`${positionals.map((p) => `'${p}'`).join(', ')}\n${UPDATE_USAGE}`,
+			`pinnace set: expected exactly one site id, got ` +
+				`${positionals.map((p) => `'${p}'`).join(', ')}\n${SET_USAGE}`,
 		);
 		return 1;
 	}
-	const ensName = ensNameIntent('pinnace update', flags, siteId, rc);
+	const ensName = ensNameIntent('pinnace set', flags, siteId, rc);
 	if (!ensName) return 1;
-	const mode = siteModeIntentFromFlags('pinnace update', flags, siteId, rc);
+	const mode = siteModeIntentFromFlags('pinnace set', flags, siteId, rc);
 	if (!mode) return 1;
-	const keep = keepIntentFromFlags('pinnace update', flags, rc);
+	const keep = keepIntentFromFlags('pinnace set', flags, rc);
 	if (!keep) return 1;
 
 	const cli = cliOverridesFromFlags(flags, rc);
 	const cfg = resolveConfig({file: rc.file, env: rc.env, cli});
 	if (cfg.hosts.length === 0) {
-		rc.err(`pinnace update: ${NO_HOSTS_HINT}`);
+		rc.err(`pinnace set: ${NO_HOSTS_HINT}`);
 		return 1;
 	}
 
-	let targets: UpdateSiteTarget[];
+	let targets: SetSiteMetadataTarget[];
 	try {
 		targets = cfg.hosts.map((h) => ({
 			baseUrl: h.endpoint,
@@ -1001,7 +1000,7 @@ async function runUpdate(
 		}));
 	} catch (error) {
 		if (error instanceof MissingHostTokenError) {
-			rc.err(`pinnace update: ${error.message}`);
+			rc.err(`pinnace set: ${error.message}`);
 			return 1;
 		}
 		throw error;
@@ -1015,7 +1014,7 @@ async function runUpdate(
 		if (master) derived = rc.deps.deriveIpnsKey({master, keyId: siteId});
 	}
 
-	const input: UpdateSiteInput = {
+	const input: SetSiteMetadataInput = {
 		id: siteId,
 		targets,
 		...(mode.kind === 'set' ? {mode: mode.mode} : {}),
@@ -1024,19 +1023,19 @@ async function runUpdate(
 		...(derived ? {derived} : {}),
 	};
 
-	let result: UpdateSiteResult;
+	let result: SetSiteMetadataResult;
 	try {
-		result = await rc.deps.updateSite(input);
+		result = await rc.deps.setSiteMetadata(input);
 	} catch (error) {
 		// The refusals only the NODES can answer, all pre-flight (nothing was
 		// written anywhere): the site is not on the authority node, nothing can
 		// sign a resolved `ipns` mode, or the key is missing and underivable.
 		if (
-			error instanceof UpdateSiteMissingErr ||
-			error instanceof UpdatePublisherRequiredErr ||
-			error instanceof UpdateDerivedKeyRequiredErr
+			error instanceof SetSiteMissingErr ||
+			error instanceof SetPublisherRequiredErr ||
+			error instanceof SetDerivedKeyRequiredErr
 		) {
-			rc.err(`pinnace update: ${error.message}`);
+			rc.err(`pinnace set: ${error.message}`);
 			return 1;
 		}
 		throw error;
@@ -1049,7 +1048,7 @@ async function runUpdate(
 				mode: result.mode,
 				...(ipns ? {ipns} : {}),
 				success: result.success,
-				// Per-node cid: `update` places no content, so nodes CAN hold
+				// Per-node cid: `set` places no content, so nodes CAN hold
 				// different builds, and a caller acting on the top-level cid needs to
 				// see when that is not the whole story.
 				ok: result.ok.map((node) => ({
@@ -1095,7 +1094,7 @@ async function runUpdate(
 	for (const failure of result.failed) {
 		rc.err(`  FAIL ${failure.baseUrl}: ${failure.error.message}`);
 	}
-	// `update` cannot fix a node holding another build (only deploy or
+	// `set` cannot fix a node holding another build (only deploy or
 	// `pin --from-site` can), so the operator has to be told rather than shown a
 	// single cid that speaks for nodes it does not describe.
 	if (result.diverged.length > 0) {
@@ -1104,7 +1103,7 @@ async function runUpdate(
 				`one above` +
 				`${result.mode === 'ipns' ? ' (the cid the name now resolves to)' : ''}: ` +
 				`${result.diverged.map((n) => `${n.baseUrl} (${n.cid})`).join(', ')}. ` +
-				`update never places content, so it cannot fix that: re-deploy, or ` +
+				`set never places content, so it cannot fix that: re-deploy, or ` +
 				`\`pinnace pin --from-site <id> --as ${siteId}\`.`,
 		);
 	}
@@ -2162,10 +2161,10 @@ const VERB_FLAGS = {
 	},
 	/**
 	 * The same metadata intents as deploy (mode/ensName/keep), plus `--json`. NO
-	 * `--host`: an update fans out to every configured node (it reuses the same
+	 * `--host`: `set` fans out to every configured node (it reuses the same
 	 * metadata resolution + publish as deploy, just without the CAR build).
 	 */
-	update: {
+	set: {
 		exact: [
 			'set-mode',
 			'set-ens-name',

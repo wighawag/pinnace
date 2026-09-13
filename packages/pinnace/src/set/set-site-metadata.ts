@@ -1,9 +1,9 @@
 /**
- * **update** — change a live site's metadata (`mode`, `ensName`, `keep`)
+ * **set** — change a live site's metadata (`mode`, `ensName`, `keep`)
  * WITHOUT rebuilding or re-placing its content.
  *
  * A site deployed in `ipfs` mode whose build artifacts are gone can still be
- * promoted to `ipns` (or get an `ensName`, or a retention policy): `update`
+ * promoted to `ipns` (or get an `ensName`, or a retention policy): `set`
  * reads the site's CURRENT content CID from MFS, writes the resolved metadata
  * to `/sites/<id>/metadata.json`, and — in `ipns` mode on a publisher — publishes
  * the IPNS record pointing at that existing CID. No CAR is built, no content is
@@ -12,7 +12,7 @@
  * This is the command `deploy` cannot be without a source directory: `deploy`
  * builds a CAR and re-imports the (identical) CID on every node to carry a
  * metadata change, which is correct but heavyweight when the operator has only
- * the live site. `update` is the metadata-only path — the same resolution, the
+ * the live site. `set` is the metadata-only path — the same resolution, the
  * same publish, the same pre-flight refusals, but no content round-trip.
  *
  * MODE RESOLUTION, PRE-FLIGHT, and PUBLISH reuse the SAME seams as `deploy` and
@@ -47,11 +47,11 @@ import type {HostRole, SiteMode} from '../config/config-resolution.js';
 const DEFAULT_SITES_DIR = '/sites';
 
 /**
- * One update target: a node's RPC endpoint + its OWN token + its role. In
+ * One `set` target: a node's RPC endpoint + its OWN token + its role. In
  * `ipns` mode only a `publisher` signs the record; a `replica` writes metadata
  * only.
  */
-export interface UpdateSiteTarget {
+export interface SetSiteMetadataTarget {
 	/** The node's Kubo RPC base URL. */
 	baseUrl: string;
 	/** The node's bearer token (each target has its OWN). */
@@ -62,33 +62,33 @@ export interface UpdateSiteTarget {
 	fetchImpl?: FetchLike;
 }
 
-/** Inputs to {@link updateSite}. */
-export interface UpdateSiteInput {
+/** Inputs to {@link setSiteMetadata}. */
+export interface SetSiteMetadataInput {
 	/** The site's single `id`: its MFS entry `/sites/<id>` and, in ipns mode, its key name. */
 	id: string;
 	/**
-	 * The mode this update STATES (`--set-mode`): ipfs or ipns. OMITTED =
-	 * PRESERVE: the update runs in the mode the site is ALREADY stored under on
+	 * The mode this `set` STATES (`--set-mode`): ipfs or ipns. OMITTED =
+	 * PRESERVE: the `set` runs in the mode the site is ALREADY stored under on
 	 * the publisher, and only a site that stores none falls back to
 	 * {@link DEFAULT_SITE_MODE} (`ipfs`).
 	 */
 	mode?: SiteMode;
 	/**
-	 * What this update says about the site's `ensName` in the wrapper metadata.
-	 * Omitted = PRESERVE: the update leaves whatever the site already carries.
+	 * What this `set` says about the site's `ensName` in the wrapper metadata.
+	 * Omitted = PRESERVE: the `set` leaves whatever the site already carries.
 	 */
 	ensName?: EnsNameIntent;
 	/**
-	 * What this update says about the site's RETENTION (`--set-keep <n>` /
+	 * What this `set` says about the site's RETENTION (`--set-keep <n>` /
 	 * `--unset-keep`). Omitted = PRESERVE.
 	 */
 	keep?: SiteKeepIntent;
-	/** The nodes to update (each with its own token); metadata is written on all. */
-	targets: UpdateSiteTarget[];
+	/** The nodes to write to (each with its own token); metadata is written on all. */
+	targets: SetSiteMetadataTarget[];
 	/** The MFS directory sites live under (default `/sites`). */
 	sitesDir?: string;
 	/**
-	 * The per-site key derived from the operator's master + this update's `id`
+	 * The per-site key derived from the operator's master + this `set`'s `id`
 	 * (`deriveIpnsKey`), used ONLY to provision a publisher that does not already
 	 * hold it. Unused in `ipfs` mode, and unused in `ipns` mode when the publisher
 	 * already holds the key (the CI path). The master itself is env-only and
@@ -98,13 +98,13 @@ export interface UpdateSiteInput {
 }
 
 /**
- * `update` was asked to change a site the AUTHORITY node does not hold, so
- * there is nothing to update and—decisively—no stored `mode` to PRESERVE.
+ * `set` was asked to change a site the AUTHORITY node does not hold, so
+ * there is nothing to change and, decisively, no stored `mode` to PRESERVE.
  *
- * This refusal is what keeps `update` from inheriting a default that is wrong
+ * This refusal is what keeps `set` from inheriting a default that is wrong
  * for it. `deploy` may legitimately find the publisher storing nothing (a FIRST
  * deploy, which the same run then creates) and fall back to
- * `DEFAULT_SITE_MODE`. `update` creates nothing, so on this verb "the authority
+ * `DEFAULT_SITE_MODE`. `set` creates nothing, so on this verb "the authority
  * stores nothing" never means "first" — it means DRIFT, and defaulting to
  * `ipfs` there would STATE that demotion to every node that does hold the site,
  * silently stopping a live name from being signed.
@@ -113,7 +113,7 @@ export interface UpdateSiteInput {
  * node that merely would not answer raises `SiteContentUnreadableError`
  * instead, so this error never stands in for an outage.
  */
-export class UpdateSiteMissingError extends Error {
+export class SetSiteMissingError extends Error {
 	constructor(
 		/** The site id that has no content on the authority node. */
 		readonly siteId: string,
@@ -125,7 +125,7 @@ export class UpdateSiteMissingError extends Error {
 		super(
 			`site '${siteId}' has no content on ${baseUrl}` +
 				`${role === 'publisher' ? ' (the publisher)' : ''}, so there is nothing ` +
-				`to update: \`update\` changes the metadata of a site that is already ` +
+				`to set: \`set\` changes the metadata of a site that is already ` +
 				`live, and never places content. ` +
 				(role === 'publisher'
 					? `The publisher is the node that holds the key and signs the name, ` +
@@ -137,18 +137,18 @@ export class UpdateSiteMissingError extends Error {
 				`node at an existing build (\`pinnace pin --from-site <id> --as ` +
 				`${siteId}\`). \`pinnace status\` lists the sites each node holds.`,
 		);
-		this.name = 'UpdateSiteMissingError';
+		this.name = 'SetSiteMissingError';
 	}
 }
 
 /**
- * The update RESOLVED to `ipns` mode but NOTHING in the fan-out can sign it:
- * no `publisher` among the targets. A loud refusal rather than an update that
+ * The `set` RESOLVED to `ipns` mode but NOTHING in the fan-out can sign it:
+ * no `publisher` among the targets. A loud refusal rather than a `set` that
  * records `ipns` mode but leaves the name pointing at the old cid (or not
  * published at all). Mirrors `DeployPublisherRequiredError`, thrown before any
  * node is touched.
  */
-export class UpdatePublisherRequiredError extends Error {
+export class SetPublisherRequiredError extends Error {
 	constructor(
 		readonly siteId: string,
 		readonly stated: boolean,
@@ -157,25 +157,25 @@ export class UpdatePublisherRequiredError extends Error {
 		super(
 			(stated
 				? `--set-mode ipns needs a publisher to sign '${siteId}'`
-				: `'${siteId}' is already stored in \`ipns\` mode, so this update must ` +
+				: `'${siteId}' is already stored in \`ipns\` mode, so this run must ` +
 					`refresh its name, but that needs a publisher to sign it`) +
-				`: none of the ${targets.length} update target(s) can (` +
+				`: none of the ${targets.length} target(s) can (` +
 				`${targets.map((t) => t.role).join(', ')}). A replica is keyless and ` +
-				`only re-announces the publisher's signed record; update with ` +
+				`only re-announces the publisher's signed record; run it with ` +
 				`--set-mode ipfs, or include the publisher.`,
 		);
-		this.name = 'UpdatePublisherRequiredError';
+		this.name = 'SetPublisherRequiredError';
 	}
 }
 
 /**
- * The update RESOLVED to `ipns` mode but a signing target holds NO key for the
- * site and the caller supplied no {@link UpdateSiteInput.derived} key material.
- * A loud refusal BEFORE any node is written to, never a quiet update that
+ * The `set` RESOLVED to `ipns` mode but a signing target holds NO key for the
+ * site and the caller supplied no {@link SetSiteMetadataInput.derived} key material.
+ * A loud refusal BEFORE any node is written to, never a quiet run that
  * records `ipns` mode but leaves the name on the OLD cid. Mirrors
  * `DeployDerivedKeyRequiredError`.
  */
-export class UpdateDerivedKeyRequiredError extends Error {
+export class SetDerivedKeyRequiredError extends Error {
 	constructor(
 		readonly siteId: string,
 		readonly stated: boolean,
@@ -188,25 +188,25 @@ export class UpdateDerivedKeyRequiredError extends Error {
 				(stated
 					? ''
 					: `That mode is what '${siteId}' is already stored under — it is ` +
-						`published under this name and this update must refresh it, or the ` +
+						`published under this name and this run must refresh it, or the ` +
 						`name keeps pointing at the OLD cid. `) +
-				`Export PINNACE_MASTER so this update can import the key, or run ` +
+				`Export PINNACE_MASTER so this run can import the key, or run ` +
 				`\`pinnace authorize ${siteId}\` once from a machine that has the ` +
-				`master, or update with --set-mode ipfs to stop publishing it.`,
+				`master, or re-run with --set-mode ipfs to stop publishing it.`,
 		);
-		this.name = 'UpdateDerivedKeyRequiredError';
+		this.name = 'SetDerivedKeyRequiredError';
 	}
 }
 
 /** A per-target success record. */
-export interface UpdateNodeOk {
+export interface SetNodeOk {
 	/** The node's base URL. */
 	baseUrl: string;
 	/**
 	 * The cid THIS node's wrapper currently resolves to (read from its own MFS).
 	 *
 	 * Per NODE, deliberately: unlike `deploy` — where the one built CAR root
-	 * lands everywhere — `update` places no content, so each node answers with
+	 * lands everywhere — `set` places no content, so each node answers with
 	 * whatever it was last left holding, and nodes CAN legitimately disagree (a
 	 * previous deploy that landed unevenly still exits 0 by the partial-failure
 	 * contract). That disagreement is exactly what an operator reaching for this
@@ -222,20 +222,20 @@ export interface UpdateNodeOk {
 }
 
 /** A per-target failure record. */
-export interface UpdateNodeFailure {
+export interface SetNodeFailure {
 	/** The node's base URL. */
 	baseUrl: string;
-	/** The error that failed this node's update (the site is still up elsewhere). */
+	/** The error that failed this node's write (the site is still up elsewhere). */
 	error: Error;
 }
 
-/** The overall update result: the site's CID, and per-node success/failure. */
-export interface UpdateSiteResult {
+/** The overall result: the site's CID, and per-node success/failure. */
+export interface SetSiteMetadataResult {
 	/**
 	 * The AUTHORITY node's content cid: the cid a resolved `ipns` mode actually
 	 * published, and the one the site's name therefore resolves to.
 	 *
-	 * NOT "the cid, assumed identical everywhere": see {@link UpdateNodeOk.cid}.
+	 * NOT "the cid, assumed identical everywhere": see {@link SetNodeOk.cid}.
 	 * Taking the first successful node's cid instead would let a stale replica
 	 * that happens to sort first report a cid the published name does not point
 	 * at — which a CI step reading `.cid` would then act on.
@@ -245,14 +245,14 @@ export interface UpdateSiteResult {
 	mode: SiteMode;
 	/**
 	 * Nodes whose cid DIFFERS from {@link cid} (they hold another build). Empty
-	 * when the fan-out agrees. Surfaced because `update` cannot fix it — only a
+	 * when the fan-out agrees. Surfaced because `set` cannot fix it — only a
 	 * `deploy` or a `pin --from-site` can — so the operator has to be told.
 	 */
 	diverged: Array<{baseUrl: string; cid: string}>;
 	/** Nodes where the metadata was written (plus publish where applicable). */
-	ok: UpdateNodeOk[];
-	/** Nodes whose update failed (reported, not thrown). */
-	failed: UpdateNodeFailure[];
+	ok: SetNodeOk[];
+	/** Nodes whose write failed (reported, not thrown). */
+	failed: SetNodeFailure[];
 	/** True when at least one node succeeded. */
 	success: boolean;
 }
@@ -263,8 +263,8 @@ export interface UpdateSiteResult {
 type KeystoreProbe =
 	{kind: 'held'; ipns: string} | {kind: 'absent'} | {kind: 'unreachable'};
 
-/** The resolved per-update plan every target is executed against (internal). */
-interface UpdatePlan {
+/** The resolved per-run plan every target is executed against (internal). */
+interface SetPlan {
 	id: string;
 	mode: SiteMode;
 	sitesDir: string;
@@ -275,7 +275,7 @@ interface UpdatePlan {
 }
 
 /**
- * Update a live site's metadata: RESOLVE the mode, then on each target read the
+ * Set a live site's metadata: RESOLVE the mode, then on each target read the
  * current content CID, write the resolved metadata to `metadata.json`, and (in
  * `ipns` mode on a publisher) publish the IPNS record pointing at that CID. No
  * content is built, imported, or re-placed.
@@ -283,17 +283,17 @@ interface UpdatePlan {
  * @throws {EnsNameInferenceError} for a bare `--set-ens-name` on a non-`.eth` id.
  * @throws {SiteMetadataUnreadableError} when the PUBLISHER cannot say what the
  * site stores and the mode/ensName are being PRESERVED.
- * @throws {UpdatePublisherRequiredError} in a resolved `ipns` mode when no
+ * @throws {SetPublisherRequiredError} in a resolved `ipns` mode when no
  * target can sign.
- * @throws {UpdateDerivedKeyRequiredError} in a resolved `ipns` mode when a
+ * @throws {SetDerivedKeyRequiredError} in a resolved `ipns` mode when a
  * signing target holds no key and no `derived` key was supplied.
  */
-export async function updateSite(
-	input: UpdateSiteInput,
-): Promise<UpdateSiteResult> {
+export async function setSiteMetadata(
+	input: SetSiteMetadataInput,
+): Promise<SetSiteMetadataResult> {
 	const {id, targets} = input;
 	if (targets.length === 0) {
-		throw new Error('updateSite requires at least one target node');
+		throw new Error('setSiteMetadata requires at least one target node');
 	}
 	const ensName = input.ensName ?? PRESERVE_ENS_NAME;
 	const keep = input.keep ?? PRESERVE_SITE_KEEP;
@@ -323,7 +323,7 @@ export async function updateSite(
 		id,
 	);
 	if (authorityContent.kind === 'absent') {
-		throw new UpdateSiteMissingError(id, authority.baseUrl, authority.role);
+		throw new SetSiteMissingError(id, authority.baseUrl, authority.role);
 	}
 
 	// The ONE mode this whole fan-out runs in (stated > the authority's stored >
@@ -339,12 +339,12 @@ export async function updateSite(
 	);
 	const mode = resolved.mode;
 
-	// PRE-FLIGHT 2: can this update actually produce the name it was asked for?
+	// PRE-FLIGHT 2: can this `set` actually produce the name it was asked for?
 	// Answered before any node is written to, so a refusal changes nothing.
 	const stated = input.mode !== undefined;
 	const keystores = await assertCanSign(input, mode, stated);
 
-	const plan: UpdatePlan = {
+	const plan: SetPlan = {
 		id,
 		mode,
 		sitesDir,
@@ -357,7 +357,7 @@ export async function updateSite(
 	// Fan out. allSettled so one node's failure never sinks the others.
 	const settled = await Promise.allSettled(
 		targets.map((target, i) =>
-			updateOnNode(
+			setOnNode(
 				target,
 				plan,
 				i === resolved.resolvedFrom ? resolved.metadata : undefined,
@@ -367,8 +367,8 @@ export async function updateSite(
 		),
 	);
 
-	const ok: UpdateNodeOk[] = [];
-	const failed: UpdateNodeFailure[] = [];
+	const ok: SetNodeOk[] = [];
+	const failed: SetNodeFailure[] = [];
 	settled.forEach((outcome, i) => {
 		const baseUrl = targets[i].baseUrl;
 		if (outcome.status === 'fulfilled') {
@@ -390,7 +390,7 @@ export async function updateSite(
 }
 
 /**
- * Resolve the ONE mode this update runs in, from the PUBLISHER target — the
+ * Resolve the ONE mode this `set` runs in, from the PUBLISHER target — the
  * node that holds the key and actually signs. Mirrors deploy's and pin's
  * resolution exactly (one concept, one rule). A STATED mode needs no node; only
  * the `preserve` intent reads, and that read doubles as the publisher's own
@@ -399,7 +399,7 @@ export async function updateSite(
  * — and nothing that could sign — so the default applies.
  */
 async function resolveFanOutMode(
-	input: UpdateSiteInput,
+	input: SetSiteMetadataInput,
 	authorityClient: KuboRpcClient,
 	authorityIndex: number,
 	sitesDir: string,
@@ -424,11 +424,11 @@ async function resolveFanOutMode(
 }
 
 /**
- * The PRE-FLIGHT gate of `ipns` mode: can this update actually produce the name?
+ * The PRE-FLIGHT gate of `ipns` mode: can this `set` actually produce the name?
  * Answered before any node is written to. Mirrors deploy's `assertCanSign`.
  */
 async function assertCanSign(
-	input: UpdateSiteInput,
+	input: SetSiteMetadataInput,
 	mode: SiteMode,
 	stated: boolean,
 ): Promise<Array<KeystoreProbe | undefined>> {
@@ -436,7 +436,7 @@ async function assertCanSign(
 	const none: Array<KeystoreProbe | undefined> = targets.map(() => undefined);
 	if (mode !== 'ipns') return none;
 	if (!targets.some(canSign)) {
-		throw new UpdatePublisherRequiredError(
+		throw new SetPublisherRequiredError(
 			id,
 			stated,
 			targets.map((t) => ({role: t.role})),
@@ -459,7 +459,7 @@ async function assertCanSign(
 	if (!input.derived) {
 		const keyless = probes.findIndex((probe) => probe?.kind === 'absent');
 		if (keyless >= 0) {
-			throw new UpdateDerivedKeyRequiredError(
+			throw new SetDerivedKeyRequiredError(
 				id,
 				stated,
 				targets[keyless].baseUrl,
@@ -469,8 +469,8 @@ async function assertCanSign(
 	return probes;
 }
 
-/** The per-node client every step of the update speaks through. */
-function clientFor(target: UpdateSiteTarget): KuboRpcClient {
+/** The per-node client every step of the `set` speaks through. */
+function clientFor(target: SetSiteMetadataTarget): KuboRpcClient {
 	return new KuboRpcClient({
 		baseUrl: target.baseUrl,
 		token: target.token,
@@ -479,29 +479,29 @@ function clientFor(target: UpdateSiteTarget): KuboRpcClient {
 }
 
 /** Whether this target may SIGN the name: a `publisher`. */
-function canSign(target: UpdateSiteTarget): boolean {
+function canSign(target: SetSiteMetadataTarget): boolean {
 	return target.role === 'publisher';
 }
 
 /**
- * Update ONE node: read the current content CID, write the resolved metadata,
+ * Write ONE node: read the current content CID, write the resolved metadata,
  * and in `ipns` mode on a publisher publish the IPNS record. Rejects on any RPC
  * failure so the caller's allSettled records it as a per-node failure.
  *
  * `metadata` is this node's ALREADY-resolved metadata when the fan-out's mode
  * was read from it (the publisher); every other node resolves its own here.
  */
-async function updateOnNode(
-	target: UpdateSiteTarget,
-	plan: UpdatePlan,
+async function setOnNode(
+	target: SetSiteMetadataTarget,
+	plan: SetPlan,
 	metadata?: ResolvedSiteMetadata,
 	probe?: KeystoreProbe,
 	knownCid?: string,
-): Promise<UpdateNodeOk> {
+): Promise<SetNodeOk> {
 	const {id, mode, sitesDir, ensName} = plan;
 	const client = clientFor(target);
 
-	// 1. This node's CURRENT content cid. The update places no content, but the
+	// 1. This node's CURRENT content cid. The `set` places no content, but the
 	//    cid is what a resolved `ipns` mode publishes and what the report names.
 	//    STRICT: a node that will not answer raises SiteContentUnreadableError,
 	//    never the "has it been deployed here?" absence — telling an operator to
@@ -513,7 +513,7 @@ async function updateOnNode(
 		if (read.kind === 'absent') {
 			// A genuine absence on a NON-authority node is only that node's failure:
 			// it may have been added after this site's last deploy, and the nodes
-			// that do hold it are still updated.
+			// that do hold it are still written.
 			throw new Error(
 				`site '${id}' has no content on ${target.baseUrl} (nothing at ` +
 					`${siteContentPath(sitesDir, id)}). This node has never been ` +
@@ -540,7 +540,7 @@ async function updateOnNode(
 		}));
 
 	// 3. Apply the site's keep policy, exactly as `placeInMfs` does for the
-	//    verbs that DO place content. `update` writes `metadata.json` directly
+	//    verbs that DO place content. `set` writes `metadata.json` directly
 	//    (it has no content to place), so without this an operator's
 	//    `--set-keep 2` would be RECORDED and never ACTED ON — a flag that means
 	//    nothing, and a README that says the policy is applied as each write
@@ -585,8 +585,8 @@ async function updateOnNode(
  */
 async function publish(
 	client: KuboRpcClient,
-	target: UpdateSiteTarget,
-	plan: UpdatePlan,
+	target: SetSiteMetadataTarget,
+	plan: SetPlan,
 	cid: string,
 	probe?: KeystoreProbe,
 ): Promise<string> {
@@ -599,7 +599,7 @@ async function publish(
 				: await lookupIpnsKeyId(client, id);
 	if (!ipns) {
 		if (!derived) {
-			throw new UpdateDerivedKeyRequiredError(id, plan.stated, target.baseUrl);
+			throw new SetDerivedKeyRequiredError(id, plan.stated, target.baseUrl);
 		}
 		const imported = await importIpnsKeyIntoPublisher({
 			client,

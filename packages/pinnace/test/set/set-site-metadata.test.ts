@@ -1,12 +1,12 @@
 import {describe, it, expect} from 'vitest';
 import {MockKuboApi, type RecordedRequest} from '../../src/rpc/mock-kubo.js';
 import {
-	updateSite,
-	UpdateSiteMissingError,
-	UpdatePublisherRequiredError,
-	UpdateDerivedKeyRequiredError,
-	type UpdateSiteTarget,
-} from '../../src/update/update-site.js';
+	setSiteMetadata,
+	SetSiteMissingError,
+	SetPublisherRequiredError,
+	SetDerivedKeyRequiredError,
+	type SetSiteMetadataTarget,
+} from '../../src/set/set-site-metadata.js';
 import {deriveIpnsKey} from '../../src/derive/ipns-key-derivation.js';
 import {
 	parseSiteMetadata,
@@ -17,7 +17,7 @@ import {
 } from '../../src/site/site-wrapper.js';
 
 /**
- * `update` core tests: the verb that changes a LIVE site's metadata WITHOUT
+ * `set` core tests: the verb that changes a LIVE site's metadata WITHOUT
  * rebuilding or re-placing its content.
  *
  * Driven at the Kubo RPC boundary through the recording {@link MockKuboApi}
@@ -110,18 +110,36 @@ function targetWith(
 	mock: MockKuboApi,
 	token: string,
 	role: 'publisher' | 'replica' = 'publisher',
-): UpdateSiteTarget {
+): SetSiteMetadataTarget {
 	return {baseUrl: mock.baseUrl, token, role, fetchImpl: mock.fetchImpl};
 }
 
 const derived = deriveIpnsKey({master: 'test-master', keyId: ID});
+
+/**
+ * Await a call that MUST reject, and hand back the error it rejected with.
+ *
+ * Typed as `Promise<Error>` rather than `.catch(e => e as X)`, which widens to
+ * `Result | X` and made every `error.message` assertion a type error the build
+ * could not see (tests were outside `tsc`'s include until `tsconfig.test.json`).
+ * It also FAILS LOUDLY when the call resolves, so a refusal that silently
+ * stopped refusing cannot pass as a green assertion on an undefined message.
+ */
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+	try {
+		await promise;
+	} catch (error) {
+		return error as Error;
+	}
+	throw new Error('expected the call to reject, but it resolved');
+}
 
 // ---------------------------------------------------------------------------
 
 describe('the premise: metadata changes, content is never touched', () => {
 	it('promotes an ipfs-mode site to ipns and publishes the EXISTING cid', async () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'});
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [targetWith(pub, 'tok-pub')],
@@ -144,7 +162,7 @@ describe('the premise: metadata changes, content is never touched', () => {
 
 	it('NEVER imports, copies or removes content (the whole point of the verb)', async () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'});
-		await updateSite({
+		await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [targetWith(pub, 'tok-pub')],
@@ -160,7 +178,7 @@ describe('the premise: metadata changes, content is never touched', () => {
 
 	it('writes the ensName without disturbing mode or content', async () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipns'});
-		await updateSite({
+		await setSiteMetadata({
 			id: ID,
 			ensName: {kind: 'set', name: 'mysite.eth'},
 			targets: [targetWith(pub, 'tok-pub')],
@@ -187,7 +205,7 @@ describe('B1: a preserved mode is never resolved from a node that lacks the site
 		});
 
 		await expect(
-			updateSite({
+			setSiteMetadata({
 				id: ID,
 				// No `mode`: PRESERVE, which is exactly the dangerous path.
 				keep: {kind: 'set', keep: 3},
@@ -197,7 +215,7 @@ describe('B1: a preserved mode is never resolved from a node that lacks the site
 				],
 				derived,
 			}),
-		).rejects.toBeInstanceOf(UpdateSiteMissingError);
+		).rejects.toBeInstanceOf(SetSiteMissingError);
 
 		// Pre-flight: NOTHING was written to any node.
 		expect(pub.requestsFor('files/write')).toHaveLength(0);
@@ -207,13 +225,15 @@ describe('B1: a preserved mode is never resolved from a node that lacks the site
 
 	it('the refusal names the site and the node, and points at a way forward', async () => {
 		const pub = nodeWithoutSite('https://pub.test');
-		const error = await updateSite({
-			id: ID,
-			targets: [targetWith(pub, 'tok-pub')],
-			derived,
-		}).catch((e: unknown) => e as UpdateSiteMissingError);
+		const error = await rejection(
+			setSiteMetadata({
+				id: ID,
+				targets: [targetWith(pub, 'tok-pub')],
+				derived,
+			}),
+		);
 
-		expect(error).toBeInstanceOf(UpdateSiteMissingError);
+		expect(error).toBeInstanceOf(SetSiteMissingError);
 		expect(error.message).toContain(ID);
 		expect(error.message).toContain('https://pub.test');
 		expect(error.message).toContain('pinnace deploy');
@@ -223,24 +243,26 @@ describe('B1: a preserved mode is never resolved from a node that lacks the site
 describe('B2: an outage is never reported as an absence', () => {
 	it('a down authority raises SiteContentUnreadableError, NOT "not deployed"', async () => {
 		const pub = nodeDown('https://pub.test');
-		const error = await updateSite({
-			id: ID,
-			targets: [targetWith(pub, 'tok-pub')],
-			derived,
-		}).catch((e: unknown) => e as Error);
+		const error = await rejection(
+			setSiteMetadata({
+				id: ID,
+				targets: [targetWith(pub, 'tok-pub')],
+				derived,
+			}),
+		);
 
 		expect(error).toBeInstanceOf(SiteContentUnreadableError);
-		expect(error).not.toBeInstanceOf(UpdateSiteMissingError);
+		expect(error).not.toBeInstanceOf(SetSiteMissingError);
 		// It must say the node did not answer, not that the site is absent.
 		expect(error.message).toContain('NOT the same as the site being absent');
 		expect(pub.requestsFor('files/write')).toHaveLength(0);
 	});
 
-	it('a down NON-authority node fails only itself; the rest still update', async () => {
+	it('a down NON-authority node fails only itself; the rest are still written', async () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipns'});
 		const replica = nodeDown('https://replica.test');
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			ensName: {kind: 'set', name: 'mysite.eth'},
 			targets: [
@@ -266,7 +288,7 @@ describe('S1: --set-keep is APPLIED, not merely recorded', () => {
 			history: ['bafyOld1', 'bafyOld2', 'bafyOld3'],
 		});
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			keep: {kind: 'set', keep: 1},
 			targets: [targetWith(pub, 'tok-pub')],
@@ -291,7 +313,7 @@ describe('S1: --set-keep is APPLIED, not merely recorded', () => {
 		const history = ['bafyOld1', 'bafyOld2', 'bafyOld3'];
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs', history});
 
-		await updateSite({
+		await setSiteMetadata({
 			id: ID,
 			ensName: {kind: 'set', name: 'mysite.eth'},
 			targets: [targetWith(pub, 'tok-pub')],
@@ -315,7 +337,7 @@ describe('S1: --set-keep is APPLIED, not merely recorded', () => {
 			json: {Hash: 'bafyOld2'},
 		});
 
-		await updateSite({
+		await setSiteMetadata({
 			id: ID,
 			keep: {kind: 'set', keep: 0},
 			targets: [targetWith(pub, 'tok-pub')],
@@ -334,7 +356,7 @@ describe('the fan-out resolves ONE mode and states it to every node', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipns'});
 		const replica = nodeHolding('https://replica.test', {mode: 'ipfs'});
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			targets: [
 				targetWith(pub, 'tok-pub', 'publisher'),
@@ -353,7 +375,7 @@ describe('the fan-out resolves ONE mode and states it to every node', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipns'});
 		const replica = nodeHolding('https://replica.test', {mode: 'ipns'});
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [
@@ -375,7 +397,7 @@ describe('the fan-out resolves ONE mode and states it to every node', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'});
 		const replica = nodeHolding('https://replica.test', {mode: 'ipfs'});
 
-		await updateSite({
+		await setSiteMetadata({
 			id: ID,
 			targets: [
 				targetWith(pub, 'tok-pub', 'publisher'),
@@ -403,7 +425,7 @@ describe('B3: the reported cid is the one the name resolves to', () => {
 		);
 		const pub = nodeHolding('https://pub.test', {mode: 'ipns'});
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [
@@ -427,7 +449,7 @@ describe('B3: the reported cid is the one the name resolves to', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'});
 		const replica = nodeHolding('https://replica.test', {mode: 'ipfs'});
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			targets: [
 				targetWith(pub, 'tok-pub', 'publisher'),
@@ -445,13 +467,13 @@ describe('the ipns pre-flight refusals, all before anything is written', () => {
 		const replica = nodeHolding('https://replica.test', {mode: 'ipns'});
 
 		await expect(
-			updateSite({
+			setSiteMetadata({
 				id: ID,
 				mode: 'ipns',
 				targets: [targetWith(replica, 'tok-rep', 'replica')],
 				derived,
 			}),
-		).rejects.toBeInstanceOf(UpdatePublisherRequiredError);
+		).rejects.toBeInstanceOf(SetPublisherRequiredError);
 
 		expect(replica.requestsFor('files/write')).toHaveLength(0);
 	});
@@ -460,13 +482,13 @@ describe('the ipns pre-flight refusals, all before anything is written', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'}, {keys: []});
 
 		await expect(
-			updateSite({
+			setSiteMetadata({
 				id: ID,
 				mode: 'ipns',
 				targets: [targetWith(pub, 'tok-pub')],
 				// no `derived`
 			}),
-		).rejects.toBeInstanceOf(UpdateDerivedKeyRequiredError);
+		).rejects.toBeInstanceOf(SetDerivedKeyRequiredError);
 
 		expect(pub.requestsFor('files/write')).toHaveLength(0);
 		expect(pub.requestsFor('name/publish')).toHaveLength(0);
@@ -476,7 +498,7 @@ describe('the ipns pre-flight refusals, all before anything is written', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'});
 
 		await expect(
-			updateSite({
+			setSiteMetadata({
 				id: ID, // 'mysite', not '.eth'
 				ensName: {kind: 'infer'},
 				targets: [targetWith(pub, 'tok-pub')],
@@ -497,7 +519,7 @@ describe('the ipns pre-flight refusals, all before anything is written', () => {
 		});
 
 		await expect(
-			updateSite({
+			setSiteMetadata({
 				id: ID,
 				targets: [targetWith(pub, 'tok-pub')],
 				derived,
@@ -513,7 +535,7 @@ describe('key provisioning on the publisher', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'}, {keys: []});
 		pub.on('key/import', {json: {Name: ID, Id: IPNS}});
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [targetWith(pub, 'tok-pub')],
@@ -531,7 +553,7 @@ describe('key provisioning on the publisher', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipns'});
 
 		// No `derived` at all: a publisher that already holds the key needs none.
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [targetWith(pub, 'tok-pub')],
@@ -550,7 +572,7 @@ describe('partial failure and the honest empty report', () => {
 		const pub = nodeHolding('https://pub.test', {mode: 'ipfs'});
 		const replica = nodeWithoutSite('https://replica.test');
 
-		const result = await updateSite({
+		const result = await setSiteMetadata({
 			id: ID,
 			targets: [
 				targetWith(pub, 'tok-pub', 'publisher'),
@@ -577,7 +599,7 @@ describe('partial failure and the honest empty report', () => {
 			ensName: '', // the opt-out, which must survive verbatim
 		});
 
-		await updateSite({
+		await setSiteMetadata({
 			id: ID,
 			mode: 'ipns',
 			targets: [

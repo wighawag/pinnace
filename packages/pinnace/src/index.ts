@@ -202,16 +202,16 @@ export {
 	type PrunedCid,
 } from './site/site-retention.js';
 export {
-	updateSite,
-	UpdateSiteMissingError,
-	UpdatePublisherRequiredError,
-	UpdateDerivedKeyRequiredError,
-	type UpdateSiteInput,
-	type UpdateSiteTarget,
-	type UpdateSiteResult,
-	type UpdateNodeOk,
-	type UpdateNodeFailure,
-} from './update/update-site.js';
+	setSiteMetadata,
+	SetSiteMissingError,
+	SetPublisherRequiredError,
+	SetDerivedKeyRequiredError,
+	type SetSiteMetadataInput,
+	type SetSiteMetadataTarget,
+	type SetSiteMetadataResult,
+	type SetNodeOk,
+	type SetNodeFailure,
+} from './set/set-site-metadata.js';
 export {
 	pinExternal,
 	PinStageError,

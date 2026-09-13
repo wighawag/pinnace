@@ -33,7 +33,7 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 	const calls: Record<string, unknown[]> = {
 		provision: [],
 		deploy: [],
-		updateSite: [],
+		setSiteMetadata: [],
 		emitCi: [],
 		statusReport: [],
 		deriveIpnsId: [],
@@ -64,8 +64,8 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 				success: true,
 			};
 		},
-		updateSite: async (input) => {
-			calls.updateSite.push(input);
+		setSiteMetadata: async (input) => {
+			calls.setSiteMetadata.push(input);
 			return {
 				cid: 'bafyStub',
 				mode: input.mode ?? 'ipfs',
@@ -86,6 +86,8 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			calls.emitCi.push(input);
 			return {
 				system: 'github',
+				emit: input.emit ?? 'workflow',
+				writable: (input.emit ?? 'workflow') === 'workflow',
 				workflow: {path: '.github/workflows/pinnace-deploy.yml', contents: ''},
 				secrets: [],
 				vars: [],
@@ -291,9 +293,9 @@ const verbCases: VerbCase[] = [
 		accepts: '--set-mode',
 	},
 	{
-		verb: 'pinnace update',
+		verb: 'pinnace set',
 		valid: [
-			'update',
+			'set',
 			'--set-mode',
 			'ipns',
 			'--set-ens-name',
@@ -308,7 +310,7 @@ const verbCases: VerbCase[] = [
 			'tok-a',
 			'mysite',
 		],
-		dispatch: 'updateSite',
+		dispatch: 'setSiteMetadata',
 		accepts: '--set-mode',
 	},
 	{
@@ -606,9 +608,9 @@ describe('the per-host override flags are PREFIX-shaped and stay accepted', () =
 				dispatch: 'deploy',
 			},
 			{
-				name: 'update',
-				argv: ['update', 'mysite'],
-				dispatch: 'updateSite',
+				name: 'set',
+				argv: ['set', 'mysite'],
+				dispatch: 'setSiteMetadata',
 			},
 			{
 				name: 'pin',

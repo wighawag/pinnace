@@ -1,4 +1,4 @@
-# `update`: a metadata-only verb, and why it REVERSES a documented stance
+# `set`: a metadata-only verb, and why it REVERSES a documented stance
 
 Recorded because this change adds a top-level verb and overturns a statement
 that appeared, identically, in four places: CONTEXT.md's `metadata` glossary
@@ -23,7 +23,7 @@ the only thing that needed to change was `metadata.json` and one `name/publish`.
 Rebuilding an unrelated artifact purely to carry a metadata change is a
 workaround, not a design.
 
-So `update` is not a fourth way to place content. It is the metadata-only verb,
+So `set` is not a fourth way to place content. It is the metadata-only verb,
 and the stance above is narrowed rather than abandoned: metadata is still never
 a file you edit, and it is still written only by a verb that acts on the site.
 
@@ -31,13 +31,13 @@ a file you edit, and it is still written only by a verb that acts on the site.
 
 ### It writes `metadata.json` directly, NOT through `placeInMfs`
 
-`placeInMfs` is the mkdir/rm/cp/write sequence; `update` has nothing to cp. It
+`placeInMfs` is the mkdir/rm/cp/write sequence; `set` has nothing to cp. It
 therefore does the write itself and re-does exactly ONE of the things
 `placeInMfs` wraps around the write: it calls `prunePins`, so `--set-keep` is
 APPLIED and not merely recorded.
 
 That was a defect found in review, not a design: the first cut recorded the
-policy and pruned nothing, which made `pinnace update --set-keep 0 mysite` exit
+policy and pruned nothing, which made `pinnace set --set-keep 0 mysite` exit
 0 having unpinned nothing, while `packages/pinnace/README.md` stated the policy
 is applied as each write happens. A flag that means nothing is precisely what
 this CLI's standing rule forbids.
@@ -55,14 +55,14 @@ copied-from-deploy default WRONG.
 there, because for `deploy` "the publisher stores nothing" legitimately means a
 FIRST deploy, and the same run then creates the site.
 
-`update` creates nothing, so on this verb that condition never means "first" —
+`set` creates nothing, so on this verb that condition never means "first" —
 it means DRIFT (the publisher missed a deploy the replicas got, which the
 partial-failure contract permits and exits 0 on). Inheriting the default there
 produced a real silent-demotion path: the run would resolve `ipfs`, STATE that
 resolved mode to every node, overwrite a replica's stored `ipns`, and stop a
 live name from being signed — at exit 0, with one FAIL line.
 
-So `update` refuses (`UpdateSiteMissingError`) when the AUTHORITY node does not
+So `set` refuses (`UpdateSiteMissingError`) when the AUTHORITY node does not
 hold the site. The authority is the publisher when there is one (it holds the
 key and signs the name, so it is the node a preserved mode must be read from),
 else the first target, so a publisher-less fan-out still resolves from a node
@@ -89,7 +89,7 @@ between the metadata and content halves of a wrapper.
 ### The reported `cid` is the AUTHORITY's, and divergence is NAMED
 
 `deploy`'s `cid` is the one built CAR root, identical everywhere by
-construction. `update` reads a cid PER NODE and places none, so nodes can
+construction. `set` reads a cid PER NODE and places none, so nodes can
 legitimately hold different builds — and the operator reaching for this verb is,
 by hypothesis, in a drifted state.
 
@@ -97,24 +97,36 @@ Reporting `ok[0].cid` (the first cut) let a stale replica that happened to sort
 first report a cid the published name does not point at, which a CI step reading
 `.cid` would then act on. The result now carries the authority's cid (the one a
 resolved `ipns` mode just published) plus a `diverged` list naming every node
-holding something else, surfaced in both `--json` and the human output. `update`
+holding something else, surfaced in both `--json` and the human output. `set`
 cannot fix divergence — only `deploy` or `pin --from-site` can — so it says so.
 
 ## Considered and rejected
 
 - **Extend `deploy` with an optional source dir.** Makes the CAR build
   conditional and gives one verb two meanings; the refusals differ
-  (`deploy` may create, `update` may not), and that difference is exactly where
+  (`deploy` may create, `set` may not), and that difference is exactly where
   the demotion bug lived.
 - **Extend `pin` with a `--from-self` source.** `pin`'s contract is fetch + pin,
   and the whole point here is that there is nothing to fetch.
-- **Put it in the `site` namespace (`site set`).** Defensible, and it was raised
-  in review: `update` reads first as "update the tool" or "update my content",
-  and content is the one thing it never touches. Kept as a top-level verb
-  because it fans out across nodes and can sign a name, which is `deploy`/`pin`
-  shape rather than `site` shape (every `site` verb takes `--host` and acts on
-  ONE node). The name is the weakest part of this change and is worth revisiting
-  before it is depended on.
+- **Calling it `update` (the name it shipped to `main` under, before release).**
+  Rejected on review. In CLI convention (`npm update`, `brew update`, `apt
+  update`) it reads first as "update the tool" and second as "update my site's
+  CONTENT" — the exact opposite of what this verb does, since content is the one
+  thing it never touches. `set` says what happens: it sets stored fields.
+
+  The rename was free: `update` was committed but never published (the last
+  release was 0.17.0 and the changeset for this feature was still pending), so
+  no version on npm ever carried the old name and no alias is needed. That
+  window is why it was worth doing immediately rather than living with it.
+
+- **Putting it in the `site` namespace (`site set`), the reviewer's suggestion.**
+  Rejected, though it is the closer fit by SUBJECT (it manages a site's stored
+  fields, like `site add`). Every verb in that namespace takes `--host` and acts
+  on exactly ONE node (`pickHost` makes `--host` mandatory once a config has
+  two), whereas this one fans out to every node and can sign an IPNS name. That
+  is `deploy`/`pin`/`prune` shape. Putting a fan-out-and-sign verb under a
+  single-node namespace would have created precisely the kind of quiet contract
+  mismatch the rest of this note exists to record.
 
 ## What it touches
 

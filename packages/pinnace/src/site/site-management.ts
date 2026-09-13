@@ -272,7 +272,7 @@ export interface PlaceResult {
  * content anyway.
  *
  * The OTHER way deliberately does NOT come through here: `update`
- * (`../update/update-site.ts`) changes a live site's metadata when the operator
+ * (`../set/set-site-metadata.ts`) changes a live site's metadata when the operator
  * has no build to place, so it writes `metadata.json` DIRECTLY rather than
  * calling this. That bypass costs it the two things this function does around
  * the write, and it re-does exactly one of them: it calls {@link prunePins}
