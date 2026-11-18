@@ -346,3 +346,213 @@ describe('provision: full cloud-init snapshot (publisher)', () => {
 		expect(result.cloudInit.contents).toMatchSnapshot();
 	});
 });
+
+describe('provision: optional self-hosted PATH gateway (--gateway-domain)', () => {
+	const GW = 'ipfs-gw.example.com';
+
+	it('WITHOUT a gateway domain: no gateway vhost, no NoFetch, no GATEWAY_DOMAIN, gateway stays localhost', () => {
+		const {contents} = provision(baseInput()).cloudInit;
+		expect(contents).not.toContain('GATEWAY_DOMAIN');
+		expect(contents).not.toContain('Gateway.NoFetch');
+		expect(contents).not.toContain('reverse_proxy 127.0.0.1:8080');
+		expect(contents).toContain(
+			'cfg Addresses.Gateway "/ip4/127.0.0.1/tcp/8080"',
+		);
+	});
+
+	it('WITH a gateway domain: records it in the env file', () => {
+		const {contents} = provision(baseInput({gatewayDomain: GW})).cloudInit;
+		expect(contents).toContain(`GATEWAY_DOMAIN="${GW}"`);
+	});
+
+	it('WITH a gateway domain: sets Gateway.NoFetch=true (never an open proxy)', () => {
+		const {contents} = provision(baseInput({gatewayDomain: GW})).cloudInit;
+		expect(contents).toMatch(/cfg --json Gateway\.NoFetch true/);
+	});
+
+	it('WITH a gateway domain: emits a third Caddy vhost proxying ONLY /ipfs/ and /ipns/ to 127.0.0.1:8080', () => {
+		const {contents} = provision(baseInput({gatewayDomain: GW})).cloudInit;
+		expect(contents).toContain('${GATEWAY_DOMAIN} {');
+		expect(contents).toContain('@content path /ipfs/* /ipns/*');
+		expect(contents).toContain('reverse_proxy 127.0.0.1:8080');
+		expect(contents).toContain('respond 404');
+	});
+
+	it('keeps the gateway bound to localhost and 8080 unopened even when exposed', () => {
+		const {contents} = provision(baseInput({gatewayDomain: GW})).cloudInit;
+		expect(contents).toContain(
+			'cfg Addresses.Gateway "/ip4/127.0.0.1/tcp/8080"',
+		);
+		expect(contents).not.toMatch(/ufw allow 8080/);
+	});
+
+	it('never mounts the gateway under the dashboard (or API) hostname', () => {
+		expect(() =>
+			provision(baseInput({gatewayDomain: 'ipfs-status.example.com'})),
+		).toThrow(/dashboard/i);
+		expect(() =>
+			provision(baseInput({gatewayDomain: 'IPFS-API.example.com'})),
+		).toThrow(/api/i);
+	});
+
+	it('refuses a gateway domain that is not a bare hostname', () => {
+		for (const bad of [
+			'https://gw.example.com',
+			'gw.example.com/x',
+			'gw "x"',
+			'',
+		]) {
+			expect(() => provision(baseInput({gatewayDomain: bad}))).toThrow(
+				/gateway domain/i,
+			);
+		}
+	});
+
+	it('works on a replica too (serving is role-agnostic)', () => {
+		const {contents} = provision(
+			baseInput({role: 'replica', gatewayDomain: GW}),
+		).cloudInit;
+		expect(contents).toContain(`GATEWAY_DOMAIN="${GW}"`);
+		expect(contents).toContain('reverse_proxy 127.0.0.1:8080');
+	});
+
+	it('snapshots the emitted cloud-init with a gateway', () => {
+		const result = provision(
+			baseInput({
+				bearerToken: 'CHANGE_ME_TO_A_LONG_RANDOM_SECRET',
+				gatewayDomain: GW,
+				gateways: ['https://{cid}.ipfs.dweb.link/'],
+			}),
+		);
+		expect(result.cloudInit.contents).toMatchSnapshot();
+	});
+});
+
+describe('provision: in-place reprovision script (update a live box without recreating it)', () => {
+	/** Every `install -m <mode> -o <u> -g <g> "$STAGE<path>" <path>` line, keyed by path. */
+	function installs(script: string): Map<string, string> {
+		const m = new Map<string, string>();
+		for (const x of script.matchAll(
+			/^install -m (\d+) -o (\S+) -g (\S+) "\$STAGE(\S+)" (\S+)$/gm,
+		)) {
+			expect(x[4]).toBe(x[5]);
+			m.set(x[5], `${x[1]} ${x[2]}:${x[3]}`);
+		}
+		return m;
+	}
+
+	/** The staged body of one file (between its heredoc markers). */
+	function staged(script: string, path: string): string {
+		const start = `stage ${path} <<'PINNACE_BOX_FILE_EOF'\n`;
+		const i = script.indexOf(start);
+		expect(i).toBeGreaterThan(-1);
+		const from = i + start.length;
+		const end = script.indexOf('\nPINNACE_BOX_FILE_EOF\n', from);
+		return script.slice(from, end + 1);
+	}
+
+	it('is returned beside the cloud-init, as a bash script', () => {
+		const {reprovisionScript} = provision(baseInput());
+		expect(reprovisionScript.path).toBe('reprovision.sh');
+		expect(reprovisionScript.contents.startsWith('#!/usr/bin/env bash\n')).toBe(
+			true,
+		);
+		expect(reprovisionScript.contents).toContain('set -euo pipefail');
+	});
+
+	it('writes EXACTLY the files the cloud-init writes, with the same contents/modes/owners', () => {
+		const input = baseInput({gatewayDomain: 'ipfs-gw.example.com'});
+		const {cloudInit, reprovisionScript} = provision(input);
+		const script = reprovisionScript.contents;
+		const yamlPaths = [
+			...cloudInit.contents.matchAll(/^  - path: (\S+)$/gm),
+		].map((m) => m[1]);
+		const inst = installs(script);
+		expect([...inst.keys()]).toEqual(yamlPaths);
+		for (const path of yamlPaths) {
+			// mode/owner identical to the cloud-init entry
+			const entry = new RegExp(
+				`  - path: ${path.replace(/[.]/g, '\\.')}\\n    permissions: "(\\d+)"\\n    owner: (\\S+)\\n`,
+			).exec(cloudInit.contents)!;
+			expect(inst.get(path)).toBe(`${entry[1]} ${entry[2]}`);
+			// contents identical to the cloud-init content block, de-indented
+			const body = staged(script, path);
+			const indented = body
+				.split('\n')
+				.map((l) => (l === '' ? l : `      ${l}`))
+				.join('\n');
+			expect(cloudInit.contents).toContain(`    content: |\n${indented}`);
+		}
+	});
+
+	it('is root-only and refuses to run on a box that was never provisioned', () => {
+		const script = provision(baseInput()).reprovisionScript.contents;
+		expect(script).toContain('id -u');
+		expect(script).toContain('/etc/pinnace-node.env');
+		expect(script).toContain('/var/lib/ipfs/.ipfs/config');
+	});
+
+	it('refuses a NODE_ROLE or bearer-token change unless explicitly allowed', () => {
+		const script = provision(baseInput()).reprovisionScript.contents;
+		expect(script).toContain('PINNACE_ALLOW_ROLE_CHANGE');
+		expect(script).toContain('PINNACE_ALLOW_TOKEN_CHANGE');
+	});
+
+	it('supports a dry run that applies nothing, and never prints the bearer token', () => {
+		const script = provision(baseInput({bearerToken: 'super-secret-token'}))
+			.reprovisionScript.contents;
+		const dry = script.indexOf('PINNACE_DRY_RUN');
+		expect(dry).toBeGreaterThan(-1);
+		// The dry-run exit comes BEFORE the first install.
+		expect(dry).toBeLessThan(script.indexOf('\ninstall -m '));
+		expect(script).toContain('RPC_BEARER_TOKEN=<masked>');
+	});
+
+	it('stops Kubo for the config step and ALWAYS restarts it (trap), then re-applies Caddy, agent and timers', () => {
+		const script = provision(baseInput()).reprovisionScript.contents;
+		const order = [
+			'systemctl stop ipfs.service',
+			'/usr/local/sbin/ipfs-setup.sh',
+			'systemctl start ipfs.service',
+			'/usr/local/sbin/write-caddyfile.sh',
+			'/usr/local/sbin/pinnace-setup.sh',
+			'systemctl enable --now pinnace-status.timer',
+		].map((s) => script.indexOf(`\n${s}`));
+		for (const i of order) expect(i).toBeGreaterThan(-1);
+		expect([...order].sort((a, b) => a - b)).toEqual(order);
+		expect(script).toMatch(
+			/trap '[^']*systemctl start ipfs\.service[^']*' EXIT/,
+		);
+	});
+
+	it('skips the Kubo download when the pinned version is installed, and falls back to the GitHub release otherwise', () => {
+		// A live reprovision hit a dist.ipfs.tech outage: re-downloading an
+		// already-installed Kubo must not depend on that host being up.
+		const {contents} = provision(baseInput()).cloudInit;
+		expect(contents).toContain(
+			'if [ "$(ipfs --version 2>/dev/null || true)" = "ipfs version ${KUBO_VERSION#v}" ]; then',
+		);
+		expect(contents).toContain(
+			'https://github.com/ipfs/kubo/releases/download/${KUBO_VERSION}/${TARBALL}',
+		);
+		expect(contents).toMatch(/curl -fsSL --connect-timeout \d+ --max-time \d+/);
+	});
+
+	it('does NOT touch the firewall, the packages, or the Kubo repo contents', () => {
+		const script = provision(baseInput()).reprovisionScript.contents;
+		expect(script).not.toMatch(/^ufw /m);
+		expect(script).not.toMatch(/^apt-get /m);
+		expect(script).not.toMatch(/rm -rf \/var\/lib\/ipfs/);
+	});
+
+	it('snapshots the reprovision script', () => {
+		const result = provision(
+			baseInput({
+				bearerToken: 'CHANGE_ME_TO_A_LONG_RANDOM_SECRET',
+				gatewayDomain: 'ipfs-gw.example.com',
+				gateways: ['https://{cid}.ipfs.dweb.link/'],
+			}),
+		);
+		expect(result.reprovisionScript.contents).toMatchSnapshot();
+	});
+});

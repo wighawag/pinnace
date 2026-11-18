@@ -804,3 +804,48 @@ describe('renderStatusHtml: long identifiers stay readable in narrow columns', (
 		expect(visible.endsWith('\u2026')).toBe(true);
 	});
 });
+
+describe('renderStatusHtml: own-gateway self-links (GATEWAY_DOMAIN)', () => {
+	it('WITHOUT a gateway domain: no own-gateway field at all', () => {
+		const html = renderStatusHtml(reportFixture());
+		expect(html).not.toContain('own gateway');
+		expect(html).not.toContain('/ipfs/bafyalice');
+	});
+
+	it('WITH a gateway domain: links each cid and ipns name through the node own PATH gateway', () => {
+		const html = renderStatusHtml(reportFixture(), {
+			gatewayDomain: 'ipfs-gw.example.com',
+		});
+		expect(html).toContain('own gateway');
+		expect(html).toContain(
+			'href="https://ipfs-gw.example.com/ipfs/bafyalice/"',
+		);
+		expect(html).toContain('href="https://ipfs-gw.example.com/ipns/k51alice/"');
+		expect(html).toContain('href="https://ipfs-gw.example.com/ipfs/bafybob/"');
+		// bob has no ipns name: no ipns self-link for it
+		expect(html).not.toContain('/ipns/undefined');
+	});
+
+	it('keeps the PUBLIC gateway links and the public health indicator unchanged', () => {
+		const without = renderStatusHtml(reportFixture());
+		const withGw = renderStatusHtml(reportFixture(), {
+			gatewayDomain: 'ipfs-gw.example.com',
+		});
+		for (const html of [without, withGw]) {
+			expect(html).toContain('href="https://bafyalice.ipfs.dweb.link/"');
+			expect(html).toContain('href="https://k51alice.ipns.dweb.link/"');
+			expect(html).toContain('<dt>gateway</dt>');
+		}
+	});
+
+	it('escapes the gateway domain and url-encodes the identifiers', () => {
+		const html = renderStatusHtml(
+			{
+				generated: '2026-07-25T10:11:12.000Z',
+				sites: [{id: 'x', cid: 'a"b<c'}],
+			},
+			{gatewayDomain: 'gw.example.com'},
+		);
+		expect(html).toContain('href="https://gw.example.com/ipfs/a%22b%3Cc/"');
+	});
+});

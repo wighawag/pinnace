@@ -190,6 +190,15 @@ export interface RenderStatusHtmlOptions {
 	 * (a meta-refresh takes an integer).
 	 */
 	refreshSeconds?: number;
+	/**
+	 * This node's own self-hosted PATH gateway hostname (`GATEWAY_DOMAIN`). When
+	 * set, each card gains an `own gateway` field linking the site's cid (and
+	 * ipns name, when it has one) through `https://<this>/ipfs|ipns/...`, so the
+	 * operator can click through to their site on their OWN box. Absent = no such
+	 * field. Links only: the `gateway` health indicator keeps probing a PUBLIC
+	 * gateway, the thing the operator does not control.
+	 */
+	gatewayDomain?: string;
 }
 
 /**
@@ -214,7 +223,9 @@ export function renderStatusHtml(
 	const generated = escapeHtml(report.generated);
 	const cards =
 		report.sites.length > 0
-			? report.sites.map(renderSiteCard).join('\n')
+			? report.sites
+					.map((site) => renderSiteCard(site, options.gatewayDomain))
+					.join('\n')
 			: '\t\t<p class="empty">no sites yet (nothing under the node&apos;s MFS sites dir)</p>';
 
 	return `<!doctype html>
@@ -235,7 +246,11 @@ ${PAGE_CSS}
 	<main>
 ${cards}
 	</main>
-	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites. The <em>origin</em> and <em>freshness</em> fields report what eth.limo resolved and served through its own cache, not a read of the ENS record: a <em>stale</em> cid shortly after a deploy is normal propagation lag.</p>
+	<p class="foot">Static page written by <code>pinnace node status</code> on this node. It shows only this node's own sites.${
+		options.gatewayDomain
+			? ` The <em>own gateway</em> links go through this node's gateway, which serves only content this node already holds; the <em>gateway</em> indicator still probes a public one.`
+			: ''
+	} The <em>origin</em> and <em>freshness</em> fields report what eth.limo resolved and served through its own cache, not a read of the ENS record: a <em>stale</em> cid shortly after a deploy is normal propagation lag.</p>
 <script>
 (function(){
 	var d = document;
@@ -267,7 +282,10 @@ ${cards}
  * {@link copyButton} beside them. The link `href`/`title` and `status.json`
  * carry the full value too, so showing it loses nothing.
  */
-function renderSiteCard(site: StatusPageSite): string {
+function renderSiteCard(
+	site: StatusPageSite,
+	gatewayDomain: string | undefined,
+): string {
 	const cid = site.cid
 		? gatewayLink(
 				site.cid,
@@ -297,6 +315,9 @@ function renderSiteCard(site: StatusPageSite): string {
 	const coreFields = [
 		field('content cid', cid),
 		field('ipns', ipns),
+		...(gatewayDomain
+			? [field('own gateway', ownGatewayLinks(site, gatewayDomain))]
+			: []),
 		field('sequence', sequence),
 		field('mode', mode),
 		field('announced', indicator(site.announced)),
@@ -352,6 +373,26 @@ function renderEnsFields(site: StatusPageSite): string {
 		`\t\t\t<h3 class="group">ENS</h3>\n` +
 		`\t\t\t<dl class="fields">\n${fields}\n\t\t\t</dl>\n`
 	);
+}
+
+/**
+ * The `own gateway` field: plain-text links through this node's PATH gateway,
+ * one for the content cid and one for the ipns name when the site has one.
+ */
+function ownGatewayLinks(site: StatusPageSite, gatewayDomain: string): string {
+	const base = `https://${gatewayDomain}`;
+	const links: string[] = [];
+	if (site.cid)
+		links.push(
+			`<a href="${escapeHtml(`${base}/ipfs/${uriPart(site.cid)}/`)}">/ipfs/ (this cid)</a>`,
+		);
+	if (site.ipns)
+		links.push(
+			`<a href="${escapeHtml(`${base}/ipns/${uriPart(site.ipns)}/`)}">/ipns/ (follows deploys)</a>`,
+		);
+	return links.length > 0
+		? links.join(' · ')
+		: '<span class="none">none</span>';
 }
 
 /** A single `<dt>`/`<dd>` field row inside a `<dl class="fields">`. */

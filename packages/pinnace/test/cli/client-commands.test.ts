@@ -43,6 +43,10 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			return {
 				host: 'hetzner',
 				cloudInit: {path: 'cloud-init.yaml', contents: '#cloud-config\n'},
+				reprovisionScript: {
+					path: 'reprovision.sh',
+					contents: '#!/usr/bin/env bash\n',
+				},
 			};
 		},
 		deploy: async (input) => {
@@ -212,6 +216,54 @@ describe('provision — dispatches to core provision with resolved args', () => 
 		});
 		// It formats the core result (the cloud-init contents) to stdout.
 		expect(out.join('\n')).toContain('#cloud-config');
+	});
+
+	const required = [
+		'provision',
+		'--host',
+		'hetzner',
+		'--api-domain',
+		'ipfs.example.com',
+		'--acme-email',
+		'ops@example.com',
+		'--bearer-token',
+		'tok-123',
+		'--role',
+		'publisher',
+	];
+
+	it('passes --gateway-domain through to the core', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({deps});
+		const code = await run(
+			[...required, '--gateway-domain', 'gw.example.com'],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(calls.provision[0]).toMatchObject({gatewayDomain: 'gw.example.com'});
+	});
+
+	it('--in-place prints the reprovision script INSTEAD of the cloud-init', async () => {
+		const {deps} = recordingDeps();
+		const {context, out} = ctx({deps});
+		// a value-less flag, even when followed by another flag
+		const code = await run(
+			['provision', '--in-place', ...required.slice(1)],
+			context,
+		);
+		expect(code).toBe(0);
+		expect(out.join('\n')).toContain('#!/usr/bin/env bash');
+		expect(out.join('\n')).not.toContain('#cloud-config');
+	});
+
+	it('reports a core refusal (e.g. an invalid gateway domain) as a usage error, not a crash', async () => {
+		const {context, err} = ctx({});
+		const code = await run(
+			[...required, '--gateway-domain', 'https://gw.example.com'],
+			context,
+		);
+		expect(code).toBe(1);
+		expect(err.join('\n')).toMatch(/pinnace provision: invalid gateway domain/);
 	});
 });
 

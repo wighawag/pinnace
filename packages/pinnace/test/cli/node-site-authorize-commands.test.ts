@@ -177,6 +177,20 @@ describe('pinnace node <verb> — assembles the on-box context + invokes runNode
 		]);
 		// a LOCAL Kubo client (this box's daemon) — a real client object.
 		expect(nodeCtx.client).toBeTruthy();
+		// no GATEWAY_DOMAIN in the env: no own-gateway links.
+		expect(nodeCtx.gatewayDomain).toBeUndefined();
+	});
+
+	it('reads the optional GATEWAY_DOMAIN into the context (dashboard self-links)', async () => {
+		const {deps, calls} = recordingDeps();
+		const {context} = ctx({
+			deps,
+			env: {...onBoxEnv, GATEWAY_DOMAIN: 'ipfs-gw.example.com'},
+		});
+		await run(['node', 'status'], context);
+		expect(calls.runNodeCommand[0].ctx.gatewayDomain).toBe(
+			'ipfs-gw.example.com',
+		);
 	});
 
 	it('wires the real status op (makeStatusOp), not the thin defaultStatus', async () => {

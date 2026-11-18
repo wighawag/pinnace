@@ -138,6 +138,27 @@ pinnace provision --host hetzner --role replica \
 
 The emitted cloud-init stands up a hardened node: Kubo as a systemd unit (discoverability tuned so gateways find it), ufw opening 4001 TCP+UDP + 80/443 (never 5001), Caddy HTTPS + bearer API proxy, and it installs a pinned `pinnace` on the box and schedules the on-box agent (`pinnace node republish|mirror|warm|status`) on role-gated systemd timers. The publisher's `republish` timer exports signed records to the dashboard's `/records/`; the replica's `mirror` timer fetches + re-announces them, falling back to cache on outage.
 
+**Optional: your own gateway.** Add `--gateway-domain ipfs-gw.example.com` (to either role) to view your sites on your own box at `https://ipfs-gw.example.com/ipfs/<cid>/` and `/ipns/<name>/`. Caddy gets a third vhost that forwards ONLY `/ipfs/*` and `/ipns/*` to the localhost Kubo gateway (everything else is a 404), and Kubo runs with `Gateway.NoFetch=true`, so it serves only content the node already holds and is never an open proxy for arbitrary CIDs. The dashboard then links each site through it; the `gateway` health indicator still probes a PUBLIC gateway, because that is what you do not control. Without the flag nothing changes: the gateway stays localhost-only. The hostname must differ from the API and dashboard ones (it is refused otherwise), since hosted site JavaScript must not share an origin with the status page. It is a PATH gateway, so all your sites share that one origin (and its `localStorage`/cookies): fine for your own static sites, not for hosting untrusted content.
+
+### Updating a live box (in-place reprovision)
+
+cloud-init only runs at first boot, so a changed provisioning input (adding `--gateway-domain`, a new pinned agent or Kubo version) never reaches an existing box on its own. `--in-place` prints a root bash script instead of the cloud-init: it rewrites the same files (rendered from the same definitions, so the two cannot drift) and re-applies them without recreating the box. Pins, MFS sites and keys are untouched, and so are the firewall and the installed packages. Pass the SAME flags the box was provisioned with, plus what you change:
+
+```sh
+pinnace provision --host hetzner --role publisher \
+  --api-domain ipfs-publisher.example.com \
+  --dashboard-domain ipfs-dash.example.com \
+  --gateway-domain ipfs-gw.example.com \
+  --acme-email you@example.com \
+  --bearer-token "$PINNACE_HOST_PUBLISHER_TOKEN" \
+  --in-place > reprovision.sh
+
+ssh root@<box> 'PINNACE_DRY_RUN=1 bash -s' < reprovision.sh   # preview: env diff (token masked) + changed files
+ssh root@<box> 'bash -s' < reprovision.sh                     # apply
+```
+
+The script refuses to change the box's `NODE_ROLE` or `RPC_BEARER_TOKEN` unless you set `PINNACE_ALLOW_ROLE_CHANGE=1` / `PINNACE_ALLOW_TOKEN_CHANGE=1` (a typo there would flip the role or lock every client out). Kubo is stopped for a few seconds while its config is re-applied (the `ipfs` CLI cannot reach a bearer-guarded running daemon), and a trap restarts it even if a later step fails. It re-applies the WHOLE provisioning: the box ends up on the pinned Kubo and `pinnace` versions of the CLI that generated the script (override with `--kubo-version` / `--pinnace-version`), and any Kubo config you hand-edited that the setup script also sets is reset. Removing `--gateway-domain` later drops the vhost; `Gateway.NoFetch` stays on, which is harmless for a localhost-only gateway.
+
 ### 3. Create the boxes + DNS
 
 Create two servers (e.g. Hetzner Debian 13 / CX22), each with its `cloud-init-*.yaml` as user-data. Then point DNS at their IPv4s so Caddy can obtain certificates:
@@ -146,6 +167,7 @@ Create two servers (e.g. Hetzner Debian 13 / CX22), each with its `cloud-init-*.
 A  ipfs-publisher    <publisher IP>
 A  ipfs-replica-01   <replica IP>
 A  ipfs-dash         <publisher IP>     # the records/dashboard vhost
+A  ipfs-gw           <box IP>           # only if you passed --gateway-domain
 ```
 
 Verify each API answers once DNS + certs are up (bearer required):
@@ -363,7 +385,7 @@ Two things this deliberately does NOT do. It does not hand you the SOURCE's key:
 
 | Command | What it does |
 | --- | --- |
-| `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--publisher-endpoint <url>]` | Emit a node's cloud-init YAML to stdout. |
+| `pinnace provision --host hetzner --role <publisher\|replica> --api-domain <d> --acme-email <e> --bearer-token <t> [--dashboard-domain <d>] [--gateway-domain <d>] [--publisher-endpoint <url>] [--in-place]` | Emit a node's cloud-init YAML to stdout, or with `--in-place` the root script that applies the same provisioning to an ALREADY-running box over SSH. |
 | `pinnace deploy [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--set-keep <n> \| --unset-keep] [--json] <dir> <id>` | Build one CAR, import the same CID into every configured node, pin + place it in the MFS wrapper `/sites/<id>/{content,metadata.json}`; in `ipns` mode publish on the publisher, importing the master-derived key first if it holds none (and REFUSING up-front, before touching any node, if it holds none and none can be derived). Omitted flags preserve the site's stored `mode`/`ensName`. `--json` prints ONE machine-readable object (`cid`, `mode`, `ipns`, and the per-node `ok`/`failed` breakdown) instead of the human lines, for scripts and CI. |
 | `pinnace set [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--set-keep <n> \| --unset-keep] [--json] <id>` | Change a LIVE site's metadata (`mode`, `ensName`, `keep`) WITHOUT rebuilding or re-placing its content: reads the site's current CID from MFS, writes the resolved `metadata.json`, and in `ipns` mode publishes the IPNS record pointing at that existing CID. The same mode/ensName/keep flags as `deploy` and `pin`, resolved the same way (stated > stored > default; omitting preserves). Use this to promote an `ipfs`-mode site to `ipns` (or set an ENS name, or a retention policy) when you no longer have the build artifacts — `pinnace set --set-mode ipns --set-ens-name mysite.eth mysite`. |
 | `pinnace pin <cid> \| --from-ipns <source> \| --from-site <id> --as <name> [--set-mode ipfs\|ipns] [--set-ens-name [<name>] \| --unset-ens-name] [--host <name>] [--no-recursive]` | Fetch + pin content you only have an ADDRESS for on every configured node, tracked in the MFS wrapper `/sites/<name>/` so it is warmed and shows in `status`. The source is EXACTLY ONE of: the positional `<cid>`; `--from-ipns <source>`, which resolves an existing IPNS/DNSLink name to the cid it points at now (a snapshot, not a follow); or `--from-site <id>`, which PROMOTES the current cid of a site your nodes already hold (the staging to live step, read on one node and fanned out). With `--set-mode ipns` it ALSO publishes the pinned CID under YOUR master-derived key on the publisher, so you get a stable `ipns://<id>` pointer to content you mirror (re-pin a newer CID under the same `--as <name>` and the name follows), which is the one-command migration onto your own boxes. Needs the content to be retrievable at pin time; `pin/add` blocks while Kubo fetches. Remove it again with `pinnace site remove <name>`. |

@@ -712,9 +712,14 @@ function parseArgs(
  * generator's named knobs and the pinned `pinnace` agent defaults to the
  * version of THIS CLI (so a box installs the agent matching its generator);
  * all three are overridable per-box via these flags.
+ *
+ * `--gateway-domain <d>` adds the optional self-hosted PATH gateway vhost.
+ * `--in-place` prints the reprovision SCRIPT instead of the cloud-init: the same
+ * files, applied over SSH to an ALREADY-provisioned box (cloud-init only runs
+ * at first boot), so a changed input reaches a live box without recreating it.
  */
 function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
-	const {flags} = parseArgs(argv);
+	const {flags} = parseArgs(argv, PROVISION_BOOLEAN_FLAGS);
 	if (!refuseUnknownFlags('pinnace provision', flags, VERB_FLAGS.provision, rc))
 		return 1;
 	if (!refuseBareFlags('pinnace provision', flags, rc)) return 1;
@@ -750,16 +755,30 @@ function runProvision(argv: readonly string[], rc: ResolvedRunContext): number {
 	};
 	if (flags['dashboard-domain'])
 		input.dashboardDomain = flags['dashboard-domain'];
+	if (flags['gateway-domain']) input.gatewayDomain = flags['gateway-domain'];
 	if (flags['publisher-endpoint'])
 		input.publisherEndpoint = flags['publisher-endpoint'];
 	if (flags['kubo-version']) input.kuboVersion = flags['kubo-version'];
 	if (flags['pinnace-version']) input.pinnaceVersion = flags['pinnace-version'];
 	if (flags['node-major']) input.nodeMajor = flags['node-major'];
 
-	const result = rc.deps.provision(input);
-	rc.out(result.cloudInit.contents);
+	let result: ProvisionResult;
+	try {
+		result = rc.deps.provision(input);
+	} catch (e) {
+		rc.err(`pinnace provision: ${(e as Error).message}`);
+		return 1;
+	}
+	rc.out(
+		flags['in-place']
+			? result.reprovisionScript.contents
+			: result.cloudInit.contents,
+	);
 	return 0;
 }
+
+/** `provision`'s value-less flag: print the in-place script, not the cloud-init. */
+const PROVISION_BOOLEAN_FLAGS = ['in-place'] as const;
 
 /**
  * `deploy [--set-mode <m>] [--set-ens-name [<name>] | --unset-ens-name] <dir>
@@ -2137,10 +2156,12 @@ const VERB_FLAGS = {
 			'bearer-token',
 			'role',
 			'dashboard-domain',
+			'gateway-domain',
 			'publisher-endpoint',
 			'kubo-version',
 			'pinnace-version',
 			'node-major',
+			...PROVISION_BOOLEAN_FLAGS,
 		],
 	},
 	/**
@@ -2541,6 +2562,8 @@ async function runNodeCli(
 	if (env['RECORDS_DIR']) ctx.recordsDir = env['RECORDS_DIR'];
 	if (env['CACHE_DIR']) ctx.cacheDir = env['CACHE_DIR'];
 	if (env['DASHBOARD_DIR']) ctx.dashboardDir = env['DASHBOARD_DIR'];
+	// Optional: only a box provisioned with --gateway-domain has it.
+	if (env['GATEWAY_DOMAIN']) ctx.gatewayDomain = env['GATEWAY_DOMAIN'];
 	if (env['PUBLISHER_ENDPOINT'])
 		ctx.publisherEndpoint = env['PUBLISHER_ENDPOINT'];
 	const gateways = splitWarmGateways(env['WARM_GATEWAYS']);

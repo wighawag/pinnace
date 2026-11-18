@@ -71,6 +71,10 @@ function recordingDeps(): {deps: ClientDeps; calls: Record<string, unknown[]>} {
 			return {
 				host: 'hetzner',
 				cloudInit: {path: 'cloud-init.yaml', contents: '#cloud-config\n'},
+				reprovisionScript: {
+					path: 'reprovision.sh',
+					contents: '#!/usr/bin/env bash\n',
+				},
 			};
 		},
 		emitCi: (input) => {

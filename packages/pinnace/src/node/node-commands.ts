@@ -301,6 +301,13 @@ export interface NodeCommandContext {
 	cacheDir?: string;
 	/** Where `status` writes its dashboard outputs (`status.json` + `index.html`). */
 	dashboardDir?: string;
+	/**
+	 * This box's own self-hosted PATH gateway hostname (`GATEWAY_DOMAIN`), when
+	 * provisioned with one. Used ONLY for human self-links on the dashboard; the
+	 * health probes stay on public gateways (measuring what you control tells
+	 * you least).
+	 */
+	gatewayDomain?: string;
 	/** Injected publisher-record fetch (replica); defaults to a `fetch` call. */
 	publisherFetch?: PublisherFetch;
 	/** Injected gateway warm fetch; defaults to a `fetch` range request. */
@@ -544,7 +551,10 @@ async function writeStatusReport(
 	);
 	await writeFile(
 		join(ctx.dashboardDir, 'index.html'),
-		renderStatusHtml({peerId: result.peerId, generated, sites: result.sites}),
+		renderStatusHtml(
+			{peerId: result.peerId, generated, sites: result.sites},
+			ctx.gatewayDomain ? {gatewayDomain: ctx.gatewayDomain} : {},
+		),
 	);
 }
 

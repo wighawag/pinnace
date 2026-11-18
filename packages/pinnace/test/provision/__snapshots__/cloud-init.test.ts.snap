@@ -123,12 +123,32 @@ write_files:
 
       ARCH="$(dpkg --print-architecture)"   # amd64 / arm64
       TARBALL="kubo_\${KUBO_VERSION}_linux-\${ARCH}.tar.gz"
-      URL="https://dist.ipfs.tech/kubo/\${KUBO_VERSION}/\${TARBALL}"
-
-      cd /tmp
-      curl -fsSL "$URL" -o "$TARBALL"
-      tar -xzf "$TARBALL"
-      bash kubo/install.sh
+      # Skip the download when the pinned version is already installed (an
+      # in-place reprovision): nothing to change, and no dependency on the
+      # download hosts being up. Otherwise try dist.ipfs.tech, then the GitHub
+      # release (same tarball), each with a bounded timeout so an outage on one
+      # cannot hang the boot.
+      if [ "$(ipfs --version 2>/dev/null || true)" = "ipfs version \${KUBO_VERSION#v}" ]; then
+        echo "Kubo \${KUBO_VERSION} already installed; skipping download"
+      else
+        cd /tmp
+        fetched=""
+        for URL in \\
+          "https://dist.ipfs.tech/kubo/\${KUBO_VERSION}/\${TARBALL}" \\
+          "https://github.com/ipfs/kubo/releases/download/\${KUBO_VERSION}/\${TARBALL}"; do
+          if curl -fsSL --connect-timeout 20 --max-time 300 --retry 2 "$URL" -o "$TARBALL"; then
+            fetched=1
+            break
+          fi
+          echo "Kubo download failed from $URL" >&2
+        done
+        if [ -z "$fetched" ]; then
+          echo "Kubo \${KUBO_VERSION}: every download source failed" >&2
+          exit 1
+        fi
+        tar -xzf "$TARBALL"
+        bash kubo/install.sh
+      fi
       ipfs --version
 
       if ! id ipfs >/dev/null 2>&1; then
@@ -291,6 +311,1073 @@ write_files:
       }
       EOF
       fi
+      systemctl restart caddy
+
+  - path: /etc/systemd/system/pinnace-republish.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Republish + export IPNS records (publisher role)
+      After=ipfs.service
+
+      [Service]
+      Type=oneshot
+      User=ipfs
+      Group=ipfs
+      EnvironmentFile=/etc/pinnace-node.env
+      Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node republish
+
+  - path: /etc/systemd/system/pinnace-republish.timer
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Schedule pinnace node republish
+
+      [Timer]
+      OnBootSec=8min
+      OnUnitActiveSec=6h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/pinnace-mirror.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Mirror publisher IPNS records (replica role)
+      After=ipfs.service
+
+      [Service]
+      Type=oneshot
+      User=ipfs
+      Group=ipfs
+      EnvironmentFile=/etc/pinnace-node.env
+      Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node mirror
+
+  - path: /etc/systemd/system/pinnace-mirror.timer
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Schedule pinnace node mirror
+
+      [Timer]
+      OnBootSec=9min
+      OnUnitActiveSec=3h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/pinnace-warm.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Warm public IPFS gateway caches for our CIDs
+      After=ipfs.service
+
+      [Service]
+      Type=oneshot
+      User=ipfs
+      Group=ipfs
+      EnvironmentFile=/etc/pinnace-node.env
+      Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node warm
+
+  - path: /etc/systemd/system/pinnace-warm.timer
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Schedule pinnace node warm
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=30min
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/pinnace-status.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Regenerate the per-site status page + JSON for the dashboard
+      After=ipfs.service
+
+      [Service]
+      Type=oneshot
+      User=ipfs
+      Group=ipfs
+      EnvironmentFile=/etc/pinnace-node.env
+      Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+      # global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+      # but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+      # the unit does not 203/EXEC on a prefix mismatch.
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/env pinnace node status
+
+  - path: /etc/systemd/system/pinnace-status.timer
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Schedule pinnace node status
+
+      [Timer]
+      OnBootSec=6min
+      OnUnitActiveSec=15min
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+# ---------------------------------------------------------------------------
+# Boot sequence
+# ---------------------------------------------------------------------------
+runcmd:
+  # Install Caddy (official repo)
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update
+  - apt-get install -y caddy
+
+  # Firewall: SSH + IPFS swarm + HTTP/HTTPS (for the API). NOT 5001 raw, NOT 8080.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 4001/tcp
+  - ufw allow 4001/udp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  # Install + start Kubo.
+  # Create the datadir FIRST, unconditionally, before anything that needs it.
+  # This MUST happen outside the ipfs.service unit: that unit's
+  # ReadWritePaths=/var/lib/ipfs makes systemd fail namespace setup
+  # (226/NAMESPACE) if the path is missing, before any ExecStartPre could create
+  # it. And it must not depend on ipfs-setup.sh reaching its own mkdir (that
+  # script can abort early). So we guarantee it here, first.
+  - install -d -o ipfs -g ipfs /var/lib/ipfs
+  - /usr/local/sbin/ipfs-setup.sh
+  - systemctl daemon-reload
+  - systemctl enable --now ipfs.service
+
+  # Configure the HTTPS API proxy (no-op if API_DOMAIN unset)
+  - /usr/local/sbin/write-caddyfile.sh
+
+  # Dashboard dir, owned by the ipfs service user (guaranteed to exist: created
+  # by the \`users:\` module above, BEFORE runcmd). Done BEFORE the pinnace
+  # install so a transient install failure can never skip it.
+  - install -d -o ipfs -g ipfs /var/www/ipfs-dash
+
+  # Install the pinned pinnace binary (the box runs the same CLI as the client).
+  # BOOT-SAFE: \`|| true\` so a transient npm/registry failure does NOT abort the
+  # boot (Kubo, the firewall and Caddy are already up). Re-run
+  # /usr/local/sbin/pinnace-setup.sh manually to retry; the timers below pick it
+  # up on their next tick once the binary is present.
+  - /usr/local/sbin/pinnace-setup.sh || true
+
+  # Enable the pinnace node timers. republish self-gates to publisher, mirror to
+  # replica, so enabling all of them on every box is safe (ADR-0002).
+  - systemctl enable --now pinnace-republish.timer
+  - systemctl enable --now pinnace-mirror.timer
+  - systemctl enable --now pinnace-warm.timer
+  - systemctl enable --now pinnace-status.timer
+
+# =============================================================================
+# NOTES
+# -----
+# 1. DNS: point an A record (API_DOMAIN) at this box's IPv4 BEFORE first boot,
+#    or re-run /usr/local/sbin/write-caddyfile.sh after DNS propagates.
+# 2. Verify discoverability from OUTSIDE the box after ~15 min:
+#       https://delegated-ipfs.dev/routing/v1/providers/<CID>
+#    Your PeerID should appear in the providers list.
+# =============================================================================
+"
+`;
+
+exports[`provision: in-place reprovision script (update a live box without recreating it) > snapshots the reprovision script 1`] = `
+"#!/usr/bin/env bash
+# =============================================================================
+# IN-PLACE reprovision of an EXISTING pinnace hetzner node. Generated by
+# \`pinnace provision --host hetzner ... --in-place\`.
+#
+# cloud-init only runs at first boot, so a changed provisioning input (e.g. a
+# new --gateway-domain) never reaches a live box on its own. This script
+# rewrites every file the first-boot cloud-init wrote (same definitions, so the
+# two cannot drift) and re-applies them: Kubo config + the pinned Kubo version,
+# the Caddyfile, the pinned pinnace agent, and the timers.
+#
+# It does NOT touch the Kubo repo contents (pins, MFS sites, keys), the
+# firewall, or the installed packages.
+#
+# Pass the SAME flags the box was provisioned with, plus what you change.
+# Run it as root ON the box:
+#   pinnace provision ... --in-place > reprovision.sh
+#   ssh root@<box> 'PINNACE_DRY_RUN=1 bash -s' < reprovision.sh   # preview
+#   ssh root@<box> 'bash -s' < reprovision.sh                     # apply
+#
+# Guards: it refuses to change NODE_ROLE or RPC_BEARER_TOKEN unless
+# PINNACE_ALLOW_ROLE_CHANGE=1 / PINNACE_ALLOW_TOKEN_CHANGE=1 is set, since a
+# typo there would flip the box's role or lock every client out.
+# Kubo is briefly STOPPED for the config step; a trap restarts it even if a
+# later step fails.
+# =============================================================================
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "reprovision: must run as root" >&2
+  exit 1
+fi
+for required in /etc/pinnace-node.env /var/lib/ipfs/.ipfs/config; do
+  if [ ! -e "$required" ]; then
+    echo "reprovision: $required is missing: this is not a provisioned pinnace node (use the cloud-init for a new box)" >&2
+    exit 1
+  fi
+done
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+
+# --- 1. Stage every file (nothing on the box changes yet) --------------------
+stage() { mkdir -p "$STAGE$(dirname "$1")"; cat > "$STAGE$1"; }
+
+stage /etc/pinnace-node.env <<'PINNACE_BOX_FILE_EOF'
+API_DOMAIN="ipfs-api.example.com"
+DASH_DOMAIN="ipfs-status.example.com"
+GATEWAY_DOMAIN="ipfs-gw.example.com"
+API_CORS_ORIGINS="https://ipfs-status.example.com"
+ACME_EMAIL="you@example.com"
+RPC_BEARER_TOKEN="CHANGE_ME_TO_A_LONG_RANDOM_SECRET"
+
+# Gateways to warm through. {cid} is replaced with each site's current CID
+# by \`pinnace node warm\`, which AUTO-DISCOVERS sites from MFS (\${SITES_DIR}).
+# Any MFS entry whose name ends in .eth is ALSO warmed via eth.limo.
+WARM_GATEWAYS="https://{cid}.ipfs.dweb.link/"
+
+# MFS directory that holds your sites (one entry per site).
+SITES_DIR="/sites"
+
+# On-box PATHS the \`pinnace node\` verbs read (they assemble their
+# NodeCommandContext from these keys):
+#   DASHBOARD_DIR  - where \`node status\` writes status.json (machine) and
+#                    index.html (the human status page served at the vhost
+#                    ROOT); the dashboard vhost \${DASH_DOMAIN} serves this
+#                    dir.
+#   RECORDS_DIR    - where \`node republish\` (publisher) EXPORTS the signed
+#                    record; UNDER the dashboard dir so it is served at
+#                    \${DASH_DOMAIN}/records/<id>.ipns-record, exactly where a
+#                    replica's PUBLISHER_ENDPOINT + /records/ fetch looks.
+#   CACHE_DIR      - where \`node mirror\` (replica) CACHES the last good
+#                    record for the publisher-outage fallback (under the
+#                    ipfs user's writable home).
+DASHBOARD_DIR="/var/www/ipfs-dash"
+RECORDS_DIR="/var/www/ipfs-dash/records"
+CACHE_DIR="/var/lib/ipfs/records-cache"
+
+# Role: "publisher" holds IPNS keys and signs/exports records; "replica"
+# holds NO key and MIRRORS the publisher's signed records. The pinnace node
+# timers self-gate on this, so scheduling all timers on every box is safe.
+NODE_ROLE="publisher"
+
+# REPLICA ONLY: where to fetch the publisher's exported signed records.
+PUBLISHER_ENDPOINT=""
+
+KUBO_VERSION="v0.38.1"
+
+# Node.js major installed via NodeSource (setup_<major>.x) and the PINNED
+# pinnace version installed on the box. Both are reproducible: the same
+# cloud-init always installs the same agent on the same runtime.
+NODE_MAJOR="22"
+PINNACE_VERSION="9.9.9"
+PINNACE_BOX_FILE_EOF
+
+stage /usr/local/sbin/ipfs-setup.sh <<'PINNACE_BOX_FILE_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/pinnace-node.env
+
+# cloud-init runs runcmd with NO HOME in the environment, and the ipfs
+# binary REFUSES to run without it (Error: HOME is not defined) because it
+# resolves HOME/.config/ipfs for the nopfs denylists. Under set -e that
+# aborts this script at the very first ipfs call (ipfs --version), before
+# the user/datadir/repo are set up, leaving the box crash-looping. Set a
+# default for the whole script; the per-user calls below override it with
+# the ipfs user home.
+export HOME="\${HOME:-/root}"
+
+ARCH="$(dpkg --print-architecture)"   # amd64 / arm64
+TARBALL="kubo_\${KUBO_VERSION}_linux-\${ARCH}.tar.gz"
+# Skip the download when the pinned version is already installed (an
+# in-place reprovision): nothing to change, and no dependency on the
+# download hosts being up. Otherwise try dist.ipfs.tech, then the GitHub
+# release (same tarball), each with a bounded timeout so an outage on one
+# cannot hang the boot.
+if [ "$(ipfs --version 2>/dev/null || true)" = "ipfs version \${KUBO_VERSION#v}" ]; then
+  echo "Kubo \${KUBO_VERSION} already installed; skipping download"
+else
+  cd /tmp
+  fetched=""
+  for URL in \\
+    "https://dist.ipfs.tech/kubo/\${KUBO_VERSION}/\${TARBALL}" \\
+    "https://github.com/ipfs/kubo/releases/download/\${KUBO_VERSION}/\${TARBALL}"; do
+    if curl -fsSL --connect-timeout 20 --max-time 300 --retry 2 "$URL" -o "$TARBALL"; then
+      fetched=1
+      break
+    fi
+    echo "Kubo download failed from $URL" >&2
+  done
+  if [ -z "$fetched" ]; then
+    echo "Kubo \${KUBO_VERSION}: every download source failed" >&2
+    exit 1
+  fi
+  tar -xzf "$TARBALL"
+  bash kubo/install.sh
+fi
+ipfs --version
+
+if ! id ipfs >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir /var/lib/ipfs --shell /usr/sbin/nologin ipfs
+fi
+install -d -o ipfs -g ipfs /var/lib/ipfs
+
+export IPFS_PATH=/var/lib/ipfs/.ipfs
+# HOME must be passed to every sudo -u ipfs invocation: sudo does not
+# inherit it, and the ipfs binary aborts (Error: HOME is not defined) since
+# it resolves HOME/.config/ipfs for the nopfs denylists. Without this,
+# ipfs init fails under set -e and aborts this whole script before the
+# datadir/config are set up (the box then crash-loops). Point it at the
+# ipfs user home (the datadir root).
+IPFS_HOME=/var/lib/ipfs
+if [ ! -f "$IPFS_PATH/config" ]; then
+  # 'server' profile disables local-network announce (good for a datacenter box)
+  sudo -u ipfs env IPFS_PATH="$IPFS_PATH" HOME="$IPFS_HOME" ipfs init --profile server
+fi
+
+cfg() { sudo -u ipfs env IPFS_PATH="$IPFS_PATH" HOME="$IPFS_HOME" ipfs config "$@"; }
+
+# --- Reachability: bind API + gateway to localhost only (NEVER public) ---
+cfg Addresses.API   "/ip4/127.0.0.1/tcp/5001"
+cfg Addresses.Gateway "/ip4/127.0.0.1/tcp/8080"
+
+# --- Self-hosted PATH gateway (GATEWAY_DOMAIN). Caddy exposes the gateway
+# publicly, so it must serve ONLY what this node already holds: NoFetch
+# refuses to fetch any other CID from the network. Without it the public
+# vhost would be an open proxy for arbitrary IPFS content (bandwidth, disk
+# and legal exposure on your domain). Load-bearing; not a tunable.
+cfg --json Gateway.NoFetch true
+
+# --- Discoverability: keep provider records fresh so gateways find us ---
+cfg --json Routing.AcceleratedDHTClient true
+cfg Routing.Type "auto"
+# Re-announce everything we serve via the Kubo 0.38 Provide.* config (the
+# pre-0.38 keys FATAL the daemon at boot). Only Provide.Strategy is set: on
+# Kubo 0.38.1 the interval sub-key is not a settable config path (ipfs
+# config errors "not found / maybe use --json" even WITH --json), and under
+# set -e that aborts this whole setup script. It is optional with a sane
+# built-in default, so we leave it unset.
+cfg Provide.Strategy "all"
+
+# --- Resource hygiene for a small box ---
+cfg Datastore.StorageMax "40GB"
+cfg --json Swarm.ConnMgr.HighWater 200
+cfg --json Swarm.ConnMgr.LowWater  100
+
+# --- RPC API auth: require a bearer token even on localhost ---
+cfg --json API.Authorizations "{
+  \\"uploader\\": {
+    \\"AuthSecret\\": \\"bearer:\${RPC_BEARER_TOKEN}\\",
+    \\"AllowedPaths\\": [\\"/api/v0\\"]
+  }
+}"
+
+cfg --json API.HTTPHeaders.Access-Control-Allow-Origin  "[\\"*\\"]"
+cfg --json API.HTTPHeaders.Access-Control-Allow-Methods "[\\"POST\\"]"
+cfg --json API.HTTPHeaders.Access-Control-Allow-Headers "[\\"Authorization\\"]"
+
+chown -R ipfs:ipfs /var/lib/ipfs
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/ipfs.service <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=IPFS Kubo daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ipfs
+Group=ipfs
+Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+# HOME must point at the ipfs user's home (inside ReadWritePaths). Kubo's
+# nopfs plugin resolves $HOME/.config/ipfs/denylists; with HOME unset it
+# falls back under /home/ipfs, which ProtectHome=true HIDES, so the daemon
+# dies at startup with "denylists: permission denied". Setting HOME here
+# keeps that lookup inside the writable datadir.
+Environment=HOME=/var/lib/ipfs
+# NOTE: the datadir /var/lib/ipfs is created by a runcmd step BEFORE this
+# unit is enabled (see runcmd) — NOT via ExecStartPre. ReadWritePaths=
+# /var/lib/ipfs makes systemd set up the mount namespace (referencing that
+# path) BEFORE running any Exec* line, including ExecStartPre — even an
+# ExecStartPre=+ one — so if the path is missing, namespace setup fails
+# with 226/NAMESPACE and the ExecStartPre can never create it (a catch-22).
+# The path must therefore exist before the unit starts, guaranteed outside
+# the unit.
+ExecStart=/usr/local/bin/ipfs daemon --migrate=true --enable-gc
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ipfs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+PINNACE_BOX_FILE_EOF
+
+stage /usr/local/sbin/pinnace-setup.sh <<'PINNACE_BOX_FILE_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/pinnace-node.env
+# Install Node.js (for npm) then the PINNED pinnace binary globally. The
+# on-box timers invoke \`pinnace node <verb>\`: one codebase, client +
+# on-box. NODE_MAJOR / PINNACE_VERSION come from /etc/pinnace-node.env so
+# the runtime + agent version are reproducible and one-edit overridable.
+# This script is invoked NON-FATALLY at boot (\`|| true\`): a transient
+# npm/registry hiccup must NOT abort provisioning (Kubo, the firewall and
+# Caddy are already up by the time this runs). Re-run it manually to retry.
+if ! command -v npm >/dev/null 2>&1; then
+  curl -fsSL "https://deb.nodesource.com/setup_\${NODE_MAJOR}.x" | bash -
+  apt-get install -y nodejs
+fi
+npm install -g "pinnace@\${PINNACE_VERSION}"
+pinnace version
+PINNACE_BOX_FILE_EOF
+
+stage /usr/local/sbin/write-caddyfile.sh <<'PINNACE_BOX_FILE_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/pinnace-node.env
+if [ -z "\${API_DOMAIN}" ]; then
+  echo "API_DOMAIN not set; skipping Caddy config (API stays localhost-only)."
+  exit 0
+fi
+cat > /etc/caddy/Caddyfile <<EOF
+{
+  email \${ACME_EMAIL}
+}
+
+\${API_DOMAIN} {
+  @cors_preflight method OPTIONS
+  header {
+    Access-Control-Allow-Origin "\${API_CORS_ORIGINS}"
+    Access-Control-Allow-Methods "POST, OPTIONS"
+    Access-Control-Allow-Headers "Authorization, Content-Type"
+    Vary Origin
+  }
+  respond @cors_preflight 204
+
+  # Only the Kubo RPC API. Kubo enforces the bearer token via
+  # API.Authorizations; Caddy just forwards the header.
+  reverse_proxy 127.0.0.1:5001
+}
+EOF
+
+if [ -n "\${DASH_DOMAIN}" ]; then
+cat >> /etc/caddy/Caddyfile <<EOF
+
+\${DASH_DOMAIN} {
+  root * /var/www/ipfs-dash
+  file_server
+}
+EOF
+fi
+
+cat >> /etc/caddy/Caddyfile <<EOF
+
+\${GATEWAY_DOMAIN} {
+  # Self-hosted PATH gateway. Kubo runs with Gateway.NoFetch, so this
+  # serves ONLY content this node already holds.
+  @content path /ipfs/* /ipns/*
+  handle @content {
+    reverse_proxy 127.0.0.1:8080
+  }
+  handle {
+    respond 404
+  }
+}
+EOF
+systemctl restart caddy
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-republish.service <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Republish + export IPNS records (publisher role)
+After=ipfs.service
+
+[Service]
+Type=oneshot
+User=ipfs
+Group=ipfs
+EnvironmentFile=/etc/pinnace-node.env
+Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+# Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+# global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+# but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+# the unit does not 203/EXEC on a prefix mismatch.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pinnace node republish
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-republish.timer <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Schedule pinnace node republish
+
+[Timer]
+OnBootSec=8min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-mirror.service <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Mirror publisher IPNS records (replica role)
+After=ipfs.service
+
+[Service]
+Type=oneshot
+User=ipfs
+Group=ipfs
+EnvironmentFile=/etc/pinnace-node.env
+Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+# Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+# global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+# but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+# the unit does not 203/EXEC on a prefix mismatch.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pinnace node mirror
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-mirror.timer <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Schedule pinnace node mirror
+
+[Timer]
+OnBootSec=9min
+OnUnitActiveSec=3h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-warm.service <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Warm public IPFS gateway caches for our CIDs
+After=ipfs.service
+
+[Service]
+Type=oneshot
+User=ipfs
+Group=ipfs
+EnvironmentFile=/etc/pinnace-node.env
+Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+# Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+# global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+# but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+# the unit does not 203/EXEC on a prefix mismatch.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pinnace node warm
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-warm.timer <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Schedule pinnace node warm
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-status.service <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Regenerate the per-site status page + JSON for the dashboard
+After=ipfs.service
+
+[Service]
+Type=oneshot
+User=ipfs
+Group=ipfs
+EnvironmentFile=/etc/pinnace-node.env
+Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+# Resolve the pinnace bin via PATH rather than a hardcoded prefix: npm's
+# global prefix is /usr on a nodesource install (bin at /usr/bin/pinnace),
+# but /usr/local on others. /usr/bin/env + an explicit PATH covers both, so
+# the unit does not 203/EXEC on a prefix mismatch.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pinnace node status
+PINNACE_BOX_FILE_EOF
+
+stage /etc/systemd/system/pinnace-status.timer <<'PINNACE_BOX_FILE_EOF'
+[Unit]
+Description=Schedule pinnace node status
+
+[Timer]
+OnBootSec=6min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+PINNACE_BOX_FILE_EOF
+
+# --- 2. Guards: never silently flip the role or rotate the token -------------
+env_get() {
+  (
+    set +u
+    . "$1"
+    case "$2" in
+      NODE_ROLE) printf '%s' "\${NODE_ROLE:-}" ;;
+      RPC_BEARER_TOKEN) printf '%s' "\${RPC_BEARER_TOKEN:-}" ;;
+    esac
+  )
+}
+old_role="$(env_get /etc/pinnace-node.env NODE_ROLE)"
+new_role="$(env_get "$STAGE/etc/pinnace-node.env" NODE_ROLE)"
+if [ "$old_role" != "$new_role" ] && [ "\${PINNACE_ALLOW_ROLE_CHANGE:-}" != 1 ]; then
+  echo "reprovision: refusing: NODE_ROLE would change from '$old_role' to '$new_role' (pass the box's current --role, or set PINNACE_ALLOW_ROLE_CHANGE=1)" >&2
+  exit 1
+fi
+if [ "$(env_get /etc/pinnace-node.env RPC_BEARER_TOKEN)" != "$(env_get "$STAGE/etc/pinnace-node.env" RPC_BEARER_TOKEN)" ] && [ "\${PINNACE_ALLOW_TOKEN_CHANGE:-}" != 1 ]; then
+  echo "reprovision: refusing: RPC_BEARER_TOKEN would change (pass the box's current --bearer-token, or set PINNACE_ALLOW_TOKEN_CHANGE=1 to rotate it)" >&2
+  exit 1
+fi
+
+# --- 3. Show what changes (the bearer token is never printed) ----------------
+mask() { sed 's/^RPC_BEARER_TOKEN=.*/RPC_BEARER_TOKEN=<masked>/' "$1"; }
+echo "== /etc/pinnace-node.env =="
+diff -u <(mask /etc/pinnace-node.env) <(mask "$STAGE/etc/pinnace-node.env") || true
+echo "== files =="
+for f in /etc/pinnace-node.env /usr/local/sbin/ipfs-setup.sh /etc/systemd/system/ipfs.service /usr/local/sbin/pinnace-setup.sh /usr/local/sbin/write-caddyfile.sh /etc/systemd/system/pinnace-republish.service /etc/systemd/system/pinnace-republish.timer /etc/systemd/system/pinnace-mirror.service /etc/systemd/system/pinnace-mirror.timer /etc/systemd/system/pinnace-warm.service /etc/systemd/system/pinnace-warm.timer /etc/systemd/system/pinnace-status.service /etc/systemd/system/pinnace-status.timer; do
+  if [ ! -e "$f" ]; then echo "  new      $f"
+  elif cmp -s "$f" "$STAGE$f"; then echo "  same     $f"
+  else echo "  changed  $f"; fi
+done
+if [ "\${PINNACE_DRY_RUN:-}" = 1 ]; then
+  echo "reprovision: dry run, nothing applied"
+  exit 0
+fi
+
+# --- 4. Install the files -----------------------------------------------------
+install -m 0600 -o root -g root "$STAGE/etc/pinnace-node.env" /etc/pinnace-node.env
+install -m 0755 -o root -g root "$STAGE/usr/local/sbin/ipfs-setup.sh" /usr/local/sbin/ipfs-setup.sh
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/ipfs.service" /etc/systemd/system/ipfs.service
+install -m 0755 -o root -g root "$STAGE/usr/local/sbin/pinnace-setup.sh" /usr/local/sbin/pinnace-setup.sh
+install -m 0755 -o root -g root "$STAGE/usr/local/sbin/write-caddyfile.sh" /usr/local/sbin/write-caddyfile.sh
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-republish.service" /etc/systemd/system/pinnace-republish.service
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-republish.timer" /etc/systemd/system/pinnace-republish.timer
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-mirror.service" /etc/systemd/system/pinnace-mirror.service
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-mirror.timer" /etc/systemd/system/pinnace-mirror.timer
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-warm.service" /etc/systemd/system/pinnace-warm.service
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-warm.timer" /etc/systemd/system/pinnace-warm.timer
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-status.service" /etc/systemd/system/pinnace-status.service
+install -m 0644 -o root -g root "$STAGE/etc/systemd/system/pinnace-status.timer" /etc/systemd/system/pinnace-status.timer
+
+# --- 5. Re-apply the Kubo setup with the daemon STOPPED ----------------------
+# The ipfs CLI talks to a RUNNING daemon over its (bearer-guarded) API, so the
+# config step needs it stopped. The trap restarts it whatever happens next.
+trap 'rm -rf "$STAGE"; systemctl daemon-reload || true; systemctl start ipfs.service || true' EXIT
+systemctl stop ipfs.service
+/usr/local/sbin/ipfs-setup.sh
+systemctl daemon-reload
+systemctl start ipfs.service
+trap 'rm -rf "$STAGE"' EXIT
+
+# --- 6. Caddy, dashboard dir, pinned agent, timers ---------------------------
+/usr/local/sbin/write-caddyfile.sh
+install -d -o ipfs -g ipfs /var/www/ipfs-dash
+/usr/local/sbin/pinnace-setup.sh || echo "reprovision: WARNING: the pinnace agent install failed; re-run /usr/local/sbin/pinnace-setup.sh" >&2
+systemctl enable --now pinnace-republish.timer
+systemctl enable --now pinnace-mirror.timer
+systemctl enable --now pinnace-warm.timer
+systemctl enable --now pinnace-status.timer
+# Refresh the dashboard now rather than at the next status tick.
+systemctl start --no-block pinnace-status.service || true
+
+echo "reprovision: done"
+"
+`;
+
+exports[`provision: optional self-hosted PATH gateway (--gateway-domain) > snapshots the emitted cloud-init with a gateway 1`] = `
+"#cloud-config
+# =============================================================================
+# hetzner Cloud -> self-hosted IPFS (Kubo) node for a static website.
+#
+# Generated by \`pinnace provision --host hetzner\`. This is the programmatic
+# successor to the shell \`sed\`-template prototype (superseded).
+#
+# What this gives you:
+#   - Kubo running as a hardened systemd service (user: ipfs)
+#   - Swarm port 4001 (TCP+UDP) open so public gateways can dial you
+#   - RPC API (5001) bound to localhost, exposed ONLY via Caddy HTTPS + bearer
+#   - AcceleratedDHTClient + reprovide tuned so gateways can DISCOVER your node
+#   - The \`pinnace\` binary installed + its on-box subcommands
+#     (\`pinnace node republish|mirror|warm|status\`) scheduled on role-gated
+#     systemd timers. Kubo owns pinning + reprovide; pinnace owns IPNS
+#     republish/export, replica mirror/fallback, gateway warm, and status.
+#     (See docs/adr/0002-on-box-agent-boundary.md.)
+# =============================================================================
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - ca-certificates
+  - ufw
+  - jq
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+
+# ---------------------------------------------------------------------------
+# Service users. cloud-init's \`users:\` module runs BEFORE \`runcmd\`, so the
+# dedicated \`ipfs\` user is GUARANTEED to exist before any boot step uses it
+# (e.g. \`install -o ipfs ...\`). Creating it here (not mid-\`ipfs-setup.sh\`,
+# which is a \`set -e\` block that could abort before its \`useradd\`) closes the
+# first-boot race where a later step hit "invalid user 'ipfs'".
+# \`default\` keeps cloud-init's normal login user; we only ADD \`ipfs\`.
+# ---------------------------------------------------------------------------
+users:
+  - default
+  - name: ipfs
+    system: true
+    home: /var/lib/ipfs
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+
+# ---------------------------------------------------------------------------
+# On-box environment consumed by the pinnace node timers + the setup scripts.
+# ---------------------------------------------------------------------------
+write_files:
+  - path: /etc/pinnace-node.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      API_DOMAIN="ipfs-api.example.com"
+      DASH_DOMAIN="ipfs-status.example.com"
+      GATEWAY_DOMAIN="ipfs-gw.example.com"
+      API_CORS_ORIGINS="https://ipfs-status.example.com"
+      ACME_EMAIL="you@example.com"
+      RPC_BEARER_TOKEN="CHANGE_ME_TO_A_LONG_RANDOM_SECRET"
+
+      # Gateways to warm through. {cid} is replaced with each site's current CID
+      # by \`pinnace node warm\`, which AUTO-DISCOVERS sites from MFS (\${SITES_DIR}).
+      # Any MFS entry whose name ends in .eth is ALSO warmed via eth.limo.
+      WARM_GATEWAYS="https://{cid}.ipfs.dweb.link/"
+
+      # MFS directory that holds your sites (one entry per site).
+      SITES_DIR="/sites"
+
+      # On-box PATHS the \`pinnace node\` verbs read (they assemble their
+      # NodeCommandContext from these keys):
+      #   DASHBOARD_DIR  - where \`node status\` writes status.json (machine) and
+      #                    index.html (the human status page served at the vhost
+      #                    ROOT); the dashboard vhost \${DASH_DOMAIN} serves this
+      #                    dir.
+      #   RECORDS_DIR    - where \`node republish\` (publisher) EXPORTS the signed
+      #                    record; UNDER the dashboard dir so it is served at
+      #                    \${DASH_DOMAIN}/records/<id>.ipns-record, exactly where a
+      #                    replica's PUBLISHER_ENDPOINT + /records/ fetch looks.
+      #   CACHE_DIR      - where \`node mirror\` (replica) CACHES the last good
+      #                    record for the publisher-outage fallback (under the
+      #                    ipfs user's writable home).
+      DASHBOARD_DIR="/var/www/ipfs-dash"
+      RECORDS_DIR="/var/www/ipfs-dash/records"
+      CACHE_DIR="/var/lib/ipfs/records-cache"
+
+      # Role: "publisher" holds IPNS keys and signs/exports records; "replica"
+      # holds NO key and MIRRORS the publisher's signed records. The pinnace node
+      # timers self-gate on this, so scheduling all timers on every box is safe.
+      NODE_ROLE="publisher"
+
+      # REPLICA ONLY: where to fetch the publisher's exported signed records.
+      PUBLISHER_ENDPOINT=""
+
+      KUBO_VERSION="v0.38.1"
+
+      # Node.js major installed via NodeSource (setup_<major>.x) and the PINNED
+      # pinnace version installed on the box. Both are reproducible: the same
+      # cloud-init always installs the same agent on the same runtime.
+      NODE_MAJOR="22"
+      PINNACE_VERSION="9.9.9"
+
+  # -- Kubo installer / initializer -----------------------------------------
+  - path: /usr/local/sbin/ipfs-setup.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/pinnace-node.env
+
+      # cloud-init runs runcmd with NO HOME in the environment, and the ipfs
+      # binary REFUSES to run without it (Error: HOME is not defined) because it
+      # resolves HOME/.config/ipfs for the nopfs denylists. Under set -e that
+      # aborts this script at the very first ipfs call (ipfs --version), before
+      # the user/datadir/repo are set up, leaving the box crash-looping. Set a
+      # default for the whole script; the per-user calls below override it with
+      # the ipfs user home.
+      export HOME="\${HOME:-/root}"
+
+      ARCH="$(dpkg --print-architecture)"   # amd64 / arm64
+      TARBALL="kubo_\${KUBO_VERSION}_linux-\${ARCH}.tar.gz"
+      # Skip the download when the pinned version is already installed (an
+      # in-place reprovision): nothing to change, and no dependency on the
+      # download hosts being up. Otherwise try dist.ipfs.tech, then the GitHub
+      # release (same tarball), each with a bounded timeout so an outage on one
+      # cannot hang the boot.
+      if [ "$(ipfs --version 2>/dev/null || true)" = "ipfs version \${KUBO_VERSION#v}" ]; then
+        echo "Kubo \${KUBO_VERSION} already installed; skipping download"
+      else
+        cd /tmp
+        fetched=""
+        for URL in \\
+          "https://dist.ipfs.tech/kubo/\${KUBO_VERSION}/\${TARBALL}" \\
+          "https://github.com/ipfs/kubo/releases/download/\${KUBO_VERSION}/\${TARBALL}"; do
+          if curl -fsSL --connect-timeout 20 --max-time 300 --retry 2 "$URL" -o "$TARBALL"; then
+            fetched=1
+            break
+          fi
+          echo "Kubo download failed from $URL" >&2
+        done
+        if [ -z "$fetched" ]; then
+          echo "Kubo \${KUBO_VERSION}: every download source failed" >&2
+          exit 1
+        fi
+        tar -xzf "$TARBALL"
+        bash kubo/install.sh
+      fi
+      ipfs --version
+
+      if ! id ipfs >/dev/null 2>&1; then
+        useradd --system --create-home --home-dir /var/lib/ipfs --shell /usr/sbin/nologin ipfs
+      fi
+      install -d -o ipfs -g ipfs /var/lib/ipfs
+
+      export IPFS_PATH=/var/lib/ipfs/.ipfs
+      # HOME must be passed to every sudo -u ipfs invocation: sudo does not
+      # inherit it, and the ipfs binary aborts (Error: HOME is not defined) since
+      # it resolves HOME/.config/ipfs for the nopfs denylists. Without this,
+      # ipfs init fails under set -e and aborts this whole script before the
+      # datadir/config are set up (the box then crash-loops). Point it at the
+      # ipfs user home (the datadir root).
+      IPFS_HOME=/var/lib/ipfs
+      if [ ! -f "$IPFS_PATH/config" ]; then
+        # 'server' profile disables local-network announce (good for a datacenter box)
+        sudo -u ipfs env IPFS_PATH="$IPFS_PATH" HOME="$IPFS_HOME" ipfs init --profile server
+      fi
+
+      cfg() { sudo -u ipfs env IPFS_PATH="$IPFS_PATH" HOME="$IPFS_HOME" ipfs config "$@"; }
+
+      # --- Reachability: bind API + gateway to localhost only (NEVER public) ---
+      cfg Addresses.API   "/ip4/127.0.0.1/tcp/5001"
+      cfg Addresses.Gateway "/ip4/127.0.0.1/tcp/8080"
+
+      # --- Self-hosted PATH gateway (GATEWAY_DOMAIN). Caddy exposes the gateway
+      # publicly, so it must serve ONLY what this node already holds: NoFetch
+      # refuses to fetch any other CID from the network. Without it the public
+      # vhost would be an open proxy for arbitrary IPFS content (bandwidth, disk
+      # and legal exposure on your domain). Load-bearing; not a tunable.
+      cfg --json Gateway.NoFetch true
+
+      # --- Discoverability: keep provider records fresh so gateways find us ---
+      cfg --json Routing.AcceleratedDHTClient true
+      cfg Routing.Type "auto"
+      # Re-announce everything we serve via the Kubo 0.38 Provide.* config (the
+      # pre-0.38 keys FATAL the daemon at boot). Only Provide.Strategy is set: on
+      # Kubo 0.38.1 the interval sub-key is not a settable config path (ipfs
+      # config errors "not found / maybe use --json" even WITH --json), and under
+      # set -e that aborts this whole setup script. It is optional with a sane
+      # built-in default, so we leave it unset.
+      cfg Provide.Strategy "all"
+
+      # --- Resource hygiene for a small box ---
+      cfg Datastore.StorageMax "40GB"
+      cfg --json Swarm.ConnMgr.HighWater 200
+      cfg --json Swarm.ConnMgr.LowWater  100
+
+      # --- RPC API auth: require a bearer token even on localhost ---
+      cfg --json API.Authorizations "{
+        \\"uploader\\": {
+          \\"AuthSecret\\": \\"bearer:\${RPC_BEARER_TOKEN}\\",
+          \\"AllowedPaths\\": [\\"/api/v0\\"]
+        }
+      }"
+
+      cfg --json API.HTTPHeaders.Access-Control-Allow-Origin  "[\\"*\\"]"
+      cfg --json API.HTTPHeaders.Access-Control-Allow-Methods "[\\"POST\\"]"
+      cfg --json API.HTTPHeaders.Access-Control-Allow-Headers "[\\"Authorization\\"]"
+
+      chown -R ipfs:ipfs /var/lib/ipfs
+
+  # -- systemd unit for the daemon (hardened) -------------------------------
+  - path: /etc/systemd/system/ipfs.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=IPFS Kubo daemon
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=ipfs
+      Group=ipfs
+      Environment=IPFS_PATH=/var/lib/ipfs/.ipfs
+      # HOME must point at the ipfs user's home (inside ReadWritePaths). Kubo's
+      # nopfs plugin resolves $HOME/.config/ipfs/denylists; with HOME unset it
+      # falls back under /home/ipfs, which ProtectHome=true HIDES, so the daemon
+      # dies at startup with "denylists: permission denied". Setting HOME here
+      # keeps that lookup inside the writable datadir.
+      Environment=HOME=/var/lib/ipfs
+      # NOTE: the datadir /var/lib/ipfs is created by a runcmd step BEFORE this
+      # unit is enabled (see runcmd) — NOT via ExecStartPre. ReadWritePaths=
+      # /var/lib/ipfs makes systemd set up the mount namespace (referencing that
+      # path) BEFORE running any Exec* line, including ExecStartPre — even an
+      # ExecStartPre=+ one — so if the path is missing, namespace setup fails
+      # with 226/NAMESPACE and the ExecStartPre can never create it (a catch-22).
+      # The path must therefore exist before the unit starts, guaranteed outside
+      # the unit.
+      ExecStart=/usr/local/bin/ipfs daemon --migrate=true --enable-gc
+      Restart=on-failure
+      RestartSec=5
+      LimitNOFILE=65536
+      # hardening
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      ReadWritePaths=/var/lib/ipfs
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # -- pinnace installer: the box runs the SAME binary as the client --------
+  - path: /usr/local/sbin/pinnace-setup.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/pinnace-node.env
+      # Install Node.js (for npm) then the PINNED pinnace binary globally. The
+      # on-box timers invoke \`pinnace node <verb>\`: one codebase, client +
+      # on-box. NODE_MAJOR / PINNACE_VERSION come from /etc/pinnace-node.env so
+      # the runtime + agent version are reproducible and one-edit overridable.
+      # This script is invoked NON-FATALLY at boot (\`|| true\`): a transient
+      # npm/registry hiccup must NOT abort provisioning (Kubo, the firewall and
+      # Caddy are already up by the time this runs). Re-run it manually to retry.
+      if ! command -v npm >/dev/null 2>&1; then
+        curl -fsSL "https://deb.nodesource.com/setup_\${NODE_MAJOR}.x" | bash -
+        apt-get install -y nodejs
+      fi
+      npm install -g "pinnace@\${PINNACE_VERSION}"
+      pinnace version
+
+  # -- Caddy reverse proxy for the HTTPS API (auto TLS) ---------------------
+  - path: /usr/local/sbin/write-caddyfile.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/pinnace-node.env
+      if [ -z "\${API_DOMAIN}" ]; then
+        echo "API_DOMAIN not set; skipping Caddy config (API stays localhost-only)."
+        exit 0
+      fi
+      cat > /etc/caddy/Caddyfile <<EOF
+      {
+        email \${ACME_EMAIL}
+      }
+
+      \${API_DOMAIN} {
+        @cors_preflight method OPTIONS
+        header {
+          Access-Control-Allow-Origin "\${API_CORS_ORIGINS}"
+          Access-Control-Allow-Methods "POST, OPTIONS"
+          Access-Control-Allow-Headers "Authorization, Content-Type"
+          Vary Origin
+        }
+        respond @cors_preflight 204
+
+        # Only the Kubo RPC API. Kubo enforces the bearer token via
+        # API.Authorizations; Caddy just forwards the header.
+        reverse_proxy 127.0.0.1:5001
+      }
+      EOF
+
+      if [ -n "\${DASH_DOMAIN}" ]; then
+      cat >> /etc/caddy/Caddyfile <<EOF
+
+      \${DASH_DOMAIN} {
+        root * /var/www/ipfs-dash
+        file_server
+      }
+      EOF
+      fi
+
+      cat >> /etc/caddy/Caddyfile <<EOF
+
+      \${GATEWAY_DOMAIN} {
+        # Self-hosted PATH gateway. Kubo runs with Gateway.NoFetch, so this
+        # serves ONLY content this node already holds.
+        @content path /ipfs/* /ipns/*
+        handle @content {
+          reverse_proxy 127.0.0.1:8080
+        }
+        handle {
+          respond 404
+        }
+      }
+      EOF
       systemctl restart caddy
 
   - path: /etc/systemd/system/pinnace-republish.service

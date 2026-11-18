@@ -756,6 +756,31 @@ describe('node status — reuses status-report core logic, writes to the dashboa
 		}
 	});
 
+	it('links the node OWN gateway in index.html only when ctx.gatewayDomain is set', async () => {
+		const statusOp: NodeCommandOps['status'] = async () => ({
+			peerId: '12D3KooWpeerself',
+			sites: [{id: 'bob', cid: 'bafybob', ipns: ''}],
+		});
+		for (const gatewayDomain of [undefined, 'ipfs-gw.example.com']) {
+			const {ctx, dir} = await baseContext(mockWithTwoSites(), {
+				ops: {status: statusOp},
+				...(gatewayDomain ? {gatewayDomain} : {}),
+			});
+			try {
+				await runNodeCommand('status', ctx);
+				const html = await readFile(
+					join(ctx.dashboardDir!, 'index.html'),
+					'utf8',
+				);
+				const link = 'href="https://ipfs-gw.example.com/ipfs/bafybob/"';
+				if (gatewayDomain) expect(html).toContain(link);
+				else expect(html).not.toContain(link);
+			} finally {
+				await rm(dir, {recursive: true, force: true});
+			}
+		}
+	});
+
 	it('carries the site metadata into BOTH views, keeping "" distinct from absent', async () => {
 		const mock = mockWithTwoSites();
 		const statusOp: NodeCommandOps['status'] = async () => ({
